@@ -51,9 +51,15 @@ jobs:
         run: |
           echo "正在克隆上游源码..."
           git clone https://github.com/asvow/luci-app-tailscale
-          echo "正在修改配置路径..."
-          sed -i "s|o.default = '/etc/tailscale'|o.default = '/etc/config/tailscale-data'|g" \
+
+          echo "正在修改配置路径 (Lua 后端)..."
+          sed -i "s|/etc/tailscale|/etc/config/tailscale-data|g" \
             luci-app-tailscale/files/luasrc/model/cbi/tailscale.lua
+
+          echo "正在修改配置路径 (JS 前端)..."
+          sed -i "s|/etc/tailscale|/etc/config/tailscale-data|g" \
+            luci-app-tailscale/htdocs/luci-static/resources/view/tailscale/setting.js
+
           echo "配置路径修改完成"
 
       - name: "4️⃣ 构建IPK包"
@@ -62,8 +68,8 @@ jobs:
           echo "开始构建IPK包..."
           mkdir -p ipk-build/control ipk-build/data
           cp -r luci-app-tailscale/files/* ipk-build/data/
+          cp -r luci-app-tailscale/htdocs ipk-build/data/
 
-          # 用 echo 拼接 control 文件，避免 heredoc 引发 YAML 报错
           {
             echo "Package: luci-app-tailscale"
             echo "Version: ${{ steps.check.outputs.latest_version }}-persistent1"
