@@ -1,9 +1,9 @@
-name: "自动构建 Tailscale（持久化配置版）"
+name: "自动构建 Tailscale（持久化配置版，自动识别前后端文件）"
 
 on:
   schedule:
     - cron: "0 2 * * *"  # 每天北京时间10点自动检查
-  workflow_dispatch:      # 支持手动触发
+  workflow_dispatch:
   push:
     branches: ["main"]
 
@@ -46,30 +46,110 @@ jobs:
           echo "need_build = ${{ steps.check.outputs.need_build }}"
           echo "latest_version = ${{ steps.check.outputs.latest_version }}"
 
-      - name: "3️⃣ 克隆并修改源码"
+      - name: "3️⃣ 克隆上游源码并自动识别前后端文件"
         if: ${{ steps.check.outputs.need_build == 'true' }}
+        id: scan
         run: |
+          set -e
           echo "正在克隆上游源码..."
           git clone https://github.com/asvow/luci-app-tailscale
 
-          echo "正在修改配置路径 (Lua 后端)..."
-          sed -i "s|/etc/tailscale|/etc/config/tailscale-data|g" \
-            luci-app-tailscale/files/luasrc/model/cbi/tailscale.lua
+          echo "开始自动识别 LuCI 前端与后端文件..."
+          cd luci-app-tailscale
 
-          echo "正在修改配置路径 (JS 前端)..."
-          sed -i "s|/etc/tailscale|/etc/config/tailscale-data|g" \
-            luci-app-tailscale/htdocs/luci-static/resources/view/tailscale/setting.js
+          # 自动识别前端 JS 视图文件（常见位置：htdocs/.../view/tailscale/*.js）
+          frontend_files=$(grep -RIl --include="*.js" "/etc/tailscale" htdocs 2>/dev/null || true)
+          # 自动识别后端 CBI/Lua 文件（常见位置：files/luasrc/model/cbi/tailscale/*.lua 或 luasrc/...）
+          backend_files=$(grep -RIl --include="*.lua" "/etc/tailscale" files luasrc 2>/dev/null || true)
 
-          echo "配置路径修改完成"
+          echo "前端文件候选列表:"
+          echo "${frontend_files:-<未发现>}"
+          echo "后端文件候选列表:"
+          echo "${backend_files:-<未发现>}"
 
-      - name: "4️⃣ 构建IPK包"
+          # 输出到 GITHUB_OUTPUT 供后续步骤使用
+          echo "frontend_files<<EOF" >> $GITHUB_OUTPUT
+          echo "${frontend_files}" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          echo "backend_files<<EOF" >> $GITHUB_OUTPUT
+          echo "${backend_files}" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+          cd ..
+
+      - name: "4️⃣ 执行路径替换并校验"
         if: ${{ steps.check.outputs.need_build == 'true' }}
         run: |
-          echo "开始构建IPK包..."
-          mkdir -p ipk-build/control ipk-build/data
-          cp -r luci-app-tailscale/files/* ipk-build/data/
-          cp -r luci-app-tailscale/htdocs ipk-build/data/
+          set -e
+          cd luci-app-tailscale
 
+          TARGET="/etc/config/tailscale-data"
+          SOURCE="/etc/tailscale"
+
+          echo "开始替换路径: ${SOURCE} -> ${TARGET}"
+
+          # 对前端文件执行替换
+          if [ -n "${{ steps.scan.outputs.frontend_files }}" ]; then
+            echo "替换前端文件:"
+            printf "%s\n" "${{ steps.scan.outputs.frontend_files }}"
+            printf "%s\n" "${{ steps.scan.outputs.frontend_files }}" | while read -r f; do
+              [ -n "$f" ] && sed -i "s|${SOURCE}|${TARGET}|g" "$f"
+            done
+          else
+            echo "警告：未自动识别到前端文件，尝试常见默认路径回退..."
+            if [ -f "htdocs/luci-static/resources/view/tailscale/setting.js" ]; then
+              sed -i "s|${SOURCE}|${TARGET}|g" htdocs/luci-static/resources/view/tailscale/setting.js
+              echo "已回退替换: htdocs/luci-static/resources/view/tailscale/setting.js"
+            fi
+          fi
+
+          # 对后端文件执行替换
+          if [ -n "${{ steps.scan.outputs.backend_files }}" ]; then
+            echo "替换后端文件:"
+            printf "%s\n" "${{ steps.scan.outputs.backend_files }}"
+            printf "%s\n" "${{ steps.scan.outputs.backend_files }}" | while read -r f; do
+              [ -n "$f" ] && sed -i "s|${SOURCE}|${TARGET}|g" "$f"
+            done
+          else
+            echo "警告：未自动识别到后端文件，尝试常见默认路径回退..."
+            if [ -f "files/luasrc/model/cbi/tailscale.lua" ]; then
+              sed -i "s|${SOURCE}|${TARGET}|g" files/luasrc/model/cbi/tailscale.lua
+              echo "已回退替换: files/luasrc/model/cbi/tailscale.lua"
+            fi
+          fi
+
+          echo "替换完成，开始进行校验..."
+          # 校验至少有一处替换生效
+          count_new=$(grep -RIl "${TARGET}" htdocs files luasrc 2>/dev/null | wc -l || true)
+          count_old=$(grep -RIl "${SOURCE}" htdocs files luasrc 2>/dev/null | wc -l || true)
+          echo "包含新路径的文件数: ${count_new}"
+          echo "仍包含旧路径的文件数: ${count_old}"
+
+          if [ "${count_new}" -eq 0 ]; then
+            echo "错误：未发现任何文件包含新路径 ${TARGET}，替换可能失败"
+            exit 1
+          fi
+
+          echo "校验通过：发现 ${count_new} 个文件已使用持久化路径。"
+          if [ "${count_old}" -gt 0 ]; then
+            echo "提示：仍有 ${count_old} 个文件包含旧路径 ${SOURCE}，请注意是否需要进一步替换。"
+          fi
+
+          cd ..
+
+      - name: "5️⃣ 构建 IPK 包"
+        if: ${{ steps.check.outputs.need_build == 'true' }}
+        run: |
+          set -e
+          echo "开始构建 IPK 包..."
+          mkdir -p ipk-build/control ipk-build/data
+
+          # 拷贝文件内容
+          cp -r luci-app-tailscale/files/* ipk-build/data/ 2>/dev/null || true
+          cp -r luci-app-tailscale/htdocs ipk-build/data/ 2>/dev/null || true
+          cp -r luci-app-tailscale/luasrc ipk-build/data/ 2>/dev/null || true
+
+          # 生成 control 文件（避免 heredoc，用 echo 拼接）
           {
             echo "Package: luci-app-tailscale"
             echo "Version: ${{ steps.check.outputs.latest_version }}-persistent1"
@@ -83,15 +163,26 @@ jobs:
             echo " 配置路径: /etc/config/tailscale-data"
           } > ipk-build/control/control
 
+          # 打包 IPK
           cd ipk-build
           tar -czf control.tar.gz -C control .
           tar -czf data.tar.gz -C data .
           echo "2.0" > debian-binary
           ar r ../luci-app-tailscale-persistent.ipk debian-binary control.tar.gz data.tar.gz
           cd ..
-          echo "IPK包构建完成 ✅"
+          echo "IPK 包构建完成 ✅"
 
-      - name: "5️⃣ 发布到Releases"
+      - name: "6️⃣ 构建后验证（打印差异与关键文件摘要）"
+        if: ${{ steps.check.outputs.need_build == 'true' }}
+        run: |
+          set -e
+          echo "打印包含持久化路径的文件列表与摘要："
+          grep -RIl "/etc/config/tailscale-data" luci-app-tailscale | xargs -r -n1 sh -c 'echo "---- $1 ----"; sed -n "1,120p" "$1" | sed -n "1,15p"' sh
+
+          echo "展示 control 文件："
+          sed -n '1,80p' ipk-build/control/control
+
+      - name: "7️⃣ 发布到 Releases"
         if: ${{ steps.check.outputs.need_build == 'true' }}
         uses: softprops/action-gh-release@v1
         with:
@@ -99,7 +190,7 @@ jobs:
           name: "luci-app-tailscale ${{ steps.check.outputs.latest_version }} (持久化配置版)"
           files: "luci-app-tailscale-persistent.ipk"
           body: |
-            luci-app-tailscale 持久化配置版本，解决固件升级配置丢失问题
+            luci-app-tailscale 持久化配置版本，自动识别并替换前端/后端路径，解决固件升级配置丢失问题
             配置路径: /etc/config/tailscale-data
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
