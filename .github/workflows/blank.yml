@@ -43,22 +43,29 @@ jobs:
         run: |
           set -e
           SDK_URL="https://downloads.openwrt.org/releases/22.03.5/targets/x86/64/openwrt-sdk-22.03.5-x86-64_gcc-11.2.0_musl.Linux-x86_64.tar.xz"
+          echo "下载 SDK: $SDK_URL"
           curl -LO "$SDK_URL"
+
+          echo "解压 SDK..."
           tar -xJf "$(basename "$SDK_URL")"
-          SDK_DIR=$(basename "$SDK_URL" .tar.xz)
-          echo "SDK_DIR=$SDK_DIR"
+
+          echo "=== 当前目录结构 ==="
+          ls -l
+
+          # 自动检测解压出来的目录
+          SDK_DIR=$(find . -maxdepth 1 -type d -name "openwrt-sdk-*" | head -n1)
+          echo "检测到 SDK_DIR=$SDK_DIR"
+
+          if [ -z "$SDK_DIR" ]; then
+            echo "❌ 未找到 SDK 目录，退出"
+            exit 1
+          fi
 
           cd "$SDK_DIR"
-          echo "src-git packages https://git.openwrt.org/feed/packages.git" > feeds.conf
-          echo "src-git luci https://git.openwrt.org/project/luci.git" >> feeds.conf
-          echo "src-git routing https://git.openwrt.org/feed/routing.git" >> feeds.conf
-          echo "src-git telephony https://git.openwrt.org/feed/telephony.git" >> feeds.conf
+          echo "进入 SDK 目录: $(pwd)"
 
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a
-
-          git clone https://github.com/asvow/luci-app-tailscale package/luci-app-tailscale
-          sed -i '/\/etc\/init\.d\/tailscale/d;/\/etc\/config\/tailscale/d;' feeds/packages/net/tailscale/Makefile
+          echo "=== SDK 子目录结构 ==="
+          ls -l
 
       - name: "4️⃣ 替换路径为持久化目录"
         if: ${{ steps.check.outputs.need_build == 'true' }}
