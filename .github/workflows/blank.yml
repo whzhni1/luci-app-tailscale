@@ -47,8 +47,8 @@ jobs:
           tar -xJf "$(basename "$SDK_URL")"
           SDK_DIR=$(basename "$SDK_URL" .tar.xz)
           echo "SDK_DIR=$SDK_DIR"
-          cd "$SDK_DIR"
 
+          cd "$SDK_DIR"
           echo "src-git packages https://git.openwrt.org/feed/packages.git" > feeds.conf
           echo "src-git luci https://git.openwrt.org/project/luci.git" >> feeds.conf
           echo "src-git routing https://git.openwrt.org/feed/routing.git" >> feeds.conf
@@ -69,15 +69,12 @@ jobs:
           SOURCE="/etc/tailscale"
           TARGET="/etc/config/tailscale-data"
 
-          echo "开始全局替换 ${SOURCE} -> ${TARGET}"
           find . -type f -exec grep -Il "${SOURCE}" {} \; | while read -r f; do
             echo "修改文件: $f"
             sed -i "s|${SOURCE}|${TARGET}|g" "$f"
           done
 
-          echo "=== 替换完成后再次检查 ==="
           grep -RIl "${TARGET}" . || echo "警告：未发现新路径"
-
 
       - name: "5️⃣ 生成 .config 并启用 APK 与语言包"
         if: ${{ steps.check.outputs.need_build == 'true' }}
@@ -135,7 +132,6 @@ jobs:
           cnt=$(ls "${{ steps.artifacts.outputs.OUT_DIR }}" | wc -l)
           echo "产物数量: $cnt"
           if [ "$cnt" -eq 0 ]; then
-            echo "未找到任何产物，取消发布。"
             exit 1
           fi
 
@@ -147,12 +143,12 @@ jobs:
           name: "luci-app-tailscale ${{ steps.check.outputs.latest_version }} (持久化配置版)"
           files: "${{ steps.artifacts.outputs.OUT_DIR }}/*"
           body: |
-            - 构建方式：OpenWrt SDK，按上游说明并启用 APK 打包选项
-            - 持久化路径：/etc/config/tailscale-data（前端/后端/配置模板一致）
+            - 构建方式：OpenWrt SDK
+            - 持久化路径：/etc/config/tailscale-data
             - 产物包含：
               * luci-app-tailscale_<ver>_all.ipk
               * luci-app-tailscale-<ver>-r1.apk（若 SDK 支持 APK）
-              * luci-i18n-tailscale-zh-cn_<ver>_all.ipk / .apk（若生成）
-              * luci-i18n-tailscale-zh-tw_<ver>_all.ipk / .apk（若生成）
+              * luci-i18n-tailscale-zh-cn_<ver>_all.ipk / .apk
+              * luci-i18n-tailscale-zh-tw_<ver>_all.ipk / .apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
