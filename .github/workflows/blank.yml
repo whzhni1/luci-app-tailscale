@@ -52,49 +52,41 @@ jobs:
           echo "=== 当前目录结构 ==="
           ls -l
 
-          # 自动检测解压出来的目录
-          SDK_DIR=$(find . -maxdepth 1 -type d -name "openwrt-sdk-*" | head -n1)
+          # 自动检测解压出来的目录并转为绝对路径
+          SDK_DIR=$(realpath $(find . -maxdepth 1 -type d -name "openwrt-sdk-*"))
           echo "检测到 SDK_DIR=$SDK_DIR"
-
-          if [ -z "$SDK_DIR" ]; then
-            echo "❌ 未找到 SDK 目录，退出"
-            exit 1
-          fi
 
           cd "$SDK_DIR"
           echo "进入 SDK 目录: $(pwd)"
-
           echo "=== SDK 子目录结构 ==="
           ls -l
+
+          echo "src-git packages https://git.openwrt.org/feed/packages.git" > feeds.conf
+          echo "src-git luci https://git.openwrt.org/project/luci.git" >> feeds.conf
+          echo "src-git routing https://git.openwrt.org/feed/routing.git" >> feeds.conf
+          echo "src-git telephony https://git.openwrt.org/feed/telephony.git" >> feeds.conf
+
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+          git clone https://github.com/asvow/luci-app-tailscale package/luci-app-tailscale
+          sed -i '/\/etc\/init\.d\/tailscale/d;/\/etc\/config\/tailscale/d;' feeds/packages/net/tailscale/Makefile
+
+          echo "=== package 目录结构 ==="
+          ls -l package
 
       - name: "4️⃣ 替换路径为持久化目录"
         if: ${{ steps.check.outputs.need_build == 'true' }}
         run: |
           set -e
-          echo "当前工作目录: $(pwd)"
-          echo "SDK_DIR=$SDK_DIR"
-
-          echo "=== 打印 SDK 根目录结构 ==="
-          ls -l "$SDK_DIR" || true
-
-          echo "=== 打印 package 目录结构 ==="
+          echo "准备进入源码目录: $SDK_DIR/package/luci-app-tailscale"
           ls -l "$SDK_DIR/package" || true
 
-          echo "=== 打印 luci-app-tailscale 目录结构（如果存在） ==="
-          ls -l "$SDK_DIR/package/luci-app-tailscale" || true
-
-          # 确认目录存在后再进入
-          if [ -d "$SDK_DIR/package/luci-app-tailscale" ]; then
-            cd "$SDK_DIR/package/luci-app-tailscale"
-          else
-            echo "错误：$SDK_DIR/package/luci-app-tailscale 不存在"
-            exit 1
-          fi
+          cd "$SDK_DIR/package/luci-app-tailscale"
 
           SOURCE="/etc/tailscale"
           TARGET="/etc/config/tailscale-data"
 
-          echo "开始全局替换 ${SOURCE} -> ${TARGET}"
           find . -type f -exec grep -Il "${SOURCE}" {} \; | while read -r f; do
             echo "修改文件: $f"
             sed -i "s|${SOURCE}|${TARGET}|g" "$f"
@@ -175,7 +167,4 @@ jobs:
             - 产物包含：
               * luci-app-tailscale_<ver>_all.ipk
               * luci-app-tailscale-<ver>-r1.apk（若 SDK 支持 APK）
-              * luci-i18n-tailscale-zh-cn_<ver>_all.ipk / .apk
-              * luci-i18n-tailscale-zh-tw_<ver>_all.ipk / .apk
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              * luc
