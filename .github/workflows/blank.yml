@@ -59,22 +59,23 @@ jobs:
       - name: "4️⃣ 构建IPK包"
         if: ${{ steps.check.outputs.need_build == 'true' }}
         run: |
+          echo "开始构建IPK包..."
           mkdir -p ipk-build/control ipk-build/data
           cp -r luci-app-tailscale/files/* ipk-build/data/
 
-          cat > ipk-build/control/control <<'EOF'
-Package: luci-app-tailscale
-Version: ${{ steps.check.outputs.latest_version }}-persistent1
-Depends: libc, tailscale
-Source: luci-app-tailscale
-Section: luci
-Architecture: all
-Installed-Size: 1024
-Description: Tailscale LuCI app with persistent config
- 持久化配置版本，解决固件升级配置丢失问题
- 配置路径: /etc/config/tailscale-data
-EOF
-
+          # 用 echo 拼接 control 文件，避免 heredoc 引发 YAML 报错
+          {
+            echo "Package: luci-app-tailscale"
+            echo "Version: ${{ steps.check.outputs.latest_version }}-persistent1"
+            echo "Depends: libc, tailscale"
+            echo "Source: luci-app-tailscale"
+            echo "Section: luci"
+            echo "Architecture: all"
+            echo "Installed-Size: 1024"
+            echo "Description: Tailscale LuCI app with persistent config"
+            echo " 持久化配置版本，解决固件升级配置丢失问题"
+            echo " 配置路径: /etc/config/tailscale-data"
+          } > ipk-build/control/control
 
           cd ipk-build
           tar -czf control.tar.gz -C control .
