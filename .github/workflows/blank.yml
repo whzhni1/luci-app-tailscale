@@ -2,7 +2,7 @@ name: "自动构建 Tailscale（持久化版，标准命名 IPK/APK 与语言包
 
 on:
   schedule:
-    - cron: "0 2 * * *"  # 每天北京时间10点自动检查
+    - cron: "0 2 * * *"
   workflow_dispatch:
   push:
     branches: ["main"]
@@ -22,45 +22,33 @@ jobs:
         id: check
         run: |
           set -e
-          echo "开始检查上游版本更新..."
           upstream=$(curl -s "https://api.github.com/repos/asvow/luci-app-tailscale/releases/latest" \
             | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/' || echo "获取失败")
           current=$(curl -s "https://api.github.com/repos/${{ github.repository }}/releases/latest" 2>/dev/null \
             | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/' || echo "v0.0.0")
 
-          echo "=== 版本对比结果 ==="
           echo "上游版本: $upstream"
-          echo "我们的版本: $current"
+          echo "当前版本: $current"
 
           if [ "$upstream" != "$current" ] && [ "$upstream" != "获取失败" ]; then
             echo "need_build=true" >> $GITHUB_OUTPUT
             echo "latest_version=$upstream" >> $GITHUB_OUTPUT
-            echo "结论: 需要构建"
           else
             echo "need_build=false" >> $GITHUB_OUTPUT
             echo "latest_version=$current" >> $GITHUB_OUTPUT
-            echo "结论: 不需要构建"
           fi
 
-      - name: "🔍 输出检查结果"
-        run: |
-          echo "need_build = ${{ steps.check.outputs.need_build }}"
-          echo "latest_version = ${{ steps.check.outputs.latest_version }}"
-
-      - name: "3️⃣ 准备 OpenWrt SDK 环境（x86_64-generic）"
+      - name: "3️⃣ 准备 OpenWrt SDK"
         if: ${{ steps.check.outputs.need_build == 'true' }}
         run: |
           set -e
-          echo "下载并解压 OpenWrt SDK（选择 x86_64 generic 作为通用构建环境）"
           SDK_URL="https://downloads.openwrt.org/releases/22.03.5/targets/x86/64/openwrt-sdk-22.03.5-x86-64_gcc-11.2.0_musl.Linux-x86_64.tar.xz"
           curl -LO "$SDK_URL"
-          tar -xJf $(basename "$SDK_URL")
-          SDK_DIR=$(echo openwrt-sdk-22.03.5-x86-64_*)
-          echo "SDK_DIR=${SDK_DIR}"
-
+          tar -xJf "$(basename "$SDK_URL")"
+          SDK_DIR=$(basename "$SDK_URL" .tar.xz)
+          echo "SDK_DIR=$SDK_DIR"
           cd "$SDK_DIR"
 
-          # 初始化 feeds
           echo "src-git packages https://git.openwrt.org/feed/packages.git" > feeds.conf
           echo "src-git luci https://git.openwrt.org/project/luci.git" >> feeds.conf
           echo "src-git routing https://git.openwrt.org/feed/routing.git" >> feeds.conf
@@ -69,145 +57,72 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-          # 获取 luci-app-tailscale 源码到 package/
-          echo "克隆 luci-app-tailscale 到 package/luci-app-tailscale"
           git clone https://github.com/asvow/luci-app-tailscale package/luci-app-tailscale
-
-          # 根据上游编译说明替换 tailscale 默认启动脚本/配置（避免冲突）
-          echo "按上游说明移除默认 tailscale init/config 引用"
           sed -i '/\/etc\/init\.d\/tailscale/d;/\/etc\/config\/tailscale/d;' feeds/packages/net/tailscale/Makefile
 
-          # 打印初始项目文件树
-          echo "=== luci-app-tailscale 文件列表（初始） ==="
-          (cd package/luci-app-tailscale && find . -type f | sort)
+      - name: "4️⃣ 替换路径为持久化目录"
+        if: ${{ steps.check.outputs.need_build == 'true' }}
+        run: |
+          set -e
+          cd "$SDK_DIR/package/luci-app-tailscale"
+          find . -type f -exec grep -Il "/etc/tailscale" {} \; | while read -r f; do
+            echo "修改文件: $f"
+            sed -i "s|/etc/tailscale|/etc/config/tailscale-data|g" "$f"
+          done
 
-      - name: "4️⃣ 持久化路径替换与校验（全局）"
+      - name: "5️⃣ 生成 .config 并启用 APK 与语言包"
         if: ${{ steps.check.outputs.need_build == 'true' }}
         run: |
           set -e
           cd "$SDK_DIR"
-
-          SOURCE="/etc/tailscale"
-          TARGET="/etc/config/tailscale-data"
-
-          echo "开始全局替换 ${SOURCE} -> ${TARGET}（遍历整个项目）"
-          cd package/luci-app-tailscale
-
-          # 列出所有文件，逐个替换并打印修改文件
-          while IFS= read -r f; do
-            if [ -f "$f" ] && grep -q "${SOURCE}" "$f"; then
-              echo "修改文件: $f"
-              sed -i "s|${SOURCE}|${TARGET}|g" "$f"
-            fi
-          done < <(find . -type f)
-
-          echo "=== 替换完成后再次检查 ==="
-          echo "包含新路径的文件："
-          grep -RIl "${TARGET}" . || echo "警告：未发现新路径（请确认是否存在引用）"
-
-          echo "展示关键文件片段（setting.js / UCI 模板）"
-          [ -f htdocs/luci-static/resources/view/tailscale/setting.js ] && sed -n '1,140p' htdocs/luci-static/resources/view/tailscale/setting.js | sed -n '1,40p'
-          [ -f root/etc/config/tailscale ] && sed -n '1,140p' root/etc/config/tailscale | sed -n '1,40p'
-
-      - name: "5️⃣ 非交互式配置（启用 apk 与包选择）"
-        if: ${{ steps.check.outputs.need_build == 'true' }}
-        run: |
-          set -e
-          cd "$SDK_DIR"
-
-          # 生成 .config（启用 luci2 与 apk 包格式、以及语言包）
           {
             echo "CONFIG_ALL_KMODS=y"
             echo "CONFIG_ALL=y"
-            echo ""
-            echo "# 使用 apk 包格式（部分 SDK 支持；不支持时仍会生成 ipk）"
             echo "CONFIG_TARGET_PACKAGING_APK=y"
-            echo ""
-            echo "# 启用 LuCI 2（上游说明要求）"
             echo "CONFIG_LUCI_LANG_zh-cn=y"
             echo "CONFIG_LUCI_LANG_zh-tw=y"
             echo "CONFIG_PACKAGE_luci=y"
             echo "CONFIG_PACKAGE_liblucihttp=y"
             echo "CONFIG_PACKAGE_liblucihttp-ucode=y"
-            echo ""
-            echo "# 选择应用与语言包"
             echo "CONFIG_PACKAGE_luci-app-tailscale=y"
             echo "CONFIG_PACKAGE_luci-i18n-tailscale-zh-cn=y"
             echo "CONFIG_PACKAGE_luci-i18n-tailscale-zh-tw=y"
           } > .config
-
-
-          echo "执行 defconfig"
           make defconfig
 
-      - name: "6️⃣ 编译 luci-app-tailscale 与语言包（生成 IPK/APK）"
+      - name: "6️⃣ 编译 luci-app-tailscale 与语言包"
         if: ${{ steps.check.outputs.need_build == 'true' }}
         run: |
           set -e
           cd "$SDK_DIR"
-
-          echo "开始编译 luci-app-tailscale（含语言包）"
-          make package/luci-app-tailscale/compile V=s || (echo "构建失败，尝试再次构建" && make package/luci-app-tailscale/compile V=s)
+          make package/luci-app-tailscale/compile V=s || make package/luci-app-tailscale/compile V=s
           make package/feeds/luci/luci-i18n-tailscale-zh-cn/compile V=s || true
           make package/feeds/luci/luci-i18n-tailscale-zh-tw/compile V=s || true
 
-          echo "=== 构建产物目录结构 ==="
-          find bin -type f | sort || true
-
-      - name: "7️⃣ 收集产物并标准重命名"
+      - name: "7️⃣ 收集并重命名产物"
         if: ${{ steps.check.outputs.need_build == 'true' }}
         id: artifacts
         run: |
           set -e
           cd "$SDK_DIR"
-
           VER="${{ steps.check.outputs.latest_version }}"
           OUT_DIR="${PWD}/out"
           mkdir -p "$OUT_DIR"
 
-          echo "搜集 IPK/APK 与语言包（根据文件名模式）"
-          # IPK
-          find bin -type f -name "luci-app-tailscale_*_all.ipk" -exec cp -v {} "$OUT_DIR/" \; || true
-          find bin -type f -name "luci-i18n-tailscale-zh-cn_*_all.ipk" -exec cp -v {} "$OUT_DIR/" \; || true
-          find bin -type f -name "luci-i18n-tailscale-zh-tw_*_all.ipk" -exec cp -v {} "$OUT_DIR/" \; || true
-          # APK（若 SDK 支持 APK 打包，则会生成；否则此步骤可能为空）
-          find bin -type f -name "luci-app-tailscale-*_*.apk" -exec cp -v {} "$OUT_DIR/" \; || true
-          find bin -type f -name "luci-i18n-tailscale-zh-cn-*_*.apk" -exec cp -v {} "$OUT_DIR/" \; || true
-          find bin -type f -name "luci-i18n-tailscale-zh-tw-*_*.apk" -exec cp -v {} "$OUT_DIR/" \; || true
+          find bin -type f -name "luci-app-tailscale_*_all.ipk" -exec cp -v {} "$OUT_DIR/" \;
+          find bin -type f -name "luci-i18n-tailscale-zh-cn_*_all.ipk" -exec cp -v {} "$OUT_DIR/" \;
+          find bin -type f -name "luci-i18n-tailscale-zh-tw_*_all.ipk" -exec cp -v {} "$OUT_DIR/" \;
+          find bin -type f -name "luci-app-tailscale-*-*.apk" -exec cp -v {} "$OUT_DIR/luci-app-tailscale-${VER}-r1.apk" \;
+          find bin -type f -name "luci-i18n-tailscale-zh-cn-*-*.apk" -exec cp -v {} "$OUT_DIR/luci-i18n-tailscale-zh-cn-${VER}.apk" \;
+          find bin -type f -name "luci-i18n-tailscale-zh-tw-*-*.apk" -exec cp -v {} "$OUT_DIR/luci-i18n-tailscale-zh-tw-${VER}.apk" \;
 
-          echo "产物列表："
-          ls -lh "$OUT_DIR" || true
+          echo "OUT_DIR=$OUT_DIR" >> $GITHUB_OUTPUT
 
-          # 标准化重命名（若实际版本号无法从构建系统直接反推，则用 upstream tag 命名）
-          # APK 用上游模式：luci-app-tailscale-<ver>-r1.apk
-          # 注意：若构建出的 APK 已符合此命名，则无需重命名；此处仅针对不一致情况
-          for f in "$OUT_DIR"/luci-app-tailscale-*.apk; do
-            [ -f "$f" ] || continue
-            mv -v "$f" "$OUT_DIR/luci-app-tailscale-${VER}-r1.apk" || true
-          done
-
-          for f in "$OUT_DIR"/luci-i18n-tailscale-zh-cn-*.apk; do
-            [ -f "$f" ] || continue
-            mv -v "$f" "$OUT_DIR/luci-i18n-tailscale-zh-cn-${VER}.apk" || true
-          done
-
-          for f in "$OUT_DIR"/luci-i18n-tailscale-zh-tw-*.apk; do
-            [ -f "$f" ] || continue
-            mv -v "$f" "$OUT_DIR/luci-i18n-tailscale-zh-tw-${VER}.apk" || true
-          done
-
-          echo "最终产物列表（重命名后）："
-          ls -lh "$OUT_DIR" || true
-
-          # 暴露产物路径用于后续上传
-          echo "OUT_DIR=${OUT_DIR}" >> $GITHUB_OUTPUT
-
-      - name: "8️⃣ 发布前的检查（避免 Too many retries）"
+      - name: "8️⃣ 发布前检查"
         if: ${{ steps.check.outputs.need_build == 'true' }}
         run: |
           set -e
-          echo "检查构建产物是否存在："
-          ls -lh "${{ steps.artifacts.outputs.OUT_DIR }}" || (echo "产物目录不存在" && exit 1)
+          ls -lh "${{ steps.artifacts.outputs.OUT_DIR }}" || exit 1
           cnt=$(ls "${{ steps.artifacts.outputs.OUT_DIR }}" | wc -l)
           echo "产物数量: $cnt"
           if [ "$cnt" -eq 0 ]; then
@@ -215,7 +130,7 @@ jobs:
             exit 1
           fi
 
-      - name: "9️⃣ 发布到 Releases（标准命名）"
+      - name: "9️⃣ 发布到 Releases"
         if: ${{ steps.check.outputs.need_build == 'true' }}
         uses: softprops/action-gh-release@v1
         with:
