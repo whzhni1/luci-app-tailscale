@@ -84,7 +84,8 @@ jobs:
           SDK_URL="https://downloads.immortalwrt.org/releases/24.10.0/targets/x86/64/immortalwrt-sdk-24.10.0-x86-64_gcc-13.3.0_musl.Linux-x86_64.tar.zst"
           curl -LO "$SDK_URL"
           tar --use-compress-program=unzstd -xf "$(basename "$SDK_URL")"
-          mv immortalwrt-sdk-* immortalwrt-sdk
+          SDK_DIR_RAW=$(find . -maxdepth 1 -type d -name "immortalwrt-sdk-*")
+          mv "$SDK_DIR_RAW" immortalwrt-sdk
           echo "SDK_DIR2=$PWD/immortalwrt-sdk" >> $GITHUB_ENV
 
       - name: "6️⃣ 配置并编译（ImmortalWrt SDK）"
