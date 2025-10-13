@@ -64,16 +64,36 @@ jobs:
         if: ${{ steps.check.outputs.need_build == 'true' }}
         run: |
           set -e
-          cd "$SDK_DIR/package/luci-app-tailscale"
+          echo "当前工作目录: $(pwd)"
+          echo "SDK_DIR=$SDK_DIR"
+
+          echo "=== 打印 SDK 根目录结构 ==="
+          ls -l "$SDK_DIR" || true
+
+          echo "=== 打印 package 目录结构 ==="
+          ls -l "$SDK_DIR/package" || true
+
+          echo "=== 打印 luci-app-tailscale 目录结构（如果存在） ==="
+          ls -l "$SDK_DIR/package/luci-app-tailscale" || true
+
+          # 确认目录存在后再进入
+          if [ -d "$SDK_DIR/package/luci-app-tailscale" ]; then
+            cd "$SDK_DIR/package/luci-app-tailscale"
+          else
+            echo "错误：$SDK_DIR/package/luci-app-tailscale 不存在"
+            exit 1
+          fi
 
           SOURCE="/etc/tailscale"
           TARGET="/etc/config/tailscale-data"
 
+          echo "开始全局替换 ${SOURCE} -> ${TARGET}"
           find . -type f -exec grep -Il "${SOURCE}" {} \; | while read -r f; do
             echo "修改文件: $f"
             sed -i "s|${SOURCE}|${TARGET}|g" "$f"
           done
 
+          echo "=== 替换完成后再次检查 ==="
           grep -RIl "${TARGET}" . || echo "警告：未发现新路径"
 
       - name: "5️⃣ 生成 .config 并启用 APK 与语言包"
