@@ -52,7 +52,11 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
           git clone https://github.com/asvow/luci-app-tailscale package/luci-app-tailscale
-          sed -i "s|/etc/tailscale|/etc/config/tailscale-data|g" $(grep -rl "/etc/tailscale" package/luci-app-tailscale)
+
+          # 持久化路径替换
+          cd package/luci-app-tailscale
+          sed -i "s|/etc/tailscale|/etc/config/tailscale-data|g" $(grep -rl "/etc/tailscale" .)
+          cd ../..
 
           cat > .config <<EOF
           CONFIG_ALL=y
@@ -91,7 +95,11 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
           git clone https://github.com/asvow/luci-app-tailscale package/luci-app-tailscale
-          sed -i "s|/etc/tailscale|/etc/config/tailscale-data|g" $(grep -rl "/etc/tailscale" package/luci-app-tailscale)
+
+          # 持久化路径替换（ImmortalWrt SDK）
+          cd package/luci-app-tailscale
+          sed -i "s|/etc/tailscale|/etc/config/tailscale-data|g" $(grep -rl "/etc/tailscale" .)
+          cd ../..
 
           cat > .config <<EOF
           CONFIG_ALL=y
