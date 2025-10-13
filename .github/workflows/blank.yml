@@ -55,6 +55,7 @@ jobs:
           # 自动检测解压出来的目录并转为绝对路径
           SDK_DIR=$(realpath $(find . -maxdepth 1 -type d -name "openwrt-sdk-*"))
           echo "检测到 SDK_DIR=$SDK_DIR"
+          echo "SDK_DIR=$SDK_DIR" >> $GITHUB_ENV
 
           cd "$SDK_DIR"
           echo "进入 SDK 目录: $(pwd)"
@@ -166,5 +167,4 @@ jobs:
             - 持久化路径：/etc/config/tailscale-data
             - 产物包含：
               * luci-app-tailscale_<ver>_all.ipk
-              * luci-app-tailscale-<ver>-r1.apk（若 SDK 支持 APK）
-              * luc
+              * luci-app-tailscale-<ver>-r1.apk
