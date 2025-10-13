@@ -46,36 +46,75 @@ jobs:
           echo "need_build = ${{ steps.check.outputs.need_build }}"
           echo "latest_version = ${{ steps.check.outputs.latest_version }}"
 
-      - name: "3️⃣ 克隆上游源码并自动识别前后端文件"
+      - name: "3️⃣ 克隆并扫描源码"
         if: ${{ steps.check.outputs.need_build == 'true' }}
         id: scan
         run: |
           set -e
           echo "正在克隆上游源码..."
           git clone https://github.com/asvow/luci-app-tailscale
-
-          echo "开始自动识别 LuCI 前端与后端文件..."
           cd luci-app-tailscale
 
-          # 自动识别前端 JS 视图文件（常见位置：htdocs/.../view/tailscale/*.js）
-          frontend_files=$(grep -RIl --include="*.js" "/etc/tailscale" htdocs 2>/dev/null || true)
-          # 自动识别后端 CBI/Lua 文件（常见位置：files/luasrc/model/cbi/tailscale/*.lua 或 luasrc/...）
-          backend_files=$(grep -RIl --include="*.lua" "/etc/tailscale" files luasrc 2>/dev/null || true)
+          echo "全局扫描包含 /etc/tailscale 的文件..."
+          matches=$(grep -RIl "/etc/tailscale" . || true)
 
-          echo "前端文件候选列表:"
-          echo "${frontend_files:-<未发现>}"
-          echo "后端文件候选列表:"
-          echo "${backend_files:-<未发现>}"
+          if [ -z "$matches" ]; then
+            echo "未发现任何包含 /etc/tailscale 的文件，可能上游已改用其他路径"
+            exit 1
+          fi
 
-          # 输出到 GITHUB_OUTPUT 供后续步骤使用
-          echo "frontend_files<<EOF" >> $GITHUB_OUTPUT
-          echo "${frontend_files}" >> $GITHUB_OUTPUT
+          echo "发现以下文件:"
+          echo "$matches"
+
+          # 分类
+          frontend=$(echo "$matches" | grep "htdocs" || true)
+          backend=$(echo "$matches" | grep -E "files|luasrc" || true)
+          others=$(echo "$matches" | grep -vE "htdocs|files|luasrc" || true)
+
+          echo "前端文件:"
+          echo "${frontend:-<无>}"
+          echo "后端文件:"
+          echo "${backend:-<无>}"
+          echo "其他文件:"
+          echo "${others:-<无>}"
+
+          # 输出到 GITHUB_OUTPUT
+          echo "frontend<<EOF" >> $GITHUB_OUTPUT
+          echo "$frontend" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
-          echo "backend_files<<EOF" >> $GITHUB_OUTPUT
-          echo "${backend_files}" >> $GITHUB_OUTPUT
+          echo "backend<<EOF" >> $GITHUB_OUTPUT
+          echo "$backend" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          echo "others<<EOF" >> $GITHUB_OUTPUT
+          echo "$others" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
           cd ..
+
+      - name: "4️⃣ 替换路径并校验"
+        if: ${{ steps.check.outputs.need_build == 'true' }}
+        run: |
+          set -e
+          cd luci-app-tailscale
+
+          SOURCE="/etc/tailscale"
+          TARGET="/etc/config/tailscale-data"
+
+          echo "开始替换 ${SOURCE} -> ${TARGET}"
+
+          all_files="${{ steps.scan.outputs.frontend }} ${{ steps.scan.outputs.backend }} ${{ steps.scan.outputs.others }}"
+          for f in $all_files; do
+            if [ -f "$f" ]; then
+              echo "替换文件: $f"
+              sed -i "s|${SOURCE}|${TARGET}|g" "$f"
+            fi
+          done
+
+          echo "替换完成，校验结果:"
+          grep -RIl "${TARGET}" . || echo "警告：未发现新路径"
+
+          cd ..
+
 
       - name: "4️⃣ 执行路径替换并校验"
         if: ${{ steps.check.outputs.need_build == 'true' }}
