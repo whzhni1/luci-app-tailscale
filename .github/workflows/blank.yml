@@ -8,54 +8,63 @@ on:
     branches: ["main"]
 
 jobs:
-  构建过程:
+  build:
     runs-on: ubuntu-latest
     outputs:
-      是否需要构建: ${{ steps.版本检查.outputs.need_build }}
-      最新版本: ${{ steps.版本检查.outputs.latest_version }}
-    
+      need_build: ${{ steps.check.outputs.need_build }}
+      latest_version: ${{ steps.check.outputs.latest_version }}
+
     steps:
-    - name: "1️⃣ 检出代码"
-      uses: actions/checkout@v4
+      - name: "1️⃣ 检出代码"
+        uses: actions/checkout@v4
 
-    - name: "2️⃣ 检查上游更新"
-      id: 版本检查
-      run: |
-        echo "开始检查上游版本更新..."
-        upstream=$(curl -s "https://api.github.com/repos/asvow/luci-app-tailscale/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/' || echo "获取失败")
-        current=$(curl -s "https://api.github.com/repos/${{ github.repository }}/releases/latest" 2>/dev/null | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/' || echo "v0.0.0")
-        
-        echo "版本对比结果："
-        echo "上游版本: $upstream"
-        echo "我们的版本: $current"
-        
-        if [ "$upstream" != "$current" ] && [ "$upstream" != "获取失败" ]; then
-          echo "need_build=true" >> $GITHUB_OUTPUT
-          echo "latest_version=$upstream" >> $GITHUB_OUTPUT
-        else
-          echo "need_build=false" >> $GITHUB_OUTPUT
-        fi
+      - name: "2️⃣ 检查上游更新"
+        id: check
+        run: |
+          echo "开始检查上游版本更新..."
+          upstream=$(curl -s "https://api.github.com/repos/asvow/luci-app-tailscale/releases/latest" \
+            | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/' || echo "获取失败")
+          current=$(curl -s "https://api.github.com/repos/${{ github.repository }}/releases/latest" 2>/dev/null \
+            | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/' || echo "v0.0.0")
 
-    - name: "3️⃣ 克隆并修改源码"
-      if: ${{ steps.版本检查.outputs.need_build == 'true' }}
-      run: |
-        echo "正在克隆上游源码..."
-        git clone https://github.com/asvow/luci-app-tailscale
-        
-        echo "正在修改配置路径..."
-        sed -i "s|o.default = '/etc/tailscale'|o.default = '/etc/config/tailscale-data'|g" luci-app-tailscale/files/luasrc/model/cbi/tailscale.lua
-        echo "配置路径修改完成"
+          echo "=== 版本对比结果 ==="
+          echo "上游版本: $upstream"
+          echo "我们的版本: $current"
 
-    - name: "4️⃣ 构建IPK包"
-      if: ${{ steps.版本检查.outputs.need_build == 'true' }}
-      run: |
-        echo "开始构建IPK包..."
-        mkdir -p ipk-build/control ipk-build/data
-        cp -r luci-app-tailscale/files/* ipk-build/data/
-        
-        cat > ipk-build/control/control << EOF
+          if [ "$upstream" != "$current" ] && [ "$upstream" != "获取失败" ]; then
+            echo "need_build=true" >> $GITHUB_OUTPUT
+            echo "latest_version=$upstream" >> $GITHUB_OUTPUT
+            echo "结论: 需要构建"
+          else
+            echo "need_build=false" >> $GITHUB_OUTPUT
+            echo "latest_version=$current" >> $GITHUB_OUTPUT
+            echo "结论: 不需要构建"
+          fi
+
+      - name: "🔍 输出检查结果"
+        run: |
+          echo "need_build = ${{ steps.check.outputs.need_build }}"
+          echo "latest_version = ${{ steps.check.outputs.latest_version }}"
+
+      - name: "3️⃣ 克隆并修改源码"
+        if: ${{ steps.check.outputs.need_build == 'true' }}
+        run: |
+          echo "正在克隆上游源码..."
+          git clone https://github.com/asvow/luci-app-tailscale
+          echo "正在修改配置路径..."
+          sed -i "s|o.default = '/etc/tailscale'|o.default = '/etc/config/tailscale-data'|g" \
+            luci-app-tailscale/files/luasrc/model/cbi/tailscale.lua
+          echo "配置路径修改完成"
+
+      - name: "4️⃣ 构建IPK包"
+        if: ${{ steps.check.outputs.need_build == 'true' }}
+        run: |
+          mkdir -p ipk-build/control ipk-build/data
+          cp -r luci-app-tailscale/files/* ipk-build/data/
+
+          cat > ipk-build/control/control <<'EOF'
 Package: luci-app-tailscale
-Version: ${{ steps.版本检查.outputs.latest_version }}-persistent1
+Version: ${{ steps.check.outputs.latest_version }}-persistent1
 Depends: libc, tailscale
 Source: luci-app-tailscale
 Section: luci
@@ -66,21 +75,24 @@ Description: Tailscale LuCI app with persistent config
  配置路径: /etc/config/tailscale-data
 EOF
 
-        cd ipk-build
-        tar -czf control.tar.gz -C control .
-        tar -czf data.tar.gz -C data .
-        echo "2.0" > debian-binary
-        ar r ../luci-app-tailscale-persistent.ipk debian-binary control.tar.gz data.tar.gz
-        cd ..
-        echo "IPK包构建完成"
 
-    - name: "5️⃣ 发布到Releases"
-      if: ${{ steps.版本检查.outputs.need_build == 'true' }}
-      uses: softprops/action-gh-release@v1
-      with:
-        tag_name: "${{ steps.版本检查.outputs.latest_version }}-persistent"
-        name: "luci-app-tailscale ${{ steps.版本检查.outputs.latest_version }} (持久化配置版)"
-        files: "luci-app-tailscale-persistent.ipk"
-        body: "luci-app-tailscale 持久化配置版本，解决固件升级配置丢失问题"
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          cd ipk-build
+          tar -czf control.tar.gz -C control .
+          tar -czf data.tar.gz -C data .
+          echo "2.0" > debian-binary
+          ar r ../luci-app-tailscale-persistent.ipk debian-binary control.tar.gz data.tar.gz
+          cd ..
+          echo "IPK包构建完成 ✅"
+
+      - name: "5️⃣ 发布到Releases"
+        if: ${{ steps.check.outputs.need_build == 'true' }}
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: "${{ steps.check.outputs.latest_version }}-persistent"
+          name: "luci-app-tailscale ${{ steps.check.outputs.latest_version }} (持久化配置版)"
+          files: "luci-app-tailscale-persistent.ipk"
+          body: |
+            luci-app-tailscale 持久化配置版本，解决固件升级配置丢失问题
+            配置路径: /etc/config/tailscale-data
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
