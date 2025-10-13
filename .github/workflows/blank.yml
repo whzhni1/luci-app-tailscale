@@ -65,10 +65,19 @@ jobs:
         run: |
           set -e
           cd "$SDK_DIR/package/luci-app-tailscale"
-          find . -type f -exec grep -Il "/etc/tailscale" {} \; | while read -r f; do
+
+          SOURCE="/etc/tailscale"
+          TARGET="/etc/config/tailscale-data"
+
+          echo "开始全局替换 ${SOURCE} -> ${TARGET}"
+          find . -type f -exec grep -Il "${SOURCE}" {} \; | while read -r f; do
             echo "修改文件: $f"
-            sed -i "s|/etc/tailscale|/etc/config/tailscale-data|g" "$f"
+            sed -i "s|${SOURCE}|${TARGET}|g" "$f"
           done
+
+          echo "=== 替换完成后再次检查 ==="
+          grep -RIl "${TARGET}" . || echo "警告：未发现新路径"
+
 
       - name: "5️⃣ 生成 .config 并启用 APK 与语言包"
         if: ${{ steps.check.outputs.need_build == 'true' }}
