@@ -48,50 +48,21 @@ jobs:
 
       - name: "3️⃣ 克隆并扫描源码"
         if: ${{ steps.check.outputs.need_build == 'true' }}
-        id: scan
         run: |
           set -e
           echo "正在克隆上游源码..."
           git clone https://github.com/asvow/luci-app-tailscale
           cd luci-app-tailscale
 
-          echo "全局扫描包含 /etc/tailscale 的文件..."
-          matches=$(grep -RIl "/etc/tailscale" . || true)
+          echo "=== 项目文件列表 ==="
+          find . -type f | sort
 
-          if [ -z "$matches" ]; then
-            echo "未发现任何包含 /etc/tailscale 的文件，可能上游已改用其他路径"
-            exit 1
-          fi
-
-          echo "发现以下文件:"
-          echo "$matches"
-
-          # 分类
-          frontend=$(echo "$matches" | grep "htdocs" || true)
-          backend=$(echo "$matches" | grep -E "files|luasrc" || true)
-          others=$(echo "$matches" | grep -vE "htdocs|files|luasrc" || true)
-
-          echo "前端文件:"
-          echo "${frontend:-<无>}"
-          echo "后端文件:"
-          echo "${backend:-<无>}"
-          echo "其他文件:"
-          echo "${others:-<无>}"
-
-          # 输出到 GITHUB_OUTPUT
-          echo "frontend<<EOF" >> $GITHUB_OUTPUT
-          echo "$frontend" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-          echo "backend<<EOF" >> $GITHUB_OUTPUT
-          echo "$backend" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-          echo "others<<EOF" >> $GITHUB_OUTPUT
-          echo "$others" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+          echo "=== 搜索包含 /etc/tailscale 的文件 ==="
+          grep -RIl "/etc/tailscale" . || true
 
           cd ..
 
-      - name: "4️⃣ 替换路径并校验"
+      - name: "4️⃣ 替换路径并打印修改的文件"
         if: ${{ steps.check.outputs.need_build == 'true' }}
         run: |
           set -e
@@ -102,79 +73,19 @@ jobs:
 
           echo "开始替换 ${SOURCE} -> ${TARGET}"
 
-          all_files="${{ steps.scan.outputs.frontend }} ${{ steps.scan.outputs.backend }} ${{ steps.scan.outputs.others }}"
-          for f in $all_files; do
-            if [ -f "$f" ]; then
-              echo "替换文件: $f"
+          # 遍历所有文件，逐个替换并打印修改过的文件
+          while IFS= read -r f; do
+            if grep -q "${SOURCE}" "$f"; then
+              echo "修改文件: $f"
               sed -i "s|${SOURCE}|${TARGET}|g" "$f"
             fi
-          done
+          done < <(find . -type f)
 
-          echo "替换完成，校验结果:"
+          echo "=== 替换完成后再次检查 ==="
           grep -RIl "${TARGET}" . || echo "警告：未发现新路径"
 
           cd ..
 
-
-      - name: "4️⃣ 执行路径替换并校验"
-        if: ${{ steps.check.outputs.need_build == 'true' }}
-        run: |
-          set -e
-          cd luci-app-tailscale
-
-          TARGET="/etc/config/tailscale-data"
-          SOURCE="/etc/tailscale"
-
-          echo "开始替换路径: ${SOURCE} -> ${TARGET}"
-
-          # 对前端文件执行替换
-          if [ -n "${{ steps.scan.outputs.frontend_files }}" ]; then
-            echo "替换前端文件:"
-            printf "%s\n" "${{ steps.scan.outputs.frontend_files }}"
-            printf "%s\n" "${{ steps.scan.outputs.frontend_files }}" | while read -r f; do
-              [ -n "$f" ] && sed -i "s|${SOURCE}|${TARGET}|g" "$f"
-            done
-          else
-            echo "警告：未自动识别到前端文件，尝试常见默认路径回退..."
-            if [ -f "htdocs/luci-static/resources/view/tailscale/setting.js" ]; then
-              sed -i "s|${SOURCE}|${TARGET}|g" htdocs/luci-static/resources/view/tailscale/setting.js
-              echo "已回退替换: htdocs/luci-static/resources/view/tailscale/setting.js"
-            fi
-          fi
-
-          # 对后端文件执行替换
-          if [ -n "${{ steps.scan.outputs.backend_files }}" ]; then
-            echo "替换后端文件:"
-            printf "%s\n" "${{ steps.scan.outputs.backend_files }}"
-            printf "%s\n" "${{ steps.scan.outputs.backend_files }}" | while read -r f; do
-              [ -n "$f" ] && sed -i "s|${SOURCE}|${TARGET}|g" "$f"
-            done
-          else
-            echo "警告：未自动识别到后端文件，尝试常见默认路径回退..."
-            if [ -f "files/luasrc/model/cbi/tailscale.lua" ]; then
-              sed -i "s|${SOURCE}|${TARGET}|g" files/luasrc/model/cbi/tailscale.lua
-              echo "已回退替换: files/luasrc/model/cbi/tailscale.lua"
-            fi
-          fi
-
-          echo "替换完成，开始进行校验..."
-          # 校验至少有一处替换生效
-          count_new=$(grep -RIl "${TARGET}" htdocs files luasrc 2>/dev/null | wc -l || true)
-          count_old=$(grep -RIl "${SOURCE}" htdocs files luasrc 2>/dev/null | wc -l || true)
-          echo "包含新路径的文件数: ${count_new}"
-          echo "仍包含旧路径的文件数: ${count_old}"
-
-          if [ "${count_new}" -eq 0 ]; then
-            echo "错误：未发现任何文件包含新路径 ${TARGET}，替换可能失败"
-            exit 1
-          fi
-
-          echo "校验通过：发现 ${count_new} 个文件已使用持久化路径。"
-          if [ "${count_old}" -gt 0 ]; then
-            echo "提示：仍有 ${count_old} 个文件包含旧路径 ${SOURCE}，请注意是否需要进一步替换。"
-          fi
-
-          cd ..
 
       - name: "5️⃣ 构建 IPK 包"
         if: ${{ steps.check.outputs.need_build == 'true' }}
