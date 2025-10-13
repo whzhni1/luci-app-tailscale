@@ -40,7 +40,8 @@ jobs:
           SDK_URL="https://downloads.openwrt.org/releases/24.10.0/targets/x86/64/openwrt-sdk-24.10.0-x86-64_gcc-13.3.0_musl.Linux-x86_64.tar.zst"
           curl -LO "$SDK_URL"
           tar --use-compress-program=unzstd -xf "$(basename "$SDK_URL")"
-          mv openwrt-sdk-* openwrt-sdk
+          SDK_DIR=$(find . -maxdepth 1 -type d -name "openwrt-sdk-*")
+          mv "$SDK_DIR" openwrt-sdk
           echo "SDK_DIR=$PWD/openwrt-sdk" >> $GITHUB_ENV
 
       - name: "4️⃣ 配置并编译（OpenWrt SDK）"
