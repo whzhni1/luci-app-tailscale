@@ -11,8 +11,8 @@ jobs:
   构建过程:
     runs-on: ubuntu-latest
     outputs:
-      是否需要构建: ${{ steps.版本检查.outputs.需要构建 }}
-      最新版本: ${{ steps.版本检查.outputs.最新版本 }}
+      是否需要构建: ${{ steps.版本检查.outputs.need_build }}
+      最新版本: ${{ steps.版本检查.outputs.latest_version }}
     
     steps:
     - name: "1️⃣ 检出代码"
@@ -22,22 +22,22 @@ jobs:
       id: 版本检查
       run: |
         echo "开始检查上游版本更新..."
-        上游版本=$(curl -s "https://api.github.com/repos/asvow/luci-app-tailscale/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/' || echo "获取失败")
-        我们的版本=$(curl -s "https://api.github.com/repos/${{ github.repository }}/releases/latest" 2>/dev/null | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/' || echo "v0.0.0")
+        upstream=$(curl -s "https://api.github.com/repos/asvow/luci-app-tailscale/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/' || echo "获取失败")
+        current=$(curl -s "https://api.github.com/repos/${{ github.repository }}/releases/latest" 2>/dev/null | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/' || echo "v0.0.0")
         
         echo "版本对比结果："
-        echo "上游版本: $上游版本"
-        echo "我们的版本: $我们的版本"
+        echo "上游版本: $upstream"
+        echo "我们的版本: $current"
         
-        if [ "$上游版本" != "$我们的版本" ] && [ "$上游版本" != "获取失败" ]; then
-          echo "需要构建=true" >> $GITHUB_OUTPUT
-          echo "最新版本=$上游版本" >> $GITHUB_OUTPUT
+        if [ "$upstream" != "$current" ] && [ "$upstream" != "获取失败" ]; then
+          echo "need_build=true" >> $GITHUB_OUTPUT
+          echo "latest_version=$upstream" >> $GITHUB_OUTPUT
         else
-          echo "需要构建=false" >> $GITHUB_OUTPUT
+          echo "need_build=false" >> $GITHUB_OUTPUT
         fi
 
     - name: "3️⃣ 克隆并修改源码"
-      if: steps.版本检查.outputs.需要构建 == 'true'
+      if: ${{ steps.版本检查.outputs.need_build == 'true' }}
       run: |
         echo "正在克隆上游源码..."
         git clone https://github.com/asvow/luci-app-tailscale
@@ -47,7 +47,7 @@ jobs:
         echo "配置路径修改完成"
 
     - name: "4️⃣ 构建IPK包"
-      if: steps.版本检查.outputs.需要构建 == 'true'
+      if: ${{ steps.版本检查.outputs.need_build == 'true' }}
       run: |
         echo "开始构建IPK包..."
         mkdir -p ipk-build/control ipk-build/data
@@ -55,15 +55,15 @@ jobs:
         
         cat > ipk-build/control/control << EOF
 Package: luci-app-tailscale
-Version: ${{ steps.版本检查.outputs.最新版本 }}-persistent1
+Version: ${{ steps.版本检查.outputs.latest_version }}-persistent1
 Depends: libc, tailscale
 Source: luci-app-tailscale
 Section: luci
 Architecture: all
 Installed-Size: 1024
 Description: Tailscale LuCI app with persistent config
-  持久化配置版本，解决固件升级配置丢失问题
-  配置路径:/etc/config/tailscale-data
+ 持久化配置版本，解决固件升级配置丢失问题
+ 配置路径: /etc/config/tailscale-data
 EOF
 
         cd ipk-build
@@ -75,12 +75,12 @@ EOF
         echo "IPK包构建完成"
 
     - name: "5️⃣ 发布到Releases"
-      if: steps.版本检查.outputs.需要构建 == 'true'
+      if: ${{ steps.版本检查.outputs.need_build == 'true' }}
       uses: softprops/action-gh-release@v1
       with:
-        tag_name: "${{ steps.版本检查.outputs.最新版本 }}-persistent"
-        name: "luci-app-tailscale ${{ steps.版本检查.outputs.最新版本 }} (持久化配置版)"
+        tag_name: "${{ steps.版本检查.outputs.latest_version }}-persistent"
+        name: "luci-app-tailscale ${{ steps.版本检查.outputs.latest_version }} (持久化配置版)"
         files: "luci-app-tailscale-persistent.ipk"
         body: "luci-app-tailscale 持久化配置版本，解决固件升级配置丢失问题"
       env:
-        GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
