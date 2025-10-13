@@ -120,10 +120,16 @@ jobs:
         if: ${{ steps.check.outputs.need_build == 'true' }}
         run: |
           set -e
-          SDK_URL="https://downloads.openwrt.org/releases/24.10.0-rc1/targets/x86/64/openwrt-sdk-24.10.0-rc1-x86-64_gcc-13.2.0_musl.Linux-x86_64.tar.xz"
+          SDK_URL="https://downloads.openwrt.org/releases/24.10.0-rc1/targets/x86/64/openwrt-sdk-24.10.0-rc1-x86-64_gcc-13.3.0_musl.Linux-x86_64.tar.zst"
+          echo "下载 APK SDK: $SDK_URL"
           curl -LO "$SDK_URL"
-          tar -xJf "$(basename "$SDK_URL")"
+          tar --use-compress-program=unzstd -xf "$(basename "$SDK_URL")"
+
+          echo "=== 工作目录结构（APK） ==="
+          ls -l
+
           SDK_DIR=$(realpath $(find . -maxdepth 1 -type d -name "openwrt-sdk-24.*-x86-64*"))
+          echo "APK SDK_DIR=$SDK_DIR"
           echo "APK_SDK_DIR=$SDK_DIR" >> $GITHUB_ENV
 
           cd "$SDK_DIR"
@@ -132,6 +138,10 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install luci liblucihttp liblucihttp-ucode
           git clone https://github.com/asvow/luci-app-tailscale package/luci-app-tailscale
+
+          echo "=== APK package 目录结构 ==="
+          ls -l package
+
 
       - name: "7️⃣ APK：替换路径并编译"
         if: ${{ steps.check.outputs.need_build == 'true' }}
