@@ -67,7 +67,6 @@ jobs:
         if: ${{ steps.check.outputs.need_build == 'true' }}
         run: |
           set -e
-          # 这里以 x86_64 为例，你可以换成你目标架构的 SDK
           SDK_URL="https://downloads.immortalwrt.org/releases/24.10.0/targets/x86/64/immortalwrt-sdk-24.10.0-x86-64_gcc-13.3.0_musl.Linux-x86_64.tar.zst"
           echo "下载 SDK: $SDK_URL"
           curl -LO "$SDK_URL"
@@ -104,16 +103,16 @@ jobs:
           CONFIG_PACKAGE_luci=y
           CONFIG_PACKAGE_liblucihttp=y
           CONFIG_PACKAGE_liblucihttp-ucode=y
-          CONFIG_LUCI_LANG_zh_Hans=y
-          CONFIG_LUCI_LANG_zh_Hant=y
+          CONFIG_LUCI_LANG_zh-cn=y
+          CONFIG_LUCI_LANG_zh-tw=y
           CONFIG_PACKAGE_luci-app-tailscale=y
-          CONFIG_PACKAGE_luci-i18n-tailscale-zh_Hans=y
-          CONFIG_PACKAGE_luci-i18n-tailscale-zh_Hant=y
+          CONFIG_PACKAGE_luci-i18n-tailscale-zh-cn=y
+          CONFIG_PACKAGE_luci-i18n-tailscale-zh-tw=y
           EOF
           make defconfig
           make package/luci-app-tailscale/compile V=s
-          make package/feeds/luci/luci-i18n-tailscale-zh_Hans/compile V=s || true
-          make package/feeds/luci/luci-i18n-tailscale-zh_Hant/compile V=s || true
+          make package/feeds/luci/luci-i18n-tailscale-zh-cn/compile V=s || true
+          make package/feeds/luci/luci-i18n-tailscale-zh-tw/compile V=s || true
 
       - name: "7️⃣ 收集产物"
         if: ${{ steps.check.outputs.need_build == 'true' }}
@@ -124,13 +123,15 @@ jobs:
           OUT_DIR="${PWD}/out"
           mkdir -p "$OUT_DIR"
 
-          find bin -type f -name "luci-app-tailscale_*_all.ipk" -exec cp -v {} "$OUT_DIR/" \;
-          find bin -type f -name "luci-i18n-tailscale-zh_Hans_*_all.ipk" -exec cp -v {} "$OUT_DIR/" \;
-          find bin -type f -name "luci-i18n-tailscale-zh_Hant_*_all.ipk" -exec cp -v {} "$OUT_DIR/" \;
+          # IPK
+          find bin/packages -type f -name "luci-app-tailscale_*_all.ipk" -exec cp -v {} "$OUT_DIR/" \;
+          find bin/packages -type f -name "luci-i18n-tailscale-zh-cn_*_all.ipk" -exec cp -v {} "$OUT_DIR/" \;
+          find bin/packages -type f -name "luci-i18n-tailscale-zh-tw_*_all.ipk" -exec cp -v {} "$OUT_DIR/" \;
 
-          find bin -type f -name "luci-app-tailscale-*-*.apk" -exec cp -v {} "$OUT_DIR/" \;
-          find bin -type f -name "luci-i18n-tailscale-zh_Hans-*-*.apk" -exec cp -v {} "$OUT_DIR/" \;
-          find bin -type f -name "luci-i18n-tailscale-zh_Hant-*-*.apk" -exec cp -v {} "$OUT_DIR/" \;
+          # APK
+          find bin/apk -type f -name "luci-app-tailscale-*.apk" -exec cp -v {} "$OUT_DIR/" \;
+          find bin/apk -type f -name "luci-i18n-tailscale-zh-cn-*.apk" -exec cp -v {} "$OUT_DIR/" \;
+          find bin/apk -type f -name "luci-i18n-tailscale-zh-tw-*.apk" -exec cp -v {} "$OUT_DIR/" \;
 
           echo "OUT_DIR=$OUT_DIR" >> $GITHUB_OUTPUT
           ls -lh "$OUT_DIR"
@@ -148,7 +149,7 @@ jobs:
             - 产物包含：
               * luci-app-tailscale_<ver>_all.ipk
               * luci-app-tailscale-<ver>-r1.apk
-              * luci-i18n-tailscale-zh_Hans_<ver>_all.ipk / .apk
-              * luci-i18n-tailscale-zh_Hant_<ver>_all.ipk / .apk
+              * luci-i18n-tailscale-zh-cn_<ver>_all.ipk / .apk
+              * luci-i18n-tailscale-zh-tw_<ver>_all.ipk / .apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
