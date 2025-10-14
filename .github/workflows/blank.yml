@@ -70,9 +70,13 @@ jobs:
           make package/feeds/luci/luci-i18n-tailscale-zh-cn/compile V=s || true
           make package/feeds/luci/luci-i18n-tailscale-zh-tw/compile V=s || true
 
+          echo "=== APK SDK 编译产物 ==="
+          ls -lh bin/packages/*/*/ || true
+          ls -lh bin/apk/*/ || true
+
           mkdir -p ../out-apk
-          cp bin/packages/*/*/*.ipk ../out-apk/ || true
-          cp bin/apk/*/*/*.apk ../out-apk/ || true
+          cp bin/packages/*/*/*.ipk ../out-apk/ 2>/dev/null || true
+          cp bin/apk/*/*.apk ../out-apk/ 2>/dev/null || true
 
       # =========================
       # ImmortalWrt 24.10 SDK (ipk)
@@ -108,43 +112,24 @@ jobs:
           make package/feeds/luci/luci-i18n-tailscale-zh-cn/compile V=s || true
           make package/feeds/luci/luci-i18n-tailscale-zh-tw/compile V=s || true
 
+          
+          echo "=== IPK SDK 编译产物 ==="
+          ls -lh bin/packages/*/*/ || true
+
           mkdir -p ../out-ipk
-          cp bin/packages/*/*/*.ipk ../out-ipk/ || true
+          cp bin/packages/*/*/*.ipk ../out-ipk/ 2>/dev/null || true
 
       # =========================
-      # 汇总 & 重命名 & 发布
+      # 汇总 && 发布
       # =========================
-      - name: "8️⃣ 汇总并重命名产物"
+      - name: "8️⃣ 汇总产物"
         run: |
           set -e
           mkdir -p out
-          cp -r out-apk/* out/ || true
-          cp -r out-ipk/* out/ || true
-
-          cd out
-          for f in *.ipk; do
-            case "$f" in
-              luci-app-tailscale_*_all.ipk)
-                mv "$f" "luci-app-tailscale_${{ steps.version.outputs.version }}-r1_all.ipk"
-                ;;
-              luci-i18n-tailscale-zh-cn_*.ipk)
-                mv "$f" "luci-i18n-tailscale-zh-cn_${{ steps.version.outputs.version }}-r1_all.ipk"
-                ;;
-              luci-i18n-tailscale-zh-tw_*.ipk)
-                mv "$f" "luci-i18n-tailscale-zh-tw_${{ steps.version.outputs.version }}-r1_all.ipk"
-                ;;
-            esac
-          done
-
-          for f in *.apk; do
-            case "$f" in
-              luci-app-tailscale-*.apk)
-                mv "$f" "luci-app-tailscale-${{ steps.version.outputs.version }}-r1.apk"
-                ;;
-            esac
-          done
-
-          ls -lh
+          cp -r out-apk/* out/ 2>/dev/null || true
+          cp -r out-ipk/* out/ 2>/dev/null || true
+          echo "=== 最终产物 ==="
+          ls -lh out
 
       - name: "9️⃣ 发布 Release"
         uses: softprops/action-gh-release@v1
