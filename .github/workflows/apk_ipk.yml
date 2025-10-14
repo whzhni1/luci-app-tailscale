@@ -1,4 +1,4 @@
-name: "构建 APK + IPK"
+name: "APK + IPK"
 
 on:
   workflow_dispatch:
@@ -51,7 +51,7 @@ jobs:
           mv "$SDK_DIR" immortalwrt-sdk
           echo "SDK_DIR=$PWD/immortalwrt-sdk" >> $GITHUB_ENV
 
-      - name: "5️⃣ 配置并编译（生成 ipk + apk）"
+      - name: "5️⃣ 初始化 SDK 环境"
         run: |
           set -e
           cd "$SDK_DIR"
@@ -60,60 +60,76 @@ jobs:
           echo "src-git luci https://github.com/immortalwrt/luci.git" >> feeds.conf
           ./scripts/feeds update -a
           ./scripts/feeds install -a
-
+          
           cp -r "$SRC_DIR" package/luci-app-tailscale
 
+      - name: "6️⃣ 编译 IPK 格式"
+        run: |
+          set -e
+          cd "$SDK_DIR"
+          
+          # 配置为 IPK 模式（不启用 APK）
+          cat > .config <<EOF
+          CONFIG_PACKAGE_luci-app-tailscale=y
+          CONFIG_PACKAGE_luci-i18n-tailscale-zh-cn=y
+          CONFIG_PACKAGE_luci-i18n-tailscale-zh-tw=y
+          EOF
+          
+          make defconfig
+          make package/luci-app-tailscale/compile V=s -j2
+          make package/feeds/luci/luci-i18n-tailscale-zh-cn/compile V=s -j2 || true
+          make package/feeds/luci/luci-i18n-tailscale-zh-tw/compile V=s -j2 || true
+          make package/index V=s
+          
+          # 保存 IPK 文件
+          mkdir -p ../out
+          cp -v bin/packages/*/*tailscale*.ipk ../out/ 2>/dev/null || true
+          
+          echo "=== IPK 文件已收集 ==="
+          ls -lh ../out/
+
+      - name: "7️⃣ 切换到 APK 模式并重新打包"
+        run: |
+          set -e
+          cd "$SDK_DIR"
+          
+          # 重新配置为 APK 模式
           cat > .config <<EOF
           CONFIG_TARGET_PACKAGING_APK=y
           CONFIG_PACKAGE_luci-app-tailscale=y
           CONFIG_PACKAGE_luci-i18n-tailscale-zh-cn=y
           CONFIG_PACKAGE_luci-i18n-tailscale-zh-tw=y
           EOF
-
+          
           make defconfig
           
-          # 编译软件包（生成 .ipk）
-          make package/luci-app-tailscale/compile V=s -j2
-          make package/feeds/luci/luci-i18n-tailscale-zh-cn/compile V=s -j2 || true
-          make package/feeds/luci/luci-i18n-tailscale-zh-tw/compile V=s -j2 || true
-
-          # 生成索引（此时会从 .ipk 转换生成 .apk）
+          # 清理旧的包索引，重新生成（这会转换为 APK）
+          rm -rf bin/packages/*/base/Packages*
           make package/index V=s
-
-      - name: "6️⃣ 收集产物（ipk + apk）"
-        run: |
-          set -e
-          cd "$SDK_DIR"
-          mkdir -p ../out
           
-          # 收集 .ipk 文件（在 bin/packages/ 下）
-          find bin/packages -type f KATEX_INLINE_OPEN -name "luci-app-tailscale*.ipk" \
-                                      -o -name "luci-i18n-tailscale-zh-*.ipk" KATEX_INLINE_CLOSE \
-               -exec cp -v {} ../out/ \;
+          # 保存 APK 文件
+          cp -v bin/packages/*/*tailscale*.apk ../out/ 2>/dev/null || true
           
-          # 收集 .apk 文件（在 bin/targets/.../packages/ 下）
-          find bin/targets -type f KATEX_INLINE_OPEN -name "luci-app-tailscale*.apk" \
-                                     -o -name "luci-i18n-tailscale-zh-*.apk" KATEX_INLINE_CLOSE \
-               -exec cp -v {} ../out/ \; 2>/dev/null || true
+          echo "=== APK 文件已收集 ==="
+          ls -lh ../out/
 
-      - name: "7️⃣ 调试：列出 bin 目录结构"
+      - name: "8️⃣ 最终产物检查"
         if: always()
         run: |
-          cd "$SDK_DIR"
-          echo "=== bin/packages 结构 ==="
-          find bin/packages -name "*tailscale*" -type f || true
+          echo "=== 最终产物列表 ==="
+          ls -lh out/ || true
           echo ""
-          echo "=== bin/targets 结构 ==="
-          find bin/targets -name "*tailscale*" -type f || true
+          echo "=== IPK 文件 ==="
+          ls -lh out/*.ipk 2>/dev/null || echo "未找到 IPK"
           echo ""
-          echo "=== 最终产物 ==="
-          ls -lh ../out/ || true
+          echo "=== APK 文件 ==="
+          ls -lh out/*.apk 2>/dev/null || echo "未找到 APK"
 
-      - name: "8️⃣ 发布 Release"
+      - name: "9️⃣ 发布 Release"
         uses: softprops/action-gh-release@v1
         with:
           tag_name: "${{ steps.version.outputs.tag }}"
-          name: "luci-app-tailscale ${{ steps.version.outputs.version }}（ImmortalWrt 主线 APK + IPK）"
+          name: "luci-app-tailscale ${{ steps.version.outputs.version }}（ImmortalWrt APK + IPK）"
           files: "out/*"
           body: |
             ## 📦 包含文件
@@ -125,9 +141,9 @@ jobs:
             
             ## 📥 安装方法
             ```bash
-            # IPK 方式
+            # IPK 方式（传统系统）
             opkg install luci-app-tailscale*.ipk
             
-            # APK 方式
+            # APK 方式（新版系统）
             apk add --allow-untrusted luci-app-tailscale*.apk
             ```
