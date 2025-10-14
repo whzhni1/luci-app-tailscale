@@ -48,8 +48,9 @@ jobs:
         run: |
           set -e
           cd "$SDK_DIR"
-          echo "src-git packages https://git.immortalwrt.org/feed/packages.git" > feeds.conf
-          echo "src-git luci https://git.immortalwrt.org/project/luci.git" >> feeds.conf
+          echo "src-git packages https://github.com/immortalwrt/packages.git" > feeds.conf
+          echo "src-git luci https://github.com/immortalwrt/luci.git" >> feeds.conf
+
           ./scripts/feeds update -a
           ./scripts/feeds install -a
           git clone https://github.com/asvow/luci-app-tailscale package/luci-app-tailscale
