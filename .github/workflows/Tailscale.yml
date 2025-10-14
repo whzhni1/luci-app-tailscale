@@ -77,29 +77,22 @@ jobs:
           make package/feeds/luci/luci-i18n-tailscale-zh-cn/compile V=s -j2 || true
           make package/feeds/luci/luci-i18n-tailscale-zh-tw/compile V=s -j2 || true
 
-          # 生成 APK 索引（将已编译的 ipk 转换为 apk）
+          # 生成 APK 索引
           make package/index V=s
 
           mkdir -p ../out
 
-          # 精确过滤收集（IPK 使用下划线、APK 使用连字符）
-          # 收集 IPK（bin/packages 层级）
-          find bin -type f \( \
-            -name "luci-app-tailscale_*.ipk" \
-            -o -name "luci-i18n-tailscale-zh-cn_*.ipk" \
-            -o -name "luci-i18n-tailscale-zh-tw_*.ipk" \
-          \) -exec cp {} ../out/ \;
+          # 收集 ipk
+          find bin/packages -type f -name "luci-app-tailscale*.ipk" -exec cp {} ../out/ \;
+          find bin/packages -type f -name "luci-i18n-tailscale-zh-*.ipk" -exec cp {} ../out/ \;
 
-          # 收集 APK（bin/targets/.../packages 层级）
-          find bin -type f \( \
-            -name "luci-app-tailscale-*.apk" \
-            -o -name "luci-i18n-tailscale-zh-cn-*.apk" \
-            -o -name "luci-i18n-tailscale-zh-tw-*.apk" \
-          \) -exec cp {} ../out/ \;
+          # 收集 apk
+          find bin/targets -type f -name "luci-app-tailscale*.apk" -exec cp {} ../out/ \;
+          find bin/targets -type f -name "luci-i18n-tailscale-zh-*.apk" -exec cp {} ../out/ \;
 
       - name: "6️⃣ 打印产物"
         run: |
-          echo "=== 最终产物（过滤后，仅 luci-app + i18n） ==="
+          echo "=== 最终产物 ==="
           ls -lh out || true
 
       - name: "7️⃣ 发布 Release"
@@ -110,5 +103,4 @@ jobs:
           files: "out/*"
           body: |
             - ImmortalWrt 主线 SDK → 生成 .apk + .ipk
-            - 仅发布 luci-app-tailscale 和 i18n（无系统库/内核模块）
             - 持久化路径：/etc/config/tailscale-data
