@@ -76,20 +76,27 @@ jobs:
           make package/feeds/luci/luci-i18n-tailscale-zh-tw/compile V=s -j2 || true
           make package/index V=s
 
-      - name: "6️⃣ 收集产物（只保留 luci-app 和 i18n）"
+      - name: "6️⃣ 收集产物（精确过滤，只保留 luci-app 和 i18n）"
         run: |
           set -e
           cd "$SDK_DIR"
           mkdir -p ../out
           
-          # 只收集 luci-app-tailscale 和 luci-i18n-tailscale 的 IPK 和 APK
-          find bin -type f -name "luci-app-tailscale*.ipk" -exec cp -v {} ../out/ \;
-          find bin -type f -name "luci-app-tailscale*.apk" -exec cp -v {} ../out/ \;
-          find bin -type f -name "luci-i18n-tailscale*.ipk" -exec cp -v {} ../out/ \;
-          find bin -type f -name "luci-i18n-tailscale*.apk" -exec cp -v {} ../out/ \;
+          # 收集所有文件到临时目录
+          mkdir -p ../temp
+          cp -r bin/packages/*/*/*.ipk ../temp/ 2>/dev/null || true
+          cp -r bin/packages/*/*/*.apk ../temp/ 2>/dev/null || true
           
-          echo "=== 最终产物 ==="
-          ls -lh ../out/
+          # 只保留 luci-app-tailscale 和 luci-i18n-tailscale 开头的文件
+          cd ../temp
+          mv luci-app-tailscale*.ipk ../out/ 2>/dev/null || true
+          mv luci-app-tailscale*.apk ../out/ 2>/dev/null || true
+          mv luci-i18n-tailscale*.ipk ../out/ 2>/dev/null || true
+          mv luci-i18n-tailscale*.apk ../out/ 2>/dev/null || true
+          
+          cd ..
+          echo "=== 最终产物（已过滤） ==="
+          ls -lh out/
 
       - name: "7️⃣ 发布 Release"
         uses: softprops/action-gh-release@v1
@@ -100,14 +107,14 @@ jobs:
           body: |
             ## 📦 包含文件
             - **APK 格式**：ImmortalWrt 主线（新版 apk 包管理器）
-            - **IPK 格式**：ImmortalWrt 主线（同时兼容 opkg）
+            - **IPK 格式**：ImmortalWrt 主线（传统 opkg 包管理器）
             
             ## 🔧 持久化配置
             - 数据路径：`/etc/config/tailscale-data`
             
             ## 📥 安装方法
             ```bash
-            # APK 方式（ImmortalWrt 主线/新版）
+            # APK 方式（ImmortalWrt 主线）
             apk add --allow-untrusted luci-app-tailscale*.apk
             
             # IPK 方式（传统 OpenWrt/ImmortalWrt）
@@ -115,5 +122,5 @@ jobs:
             ```
             
             ## ⚠️ 注意事项
-            - 仅包含 LuCI 界面插件，不含 Tailscale 主程序
-            - 需要自行安装 `tailscale` 包（系统源通常已包含）
+            - 仅包含 LuCI 界面插件（6 个文件）
+            - 不含依赖库和 Tailscale 主程序
