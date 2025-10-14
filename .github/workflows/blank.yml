@@ -89,11 +89,11 @@ jobs:
           
       - name: "6️⃣ 调试 APK 编译过程"
         run: |
-          echo "=== 检查 SDK 目录结构 ==="
-          find "$SDK_DIR_APK" -name "*.mk" | grep -i apk | head -10
+          #echo "=== 检查 SDK 目录结构 ==="
+          #find "$SDK_DIR_APK" -name "*.mk" | grep -i apk | head -10
     
-          echo "=== 检查配置文件 ==="
-          cat "$SDK_DIR_APK/.config" || echo "无 .config 文件"
+          #echo "=== 检查配置文件 ==="
+          #cat "$SDK_DIR_APK/.config" || echo "无 .config 文件"
     
           echo "=== 检查编译产物目录 ==="
           ls -la "$SDK_DIR_APK/bin/" || echo "bin 目录不存在"
