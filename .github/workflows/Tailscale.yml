@@ -1,4 +1,4 @@
-name: "构建 Tailscale（ImmortalWrt 主线 APK + IPK）"
+name: "构建 Tailscale主线SDK+APK + IPK"
 
 on:
   workflow_dispatch:
