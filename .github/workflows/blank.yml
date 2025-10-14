@@ -77,18 +77,19 @@ jobs:
           make package/feeds/luci/luci-i18n-tailscale-zh-cn/compile V=s || true
           make package/feeds/luci/luci-i18n-tailscale-zh-tw/compile V=s || true
 
-          echo "=== APK SDK 编译产物 ==="
-          ls -lh bin/packages/*/*/ || true
-          ls -lh bin/apk/*/ || true
-
           mkdir -p ../out-apk
           cp bin/packages/*/*/*.ipk ../out-apk/ 2>/dev/null || true
           cp bin/apk/*/*.apk ../out-apk/ 2>/dev/null || true
 
+      - name: "6️⃣ 打印 APK SDK 产物"
+        run: |
+          echo "=== APK SDK 编译产物 ==="
+          ls -lh out-apk || true
+
       # =========================
       # ImmortalWrt 24.10 SDK (ipk)
       # =========================
-      - name: "6️⃣ 下载 ImmortalWrt 24.10 SDK (ipk)"
+      - name: "7️⃣ 下载 ImmortalWrt 24.10 SDK (ipk)"
         run: |
           set -e
           SDK_URL="https://downloads.immortalwrt.org/releases/24.10.0/targets/x86/64/immortalwrt-sdk-24.10.0-x86-64_gcc-13.3.0_musl.Linux-x86_64.tar.zst"
@@ -98,7 +99,7 @@ jobs:
           mv "$SDK_DIR_RAW" immortalwrt-sdk-ipk
           echo "SDK_DIR_IPK=$PWD/immortalwrt-sdk-ipk" >> $GITHUB_ENV
 
-      - name: "7️⃣ 配置并编译（ImmortalWrt 24.10 SDK → ipk）"
+      - name: "8️⃣ 配置并编译（ImmortalWrt 24.10 SDK → ipk）"
         run: |
           set -e
           cd "$SDK_DIR_IPK"
@@ -120,16 +121,18 @@ jobs:
           make package/feeds/luci/luci-i18n-tailscale-zh-cn/compile V=s || true
           make package/feeds/luci/luci-i18n-tailscale-zh-tw/compile V=s || true
 
-          echo "=== IPK SDK 编译产物 ==="
-          ls -lh bin/packages/*/*/ || true
-
           mkdir -p ../out-ipk
           cp bin/packages/*/*/*.ipk ../out-ipk/ 2>/dev/null || true
+
+      - name: "9️⃣ 打印 IPK SDK 产物"
+        run: |
+          echo "=== IPK SDK 编译产物 ==="
+          ls -lh out-ipk || true
 
       # =========================
       # 汇总 & 发布
       # =========================
-      - name: "8️⃣ 汇总产物"
+      - name: "🔟 汇总产物"
         run: |
           set -e
           mkdir -p out
@@ -138,7 +141,7 @@ jobs:
           echo "=== 最终产物 ==="
           ls -lh out
 
-      - name: "9️⃣ 发布 Release"
+      - name: "1️⃣1️⃣ 发布 Release"
         uses: softprops/action-gh-release@v1
         with:
           tag_name: "${{ steps.version.outputs.tag }}"
