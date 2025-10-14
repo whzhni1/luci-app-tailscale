@@ -32,7 +32,7 @@ jobs:
           echo "tag=$base" >> $GITHUB_OUTPUT
 
       # =========================
-      # OpenWrt 官方 SDK (apk)
+      # immortalwrt 主线 SDK (apk)
       # =========================
       - name: "3️⃣ 下载 apk插件 SDK"
         run: |
@@ -40,16 +40,16 @@ jobs:
           SDK_URL="https://downloads.immortalwrt.org/snapshots/targets/x86/generic/immortalwrt-sdk-x86-generic_gcc-14.3.0_musl.Linux-x86_64.tar.zst"
           curl -LO "$SDK_URL"
           tar --use-compress-program=unzstd -xf "$(basename "$SDK_URL")"
-          SDK_DIR=$(find . -maxdepth 1 -type d -name "openwrt-sdk-*")
-          mv "$SDK_DIR" openwrt-sdk
-          echo "SDK_DIR=$PWD/openwrt-sdk" >> $GITHUB_ENV
+          SDK_DIR=$(find . -maxdepth 1 -type d -name "immortalwrt-sdk-*")
+          mv "$SDK_DIR" immortalwrt-sdk
+          echo "SDK_DIR=$PWD/immortalwrt-sdk" >> $GITHUB_ENV
 
-      - name: "4️⃣ 配置并编译（OpenWrt SDK）"
+      - name: "4️⃣ 配置并编译（immortalwrt 主线SDK）"
         run: |
           set -e
           cd "$SDK_DIR"
-          echo "src-git packages https://git.openwrt.org/feed/packages.git" > feeds.conf
-          echo "src-git luci https://git.openwrt.org/project/luci.git" >> feeds.conf
+          echo "src-git packages https://git.immortalwrt.org/feed/packages.git" > feeds.conf
+          echo "src-git luci https://git.immortalwrt.org/project/luci.git" >> feeds.conf
           ./scripts/feeds update -a
           ./scripts/feeds install -a
           git clone https://github.com/asvow/luci-app-tailscale package/luci-app-tailscale
@@ -72,8 +72,8 @@ jobs:
           make package/feeds/luci/luci-i18n-tailscale-zh-tw/compile V=s || true
 
           mkdir -p ../out-openwrt
-          cp bin/packages/*/*/*.ipk ../out-openwrt/ || true
-          cp bin/apk/*/*.apk ../out-openwrt/ || true
+          cp bin/packages/*/*/*.ipk ../out-immortalwrt/ || true
+          cp bin/apk/*/*.apk ../out-immortalwrt/ || true
 
       # =========================
       # ImmortalWrt SDK (ipk)
