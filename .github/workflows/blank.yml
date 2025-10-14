@@ -84,7 +84,7 @@ jobs:
           
           # 只收集 luci-app-tailscale 和 luci-i18n-tailscale 的 IPK 和 APK
           find bin -type f -name "luci-app-tailscale*.ipk" -exec cp -v {} ../out/ \;
-          find bin -type f -name "luci-app-tailscale*.apk" -exec cp -v {} \;
+          find bin -type f -name "luci-app-tailscale*.apk" -exec cp -v {} ../out/ \;
           find bin -type f -name "luci-i18n-tailscale*.ipk" -exec cp -v {} ../out/ \;
           find bin -type f -name "luci-i18n-tailscale*.apk" -exec cp -v {} ../out/ \;
           
