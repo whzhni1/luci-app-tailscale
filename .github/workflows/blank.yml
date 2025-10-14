@@ -81,10 +81,17 @@ jobs:
           cp bin/packages/*/*/*.ipk ../out-apk/ 2>/dev/null || true
           cp bin/apk/*/*.apk ../out-apk/ 2>/dev/null || true
 
-      - name: "6️⃣ 打印 APK SDK 产物"
+      - name: "6️⃣ 调试 APK 编译过程"
         run: |
-          echo "=== APK SDK 编译产物 ==="
-          ls -lh out-apk || true
+          echo "=== 检查 SDK 目录结构 ==="
+          find "$SDK_DIR_APK" -name "*.mk" | grep -i apk | head -10
+    
+          echo "=== 检查配置文件 ==="
+          cat "$SDK_DIR_APK/.config" || echo "无 .config 文件"
+    
+          echo "=== 检查编译产物目录 ==="
+          ls -la "$SDK_DIR_APK/bin/" || echo "bin 目录不存在"
+          find "$SDK_DIR_APK" -name "*.apk" -o -name "*.ipk" | head -20
 
       # =========================
       # ImmortalWrt 24.10 SDK (ipk)
