@@ -1,4 +1,4 @@
-name: "构建 Tailscale（OpenWrt + ImmortalWrt 双 SDK）"
+name: "构建 Tailscale（ImmortalWrt 主线 APK + ImmortalWrt 24.10 IPK）"
 
 on:
   workflow_dispatch:
@@ -31,113 +31,96 @@ jobs:
           echo "version=$ver" >> $GITHUB_OUTPUT
           echo "tag=$base" >> $GITHUB_OUTPUT
 
+      - name: "3️⃣ 拉取 luci-app-tailscale 源码并做持久化替换"
+        run: |
+          set -e
+          mkdir -p src
+          git clone https://github.com/asvow/luci-app-tailscale src/luci-app-tailscale
+          cd src/luci-app-tailscale
+          sed -i "s|/etc/tailscale|/etc/config/tailscale-data|g" $(grep -rl "/etc/tailscale" .)
+
       # =========================
-      # immortalwrt 主线 SDK (apk)
+      # ImmortalWrt 主线 SDK (apk)
       # =========================
-      - name: "3️⃣ 下载 apk插件 SDK"
+      - name: "4️⃣ 下载 ImmortalWrt 主线 SDK (apk)"
         run: |
           set -e
           SDK_URL="https://downloads.immortalwrt.org/snapshots/targets/x86/generic/immortalwrt-sdk-x86-generic_gcc-14.3.0_musl.Linux-x86_64.tar.zst"
           curl -LO "$SDK_URL"
           tar --use-compress-program=unzstd -xf "$(basename "$SDK_URL")"
           SDK_DIR=$(find . -maxdepth 1 -type d -name "immortalwrt-sdk-*")
-          mv "$SDK_DIR" immortalwrt-sdk
-          echo "SDK_DIR=$PWD/immortalwrt-sdk" >> $GITHUB_ENV
+          mv "$SDK_DIR" immortalwrt-sdk-apk
+          echo "SDK_DIR_APK=$PWD/immortalwrt-sdk-apk" >> $GITHUB_ENV
 
-      - name: "4️⃣ 配置并编译（immortalwrt 主线SDK）"
+      - name: "5️⃣ 配置并编译（ImmortalWrt 主线 SDK → apk）"
         run: |
           set -e
-          cd "$SDK_DIR"
+          cd "$SDK_DIR_APK"
           echo "src-git packages https://github.com/immortalwrt/packages.git" > feeds.conf
           echo "src-git luci https://github.com/immortalwrt/luci.git" >> feeds.conf
-
           ./scripts/feeds update -a
           ./scripts/feeds install -a
-          git clone https://github.com/asvow/luci-app-tailscale package/luci-app-tailscale
 
-          # 持久化路径替换
-          cd package/luci-app-tailscale
-          sed -i "s|/etc/tailscale|/etc/config/tailscale-data|g" $(grep -rl "/etc/tailscale" .)
-          cd ../..
+          cp -r ../../src/luci-app-tailscale package/luci-app-tailscale
 
-          # cat > .config <<EOF
-          #CONFIG_ALL=y
-          #CONFIG_TARGET_PACKAGING_APK=y
-          #CONFIG_PACKAGE_luci-app-tailscale=y
-          #CONFIG_PACKAGE_luci-i18n-tailscale-zh-cn=y
-          #CONFIG_PACKAGE_luci-i18n-tailscale-zh-tw=y
-          #EOF
           make defconfig
           make package/luci-app-tailscale/compile V=s
           make package/feeds/luci/luci-i18n-tailscale-zh-cn/compile V=s || true
           make package/feeds/luci/luci-i18n-tailscale-zh-tw/compile V=s || true
 
-          mkdir -p ../out-openwrt
-          cp bin/packages/*/*/*.ipk ../out-immortalwrt/ || true
-          cp bin/apk/*/*.apk ../out-immortalwrt/ || true
+          mkdir -p ../out-apk
+          cp bin/packages/*/*/*.ipk ../out-apk/ || true
+          cp bin/apk/*/*/*.apk ../out-apk/ || true
 
       # =========================
-      # ImmortalWrt SDK (ipk)
+      # ImmortalWrt 24.10 SDK (ipk)
       # =========================
-      - name: "5️⃣ 下载 ImmortalWrt 24.10 SDK"
+      - name: "6️⃣ 下载 ImmortalWrt 24.10 SDK (ipk)"
         run: |
           set -e
           SDK_URL="https://downloads.immortalwrt.org/releases/24.10.0/targets/x86/64/immortalwrt-sdk-24.10.0-x86-64_gcc-13.3.0_musl.Linux-x86_64.tar.zst"
           curl -LO "$SDK_URL"
           tar --use-compress-program=unzstd -xf "$(basename "$SDK_URL")"
           SDK_DIR_RAW=$(find . -maxdepth 1 -type d -name "immortalwrt-sdk-*")
-          mv "$SDK_DIR_RAW" immortalwrt-sdk
-          echo "SDK_DIR2=$PWD/immortalwrt-sdk" >> $GITHUB_ENV
+          mv "$SDK_DIR_RAW" immortalwrt-sdk-ipk
+          echo "SDK_DIR_IPK=$PWD/immortalwrt-sdk-ipk" >> $GITHUB_ENV
 
-      - name: "6️⃣ 配置并编译ipk"
+      - name: "7️⃣ 配置并编译（ImmortalWrt 24.10 SDK → ipk）"
         run: |
           set -e
-          cd "$SDK_DIR2"
+          cd "$SDK_DIR_IPK"
           echo "src-git packages https://github.com/immortalwrt/packages.git" > feeds.conf
           echo "src-git luci https://github.com/immortalwrt/luci.git" >> feeds.conf
           ./scripts/feeds update -a
           ./scripts/feeds install -a
-          git clone https://github.com/asvow/luci-app-tailscale package/luci-app-tailscale
 
-          # 清理旧目录再 clone
-          rm -rf package/luci-app-tailscale
-          git clone https://github.com/asvow/luci-app-tailscale package/luci-app-tailscale
-          # 持久化路径替换（ImmortalWrt SDK）
-          cd package/luci-app-tailscale
-          sed -i "s|/etc/tailscale|/etc/config/tailscale-data|g" $(grep -rl "/etc/tailscale" .)
-          cd ../..
+          cp -r ../../src/luci-app-tailscale package/luci-app-tailscale
 
-          cat > .config <<EOF
-          CONFIG_ALL=y
-          CONFIG_PACKAGE_luci-app-tailscale=y
-          CONFIG_PACKAGE_luci-i18n-tailscale-zh-cn=y
-          CONFIG_PACKAGE_luci-i18n-tailscale-zh-tw=y
-          EOF
           make defconfig
           make package/luci-app-tailscale/compile V=s
           make package/feeds/luci/luci-i18n-tailscale-zh-cn/compile V=s || true
           make package/feeds/luci/luci-i18n-tailscale-zh-tw/compile V=s || true
 
-          mkdir -p ../out-immortal
-          cp bin/packages/*/*/*.ipk ../out-immortal/ || true
+          mkdir -p ../out-ipk
+          cp bin/packages/*/*/*.ipk ../out-ipk/ || true
 
       # =========================
       # 汇总 & 发布
       # =========================
-      - name: "7️⃣ 汇总产物"
+      - name: "8️⃣ 汇总产物"
         run: |
           mkdir -p out
-          cp -r out-openwrt/* out/ || true
-          cp -r out-immortal/* out/ || true
+          cp -r out-apk/* out/ || true
+          cp -r out-ipk/* out/ || true
           ls -lh out
 
-      - name: "8️⃣ 发布 Release"
+      - name: "9️⃣ 发布 Release"
         uses: softprops/action-gh-release@v1
         with:
           tag_name: "${{ steps.version.outputs.tag }}"
-          name: "luci-app-tailscale ${{ steps.version.outputs.version }}（OpenWrt+ImmortalWrt 双 SDK）"
+          name: "luci-app-tailscale ${{ steps.version.outputs.version }}（ImmortalWrt 主线 APK + ImmortalWrt 24.10 IPK）"
           files: "out/*"
           body: |
-            - OpenWrt 24.10 SDK → 生成 .apk + .ipk
+            - ImmortalWrt 主线 SDK → 生成 .apk + .ipk
             - ImmortalWrt 24.10 SDK → 生成 .ipk
             - 持久化路径：/etc/config/tailscale-data
