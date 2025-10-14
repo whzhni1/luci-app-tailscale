@@ -84,6 +84,7 @@ jobs:
           curl -LO "$SDK_URL"
           tar --use-compress-program=unzstd -xf "$(basename "$SDK_URL")"
           SDK_DIR_RAW=$(find . -maxdepth 1 -type d -name "immortalwrt-sdk-*")
+          echo "解压出来的目录: $SDK_DIR_RAW"
           mv "$SDK_DIR_RAW" immortalwrt-sdk-ipk
           echo "SDK_DIR_IPK=$PWD/immortalwrt-sdk-ipk" >> $GITHUB_ENV
 
