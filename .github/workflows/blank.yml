@@ -66,9 +66,7 @@ jobs:
           cp -r "$SRC_DIR" package/luci-app-tailscale
 
           cat > .config <<EOF
-          CONFIG_TARGET_apk=y
           CONFIG_TARGET_PACKAGING_APK=y
-          CONFIG_APK_BUILD=y
           CONFIG_PACKAGE_luci-app-tailscale=y
           CONFIG_PACKAGE_luci-i18n-tailscale-zh-cn=y
           CONFIG_PACKAGE_luci-i18n-tailscale-zh-tw=y
@@ -76,20 +74,21 @@ jobs:
 
           make defconfig
 
-          # 只编译特定包，不编译整个系统
+          # 只编译特定包
           make package/luci-app-tailscale/compile V=s -j2
           make package/feeds/luci/luci-i18n-tailscale-zh-cn/compile V=s -j2 || true
           make package/feeds/luci/luci-i18n-tailscale-zh-tw/compile V=s -j2 || true
 
-          # 生成 APK 索引
+          # 生成 APK 索引，触发 APK 打包
           make package/index V=s
 
           mkdir -p ../out-apk
-          cp bin/targets/*/*/packages/*.apk ../out-apk/ 2>/dev/null || true
           cp bin/packages/*/*/*.ipk ../out-apk/ 2>/dev/null || true
+          cp bin/targets/*/*/packages/*.apk ../out-apk/ 2>/dev/null || true
           find bin -name "*.apk" -exec cp {} ../out-apk/ \; 2>/dev/null || true
 
-      - name: "6️⃣ 调试 APK 编译过程"
+
+      - name: "6️⃣ 收集生成的ipk_apk"
         run: |
           echo "=== 检查编译产物目录 ==="
           ls -la "$SDK_DIR_APK/bin/" || echo "bin 目录不存在"
