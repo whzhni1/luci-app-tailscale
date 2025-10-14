@@ -67,6 +67,7 @@ jobs:
 
           cat > .config <<EOF
           CONFIG_TARGET_PACKAGING_APK=y
+          CONFIG_TARGET_PACKAGING_IPK=y
           CONFIG_PACKAGE_luci-app-tailscale=y
           CONFIG_PACKAGE_luci-i18n-tailscale-zh-cn=y
           CONFIG_PACKAGE_luci-i18n-tailscale-zh-tw=y
@@ -88,8 +89,8 @@ jobs:
 
           # 收集 apk
           find bin/targets -type f -name "luci-app-tailscale*.apk" -exec cp {} ../out/ \;
-          find bin/targets -type f -name "luci-i18n-tailscale-zh-*.apk" -exec cp {} ../out/ \;
-
+          find bin/targets -type f -name
+          
       - name: "6️⃣ 打印产物"
         run: |
           echo "=== 最终产物 ==="
