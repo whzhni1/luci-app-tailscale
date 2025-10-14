@@ -34,10 +34,12 @@ jobs:
       - name: "3️⃣ 拉取 luci-app-tailscale 源码并做持久化替换"
         run: |
           set -e
+          SRC_DIR=$PWD/src/luci-app-tailscale
           mkdir -p src
-          git clone https://github.com/asvow/luci-app-tailscale src/luci-app-tailscale
-          cd src/luci-app-tailscale
+          git clone https://github.com/asvow/luci-app-tailscale "$SRC_DIR"
+          cd "$SRC_DIR"
           sed -i "s|/etc/tailscale|/etc/config/tailscale-data|g" $(grep -rl "/etc/tailscale" .)
+          echo "SRC_DIR=$SRC_DIR" >> $GITHUB_ENV
 
       # =========================
       # ImmortalWrt 主线 SDK (apk)
@@ -61,7 +63,7 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-          cp -r ../../src/luci-app-tailscale package/luci-app-tailscale
+          cp -r "$SRC_DIR" package/luci-app-tailscale
 
           make defconfig
           make package/luci-app-tailscale/compile V=s
@@ -94,7 +96,7 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-          cp -r ../../src/luci-app-tailscale package/luci-app-tailscale
+          cp -r "$SRC_DIR" package/luci-app-tailscale
 
           make defconfig
           make package/luci-app-tailscale/compile V=s
