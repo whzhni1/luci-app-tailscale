@@ -60,13 +60,13 @@ jobs:
           sed -i "s|/etc/tailscale|/etc/config/tailscale-data|g" $(grep -rl "/etc/tailscale" .)
           cd ../..
 
-          cat > .config <<EOF
-          CONFIG_ALL=y
-          CONFIG_TARGET_PACKAGING_APK=y
-          CONFIG_PACKAGE_luci-app-tailscale=y
-          CONFIG_PACKAGE_luci-i18n-tailscale-zh-cn=y
-          CONFIG_PACKAGE_luci-i18n-tailscale-zh-tw=y
-          EOF
+          # cat > .config <<EOF
+          #CONFIG_ALL=y
+          #CONFIG_TARGET_PACKAGING_APK=y
+          #CONFIG_PACKAGE_luci-app-tailscale=y
+          #CONFIG_PACKAGE_luci-i18n-tailscale-zh-cn=y
+          #CONFIG_PACKAGE_luci-i18n-tailscale-zh-tw=y
+          #EOF
           make defconfig
           make package/luci-app-tailscale/compile V=s
           make package/feeds/luci/luci-i18n-tailscale-zh-cn/compile V=s || true
@@ -89,7 +89,7 @@ jobs:
           mv "$SDK_DIR_RAW" immortalwrt-sdk
           echo "SDK_DIR2=$PWD/immortalwrt-sdk" >> $GITHUB_ENV
 
-      - name: "6️⃣ 配置并编译（ImmortalWrt SDK）"
+      - name: "6️⃣ 配置并编译ipk"
         run: |
           set -e
           cd "$SDK_DIR2"
@@ -99,6 +99,9 @@ jobs:
           ./scripts/feeds install -a
           git clone https://github.com/asvow/luci-app-tailscale package/luci-app-tailscale
 
+          # 清理旧目录再 clone
+          rm -rf package/luci-app-tailscale
+          git clone https://github.com/asvow/luci-app-tailscale package/luci-app-tailscale
           # 持久化路径替换（ImmortalWrt SDK）
           cd package/luci-app-tailscale
           sed -i "s|/etc/tailscale|/etc/config/tailscale-data|g" $(grep -rl "/etc/tailscale" .)
