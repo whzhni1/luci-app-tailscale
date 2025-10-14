@@ -56,36 +56,36 @@ jobs:
 
       - name: "5️⃣ 配置并编译（ImmortalWrt 主线 SDK → apk）"
         run: |
-          set -e
-          cd "$SDK_DIR_APK"
-          echo "src-git packages https://github.com/immortalwrt/packages.git" > feeds.conf
-          echo "src-git luci https://github.com/immortalwrt/luci.git" >> feeds.conf
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a
+         set -e
+         cd "$SDK_DIR_APK"
+         echo "src-git packages https://github.com/immortalwrt/packages.git" > feeds.conf
+         echo "src-git luci https://github.com/immortalwrt/luci.git" >> feeds.conf
+         ./scripts/feeds update -a
+         ./scripts/feeds install -a
 
-          cp -r "$SRC_DIR" package/luci-app-tailscale
+         cp -r "$SRC_DIR" package/luci-app-tailscale
 
-          # 更完整的 APK 配置
-          cat > .config <<EOF
-          CONFIG_TARGET_apk=y
-          CONFIG_TARGET_PACKAGING_APK=y
-          CONFIG_APK_BUILD=y
-          CONFIG_PACKAGE_luci-app-tailscale=y
-          CONFIG_PACKAGE_luci-i18n-tailscale-zh-cn=y
-          CONFIG_PACKAGE_luci-i18n-tailscale-zh-tw=y
-          # 添加必要的依赖包
-          CONFIG_PACKAGE_tailscale=y
-          CONFIG_PACKAGE_tailscaled=y
-          EOF
+         # 禁用 Rust 相关包，避免编译工具链
+         cat > .config <<EOF
+         CONFIG_TARGET_apk=y
+         CONFIG_TARGET_PACKAGING_APK=y
+         CONFIG_APK_BUILD=y
+         CONFIG_PACKAGE_luci-app-tailscale=y
+         CONFIG_PACKAGE_luci-i18n-tailscale-zh-cn=y
+         CONFIG_PACKAGE_luci-i18n-tailscale-zh-tw=y
 
-          make defconfig
-          # 尝试编译整个 APK 目标
-          make V=s -j$(nproc)
+         EOF
+
+         make defconfig
     
-          mkdir -p ../out-apk
-          # 查找所有可能的输出文件
-          find bin -name "*.apk" -exec cp {} ../out-apk/ \; 2>/dev/null || true
-          find bin -name "*.ipk" -exec cp {} ../out-apk/ \; 2>/dev/null || true
+         # 只编译特定包，不编译整个系统
+         make package/luci-app-tailscale/compile V=s -j2
+         make package/feeds/luci/luci-i18n-tailscale-zh-cn/compile V=s -j2 || true
+         make package/feeds/luci/luci-i18n-tailscale-zh-tw/compile V=s -j2 || true
+
+         mkdir -p ../out-apk
+         cp bin/packages/*/*/*.ipk ../out-apk/ 2>/dev/null || true
+         find bin -name "*.apk" -exec cp {} ../out-apk/ \; 2>/dev/null || true
           
       - name: "6️⃣ 调试 APK 编译过程"
         run: |
