@@ -59,17 +59,6 @@ jobs:
         run: |
           echo "::notice::✅ 当前已是最新版本，无需重复构建"
           exit 0
-
-      - name: "3️⃣ 拉取 luci-app-tailscale 源码并做持久化替换"
-        if: steps.version.outputs.skip != 'true'
-        run: |
-          set -e
-          SRC_DIR=$PWD/src/luci-app-tailscale
-          mkdir -p src
-          git clone https://github.com/asvow/luci-app-tailscale "$SRC_DIR"
-          cd "$SRC_DIR"
-          sed -i "s|/etc/tailscale|/etc/config/tailscale-data|g" $(grep -rl "/etc/tailscale" .)
-          echo "SRC_DIR=$SRC_DIR" >> $GITHUB_ENV
           
       - name: "3️⃣ 拉取 luci-app-tailscale 源码并做持久化替换"
         run: |
