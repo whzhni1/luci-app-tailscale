@@ -1,0 +1,25 @@
+name: "🧹 清理 Actions 记录"
+
+on:
+  schedule:
+    - cron: "0 3 * * 0"  # 每周日凌晨 3 点
+  workflow_dispatch:
+
+permissions:
+  actions: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: "清理所有工作流的旧记录"
+        uses: Mattraks/delete-workflow-runs@v2
+        with:
+          token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          retain_days: 30
+          keep_minimum_runs: 10
+          
+      - name: "📊 清理统计"
+        run: |
+          echo "::notice::✅ 已清理超过 30 天的旧记录，每个工作流保留至少 10 个"
