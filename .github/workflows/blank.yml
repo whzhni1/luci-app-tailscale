@@ -62,7 +62,7 @@ jobs:
           cp -r "$SRC_DIR" package/luci-app-tailscale
           
           cat > .config <<EOF
-          #CONFIG_TARGET_PACKAGING_APK=y
+          CONFIG_TARGET_PACKAGING_APK=n
           CONFIG_PACKAGE_luci-app-tailscale=y
           CONFIG_PACKAGE_luci-i18n-tailscale-zh-cn=y
           CONFIG_PACKAGE_luci-i18n-tailscale-zh-tw=y
