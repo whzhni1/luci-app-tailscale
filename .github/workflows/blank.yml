@@ -62,7 +62,7 @@ jobs:
           cp -r "$SRC_DIR" package/luci-app-tailscale
           
           cat > .config <<EOF
-          CONFIG_TARGET_PACKAGING_APK=y
+          #CONFIG_TARGET_PACKAGING_APK=y
           CONFIG_PACKAGE_luci-app-tailscale=y
           CONFIG_PACKAGE_luci-i18n-tailscale-zh-cn=y
           CONFIG_PACKAGE_luci-i18n-tailscale-zh-tw=y
@@ -77,6 +77,12 @@ jobs:
           cp bin/targets/*/*/packages/*.apk ../out-apk/ 2>/dev/null || true
           cp bin/packages/*/*/*.ipk ../out-apk/ 2>/dev/null || true
           find bin -name "*.apk" -exec cp {} ../out-apk/ \; 2>/dev/null || true
+          mkdir -p ../out-ipk
+          cp bin/packages/*/*/*.ipk ../out-ipk/ 2>/dev/null || true
+      - name: "9️⃣ 打印 IPK SDK 产物"
+        run: |
+          echo "=== IPK SDK 编译产物 ==="
+          ls -lh out-ipk || true
       - name: "6️⃣ 调试 APK 编译过程"
         run: |
           echo "=== 检查编译产物目录 ==="
