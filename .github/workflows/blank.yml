@@ -43,6 +43,15 @@ jobs:
           fi
           echo "::endgroup::"
           
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "📊 版本对比"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  上游版本: $upstream_latest"
+          echo "  当前版本: $my_latest"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo ""
+          
           if [ "$upstream_latest" = "$my_latest" ]; then
             echo "::notice::✅ 版本一致 ($upstream_latest)，跳过构建"
             echo "skip=true" >> $GITHUB_OUTPUT
@@ -61,6 +70,7 @@ jobs:
           exit 0
           
       - name: "3️⃣ 拉取 luci-app-tailscale 源码并做持久化替换"
+        if: steps.version.outputs.skip != 'true'
         run: |
           set -e
           SRC_DIR=$PWD/src/luci-app-tailscale
@@ -73,6 +83,7 @@ jobs:
       # ImmortalWrt 主线 SDK (apk)
       # =========================
       - name: "4️⃣ 下载 ImmortalWrt 主线 SDK (apk)"
+        if: steps.version.outputs.skip != 'true'
         run: |
           set -e
           SDK_URL="https://downloads.immortalwrt.org/snapshots/targets/x86/generic/immortalwrt-sdk-x86-generic_gcc-14.3.0_musl.Linux-x86_64.tar.zst"
@@ -81,7 +92,9 @@ jobs:
           SDK_DIR=$(find . -maxdepth 1 -type d -name "immortalwrt-sdk-*" -print -quit)
           mv "$SDK_DIR" immortalwrt-sdk-apk
           echo "SDK_DIR_APK=$PWD/immortalwrt-sdk-apk" >> $GITHUB_ENV
+          
       - name: "5️⃣ 配置并编译（ImmortalWrt 主线 SDK → apk）"
+        if: steps.version.outputs.skip != 'true'
         run: |
           set -e
           cd "$SDK_DIR_APK"
@@ -93,28 +106,32 @@ jobs:
           
           cat > .config <<EOF
           CONFIG_TARGET_PACKAGING_APK=y
-          CONFIG_PACKAGE_luci-app-tailscale=y
-          CONFIG_PACKAGE_luci-i18n-tailscale-zh-cn=y
-          CONFIG_PACKAGE_luci-i18n-tailscale-zh-tw=y
+          CONFIG_PACKAGE_luci-app-tailscale=m
+          CONFIG_PACKAGE_luci-i18n-tailscale-zh-cn=m
+          CONFIG_PACKAGE_luci-i18n-tailscale-zh-tw=m
+          # CONFIG_ALL_KMODS is not set
           EOF
           
           make defconfig
-          make package/luci-app-tailscale/compile V=s -j2
-          make package/feeds/luci/luci-i18n-tailscale-zh-cn/compile V=s -j2 || true
-          make package/feeds/luci/luci-i18n-tailscale-zh-tw/compile V=s -j2 || true
+          make package/luci-app-tailscale/{clean,compile} V=s -j2 IGNORE_ERRORS=m
+          make package/feeds/luci/luci-i18n-tailscale-zh-cn/{clean,compile} V=s -j2 IGNORE_ERRORS=m || true
+          make package/feeds/luci/luci-i18n-tailscale-zh-tw/{clean,compile} V=s -j2 IGNORE_ERRORS=m || true
+          
           mkdir -p ../out-apk
-          cp bin/targets/*/*/packages/*.apk ../out-apk/ 2>/dev/null || true
-          cp bin/packages/*/*/*.ipk ../out-apk/ 2>/dev/null || true
-          find bin -name "*.apk" -exec cp {} ../out-apk/ \; 2>/dev/null || true
+          find bin/packages -type f -name "luci-app-tailscale*.apk" -exec cp -v {} ../out-apk/ \;
+          find bin/packages -type f -name "luci-i18n-tailscale*.apk" -exec cp -v {} ../out-apk/ \;
           
       - name: "6️⃣ 打印 APK SDK 产物"
+        if: steps.version.outputs.skip != 'true'
         run: |
-         echo "=== APK SDK 编译产物 ==="
-         ls -lh out-apk || true
+          echo "=== APK SDK 编译产物 ==="
+          ls -lh out-apk || true
+          
       # =========================
       # ImmortalWrt 24.10 SDK (ipk)
       # =========================
       - name: "7️⃣ 下载 ImmortalWrt 24.10 SDK (ipk)"
+        if: steps.version.outputs.skip != 'true'
         run: |
           set -e
           SDK_URL="https://downloads.immortalwrt.org/releases/24.10.0/targets/x86/64/immortalwrt-sdk-24.10.0-x86-64_gcc-13.3.0_musl.Linux-x86_64.tar.zst"
@@ -123,7 +140,9 @@ jobs:
           SDK_DIR_RAW=$(find . -maxdepth 1 -type d -name "immortalwrt-sdk-*" -print -quit)
           mv "$SDK_DIR_RAW" immortalwrt-sdk-ipk
           echo "SDK_DIR_IPK=$PWD/immortalwrt-sdk-ipk" >> $GITHUB_ENV
+          
       - name: "8️⃣ 配置并编译（ImmortalWrt 24.10 SDK → ipk）"
+        if: steps.version.outputs.skip != 'true'
         run: |
           set -e
           cd "$SDK_DIR_IPK"
@@ -134,26 +153,32 @@ jobs:
           cp -r "$SRC_DIR" package/luci-app-tailscale
           
           cat > .config <<EOF
-          CONFIG_PACKAGE_luci-app-tailscale=y
-          CONFIG_PACKAGE_luci-i18n-tailscale-zh-cn=y
-          CONFIG_PACKAGE_luci-i18n-tailscale-zh-tw=y
+          CONFIG_PACKAGE_luci-app-tailscale=m
+          CONFIG_PACKAGE_luci-i18n-tailscale-zh-cn=m
+          CONFIG_PACKAGE_luci-i18n-tailscale-zh-tw=m
+          # CONFIG_ALL_KMODS is not set
           EOF
           
           make defconfig
-          make package/luci-app-tailscale/compile V=s -j2
-          make package/feeds/luci/luci-i18n-tailscale-zh-cn/compile V=s -j2 || true
-          make package/feeds/luci/luci-i18n-tailscale-zh-tw/compile V=s -j2 || true
+          make package/luci-app-tailscale/{clean,compile} V=s -j2 IGNORE_ERRORS=m
+          make package/feeds/luci/luci-i18n-tailscale-zh-cn/{clean,compile} V=s -j2 IGNORE_ERRORS=m || true
+          make package/feeds/luci/luci-i18n-tailscale-zh-tw/{clean,compile} V=s -j2 IGNORE_ERRORS=m || true
           
           mkdir -p ../out-ipk
-          cp bin/packages/*/*/*.ipk ../out-ipk/ 2>/dev/null || true
+          find bin/packages -type f -name "luci-app-tailscale*.ipk" -exec cp -v {} ../out-ipk/ \;
+          find bin/packages -type f -name "luci-i18n-tailscale*.ipk" -exec cp -v {} ../out-ipk/ \;
+          
       - name: "9️⃣ 打印 IPK SDK 产物"
+        if: steps.version.outputs.skip != 'true'
         run: |
           echo "=== IPK SDK 编译产物 ==="
           ls -lh out-ipk || true
+          
       # =========================
       # 汇总 & 发布（加过滤）
       # =========================
       - name: "🔟 汇总产物并过滤"
+        if: steps.version.outputs.skip != 'true'
         run: |
           set -e
           mkdir -p out
@@ -182,9 +207,11 @@ jobs:
         if: steps.version.outputs.skip != 'true'
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: "${{ steps.version.outputs.tag }}"  # 使用上游相同的 tag（如 v1.2.6）
+          tag_name: "${{ steps.version.outputs.tag }}"
           name: "luci-app-tailscale ${{ steps.version.outputs.version }}（ImmortalWrt 主线 APK + 24.10 IPK）"
           files: "out/*"
+          fail_on_unmatched_files: false
+          make_latest: true
           body: |
             ## 📦 包含文件
             - **APK 格式**：ImmortalWrt 主线（新版 apk 包管理器）
@@ -204,7 +231,7 @@ jobs:
       
             ## 📌 版本信息
             - 上游版本: ${{ steps.version.outputs.tag }}
-            - 发布时间: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+            - 构建时间: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
       
             ## ⚠️ 注意事项
             - 仅包含 LuCI 界面插件
