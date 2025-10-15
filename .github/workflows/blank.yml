@@ -15,21 +15,67 @@ jobs:
       - name: "1️⃣ 检出代码"
         uses: actions/checkout@v4
 
-      - name: "2️⃣ 设置版本号和 tag"
+      - name: "2️⃣ 检查上游版本更新"
         id: version
         run: |
           set -e
-          ver="1.2.6"
-          base="v${ver}-persistent"
-          resp=$(curl -s -o /tmp/tag.json -w "%{http_code}" \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            "https://api.github.com/repos/${{ github.repository }}/git/refs/tags/$base")
-          if [ "$resp" = "200" ]; then
-            suffix=$(date -u +%Y%m%d-%H%M%S)
-            base="${base}-${suffix}"
+          
+          echo "::group::📥 获取上游版本"
+          makefile=$(curl -s "https://raw.githubusercontent.com/asvow/luci-app-tailscale/main/Makefile")
+          upstream_version=$(echo "$makefile" | grep -E "^PKG_VERSION" | head -1 | cut -d'=' -f2 | tr -d ' :=')
+          upstream_release=$(echo "$makefile" | grep -E "^PKG_RELEASE" | head -1 | cut -d'=' -f2 | tr -d ' :=')
+          
+          if [ -z "$upstream_version" ]; then
+            echo "::error::❌ 无法解析上游版本号"
+            exit 1
           fi
-          echo "version=$ver" >> $GITHUB_OUTPUT
-          echo "tag=$base" >> $GITHUB_OUTPUT
+          
+          upstream_full="${upstream_version}-r${upstream_release}"
+          echo "  版本号: $upstream_version"
+          echo "  修订号: $upstream_release"
+          echo "  完整版本: $upstream_full"
+          echo "::endgroup::"
+          
+          echo "::group::📦 获取当前仓库版本"
+          my_release=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/latest")
+          my_tag=$(echo "$my_release" | jq -r '.tag_name // "none"')
+          
+          if [ "$my_tag" != "none" ] && [ "$my_tag" != "null" ]; then
+            my_full=$(echo "$my_tag" | sed 's/^v//')
+            echo "  Tag: $my_tag"
+            echo "  版本: $my_full"
+          else
+            my_full="none"
+            echo "  ⚠️  无 Release（首次构建）"
+          fi
+          echo "::endgroup::"
+          
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "📊 版本对比"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  上游版本: $upstream_full"
+          echo "  当前版本: $my_full"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo ""
+          
+          if [ "$upstream_full" = "$my_full" ]; then
+            echo "::notice::✅ 版本一致 ($upstream_full)，跳过构建"
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "::notice::🆕 发现新版本 $upstream_full（当前 $my_full），开始构建"
+            echo "skip=false" >> $GITHUB_OUTPUT
+            echo "version=$upstream_version" >> $GITHUB_OUTPUT
+            echo "tag=v$upstream_full" >> $GITHUB_OUTPUT
+          fi
+
+      - name: "✅ 版本无更新，结束工作流"
+        if: steps.version.outputs.skip == 'true'
+        run: |
+          echo "::notice::✅ 当前已是最新版本，无需重复构建"
+          exit 0
+          
       - name: "3️⃣ 拉取 luci-app-tailscale 源码并做持久化替换"
         run: |
           set -e
