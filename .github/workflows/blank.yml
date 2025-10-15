@@ -30,7 +30,6 @@ jobs:
           fi
           echo "version=$ver" >> $GITHUB_OUTPUT
           echo "tag=$base" >> $GITHUB_OUTPUT
-
       - name: "3️⃣ 拉取 luci-app-tailscale 源码并做持久化替换"
         run: |
           set -e
@@ -40,7 +39,6 @@ jobs:
           cd "$SRC_DIR"
           sed -i "s|/etc/tailscale|/etc/config/tailscale-data|g" $(grep -rl "/etc/tailscale" .)
           echo "SRC_DIR=$SRC_DIR" >> $GITHUB_ENV
-
       # =========================
       # ImmortalWrt 主线 SDK (apk)
       # =========================
@@ -53,7 +51,6 @@ jobs:
           SDK_DIR=$(find . -maxdepth 1 -type d -name "immortalwrt-sdk-*" -print -quit)
           mv "$SDK_DIR" immortalwrt-sdk-apk
           echo "SDK_DIR_APK=$PWD/immortalwrt-sdk-apk" >> $GITHUB_ENV
-
       - name: "5️⃣ 配置并编译（ImmortalWrt 主线 SDK → apk）"
         run: |
           set -e
@@ -62,40 +59,29 @@ jobs:
           echo "src-git luci https://github.com/immortalwrt/luci.git" >> feeds.conf
           ./scripts/feeds update -a
           ./scripts/feeds install -a
-
           cp -r "$SRC_DIR" package/luci-app-tailscale
-
+          
           cat > .config <<EOF
-          CONFIG_TARGET_apk=y
           CONFIG_TARGET_PACKAGING_APK=y
-          CONFIG_APK_BUILD=y
           CONFIG_PACKAGE_luci-app-tailscale=y
           CONFIG_PACKAGE_luci-i18n-tailscale-zh-cn=y
           CONFIG_PACKAGE_luci-i18n-tailscale-zh-tw=y
           EOF
-
+          
           make defconfig
-
-          # 只编译特定包
           make package/luci-app-tailscale/compile V=s -j2
           make package/feeds/luci/luci-i18n-tailscale-zh-cn/compile V=s -j2 || true
           make package/feeds/luci/luci-i18n-tailscale-zh-tw/compile V=s -j2 || true
-
-          # 生成 APK 索引，触发 APK 打包
           make package/index V=s
-
           mkdir -p ../out-apk
-          cp bin/packages/*/*/*.ipk ../out-apk/ 2>/dev/null || true
           cp bin/targets/*/*/packages/*.apk ../out-apk/ 2>/dev/null || true
+          cp bin/packages/*/*/*.ipk ../out-apk/ 2>/dev/null || true
           find bin -name "*.apk" -exec cp {} ../out-apk/ \; 2>/dev/null || true
-
-
-      - name: "6️⃣ 收集生成的ipk_apk"
+      - name: "6️⃣ 调试 APK 编译过程"
         run: |
           echo "=== 检查编译产物目录 ==="
           ls -la "$SDK_DIR_APK/bin/" || echo "bin 目录不存在"
           find "$SDK_DIR_APK" -name "*.apk" -o -name "*.ipk" | head -20
-
       # =========================
       # ImmortalWrt 24.10 SDK (ipk)
       # =========================
@@ -108,7 +94,6 @@ jobs:
           SDK_DIR_RAW=$(find . -maxdepth 1 -type d -name "immortalwrt-sdk-*" -print -quit)
           mv "$SDK_DIR_RAW" immortalwrt-sdk-ipk
           echo "SDK_DIR_IPK=$PWD/immortalwrt-sdk-ipk" >> $GITHUB_ENV
-
       - name: "8️⃣ 配置并编译（ImmortalWrt 24.10 SDK → ipk）"
         run: |
           set -e
@@ -117,47 +102,76 @@ jobs:
           echo "src-git luci https://github.com/immortalwrt/luci.git" >> feeds.conf
           ./scripts/feeds update -a
           ./scripts/feeds install -a
-
           cp -r "$SRC_DIR" package/luci-app-tailscale
-
+          
           cat > .config <<EOF
           CONFIG_PACKAGE_luci-app-tailscale=y
           CONFIG_PACKAGE_luci-i18n-tailscale-zh-cn=y
           CONFIG_PACKAGE_luci-i18n-tailscale-zh-tw=y
           EOF
-
+          
           make defconfig
-          make package/luci-app-tailscale/compile V=s
-          make package/feeds/luci/luci-i18n-tailscale-zh-cn/compile V=s || true
-          make package/feeds/luci/luci-i18n-tailscale-zh-tw/compile V=s || true
-
+          make package/luci-app-tailscale/compile V=s -j2
+          make package/feeds/luci/luci-i18n-tailscale-zh-cn/compile V=s -j2 || true
+          make package/feeds/luci/luci-i18n-tailscale-zh-tw/compile V=s -j2 || true
+          
           mkdir -p ../out-ipk
           cp bin/packages/*/*/*.ipk ../out-ipk/ 2>/dev/null || true
-
       - name: "9️⃣ 打印 IPK SDK 产物"
         run: |
           echo "=== IPK SDK 编译产物 ==="
           ls -lh out-ipk || true
-
       # =========================
-      # 汇总 & 发布
+      # 汇总 & 发布（加过滤）
       # =========================
-      - name: "🔟 汇总产物"
+      - name: "🔟 汇总产物并过滤"
         run: |
           set -e
           mkdir -p out
-          cp -r out-apk/* out/ 2>/dev/null || true
-          cp -r out-ipk/* out/ 2>/dev/null || true
-          echo "=== 最终产物 ==="
-          ls -lh out
-
+          
+          # 从 out-apk 中只复制 luci-app 和 luci-i18n 开头的文件
+          for file in out-apk/*; do
+            filename=$(basename "$file")
+            if [[ "$filename" == luci-app-tailscale* ]] || [[ "$filename" == luci-i18n-tailscale* ]]; then
+              cp -v "$file" out/
+            fi
+          done
+          
+          # 从 out-ipk 中只复制 luci-app 和 luci-i18n 开头的文件
+          for file in out-ipk/*; do
+            filename=$(basename "$file")
+            if [[ "$filename" == luci-app-tailscale* ]] || [[ "$filename" == luci-i18n-tailscale* ]]; then
+              cp -v "$file" out/
+            fi
+          done
+          
+          echo ""
+          echo "=== 最终产物（已过滤 lib*, kmod-*, tailscale 主程序）==="
+          ls -lh out/
       - name: "1️⃣1️⃣ 发布 Release"
         uses: softprops/action-gh-release@v1
         with:
           tag_name: "${{ steps.version.outputs.tag }}"
-          name: "luci-app-tailscale ${{ steps.version.outputs.version }}（ImmortalWrt 主线 APK + ImmortalWrt 24.10 IPK）"
+          name: "luci-app-tailscale ${{ steps.version.outputs.version }}（ImmortalWrt 主线 APK + 24.10 IPK）"
           files: "out/*"
           body: |
-            - ImmortalWrt 主线 SDK → 生成 .apk + .ipk
-            - ImmortalWrt 24.10 SDK → 生成 .ipk
-            - 持久化路径：/etc/config/tailscale-data
+            ## 📦 包含文件
+            - **APK 格式**：ImmortalWrt 主线（新版 apk 包管理器）
+            - **IPK 格式**：ImmortalWrt 24.10（传统 opkg 包管理器）
+            
+            ## 🔧 持久化配置
+            - 数据路径：`/etc/config/tailscale-data`
+            
+            ## 📥 安装方法
+            ```bash
+            # APK 方式（ImmortalWrt 主线）
+            apk add --allow-untrusted luci-app-tailscale*.apk
+            
+            # IPK 方式（ImmortalWrt 24.10 及以下）
+            opkg install luci-app-tailscale*.ipk
+            ```
+            
+            ## ⚠️ 注意事项
+            - 仅包含 LuCI 界面插件（6 个文件）
+            - 不含依赖库和 Tailscale 主程序
+            - 依赖请从系统源安装
