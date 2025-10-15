@@ -207,33 +207,26 @@ jobs:
         if: steps.version.outputs.skip != 'true'
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: "${{ steps.version.outputs.tag }}"
-          name: "luci-app-tailscale ${{ steps.version.outputs.version }}（ImmortalWrt 主线 APK + 24.10 IPK）"
-          files: "out/*"
-          fail_on_unmatched_files: false
-          make_latest: true
-          body: |
-            ## 📦 包含文件
-            - **APK 格式**：ImmortalWrt 主线（新版 apk 包管理器）
-            - **IPK 格式**：ImmortalWrt 24.10（传统 opkg 包管理器）
-      
-            ## 🔧 持久化配置
-            - 数据路径：`/etc/config/tailscale-data`
-      
-            ## 📥 安装方法
-            ```bash
-            # APK 方式（ImmortalWrt 主线）
-            apk add --allow-untrusted luci-app-tailscale*.apk
-      
-            # IPK 方式（ImmortalWrt 24.10 及以下）
-            opkg install luci-app-tailscale*.ipk
-            ```
-      
-            ## 📌 版本信息
-            - 上游版本: ${{ steps.version.outputs.tag }}
-            - 构建时间: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
-      
-            ## ⚠️ 注意事项
-            - 仅包含 LuCI 界面插件
-            - 不含依赖库和 Tailscale 主程序
-            - 依赖请从系统源安装
+         tag_name: "${{ steps.version.outputs.tag }}"
+         name: "luci-app-tailscale ${{ steps.version.outputs.version }}（ImmortalWrt 主线 APK + 24.10 IPK）"
+         files: "out/*"
+         body: |
+          ## 📦 包含文件
+          - **APK 格式**：ImmortalWrt 主线（新版 apk 包管理器）
+          - **IPK 格式**：ImmortalWrt 24.10（传统 opkg 包管理器）
+
+          ## 🔧 持久化配置
+          - 数据路径：`/etc/config/tailscale-data`
+
+          ## 📥 安装方法
+          ```bash
+          # APK 方式（ImmortalWrt 主线）
+          apk add --allow-untrusted luci-app-tailscale*.apk
+
+          # IPK 方式（ImmortalWrt 24.10 及以下）
+          opkg install luci-app-tailscale*.ipk
+          ```
+
+          ## 📌 版本信息
+          - 上游版本: ${{ steps.version.outputs.tag }}
+          - 构建时间: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
