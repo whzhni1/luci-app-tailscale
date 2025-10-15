@@ -72,7 +72,7 @@ jobs:
           make package/luci-app-tailscale/compile V=s -j2
           make package/feeds/luci/luci-i18n-tailscale-zh-cn/compile V=s -j2 || true
           make package/feeds/luci/luci-i18n-tailscale-zh-tw/compile V=s -j2 || true
-          make package/index V=s
+          # make package/index V=s
           mkdir -p ../out-apk
           cp bin/targets/*/*/packages/*.apk ../out-apk/ 2>/dev/null || true
           cp bin/packages/*/*/*.ipk ../out-apk/ 2>/dev/null || true
