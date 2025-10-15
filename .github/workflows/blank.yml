@@ -20,54 +20,38 @@ jobs:
         run: |
           set -e
           
-          echo "::group::📥 获取上游版本"
-          makefile=$(curl -s "https://raw.githubusercontent.com/asvow/luci-app-tailscale/main/Makefile")
-          upstream_version=$(echo "$makefile" | grep -E "^PKG_VERSION" | head -1 | cut -d'=' -f2 | tr -d ' :=')
-          upstream_release=$(echo "$makefile" | grep -E "^PKG_RELEASE" | head -1 | cut -d'=' -f2 | tr -d ' :=')
+          echo "::group::📥 获取上游最新版本"
+          upstream_latest=$(curl -s "https://api.github.com/repos/asvow/luci-app-tailscale/tags" | jq -r '.[0].name // "none"')
           
-          if [ -z "$upstream_version" ]; then
-            echo "::error::❌ 无法解析上游版本号"
+          if [ "$upstream_latest" = "none" ] || [ "$upstream_latest" = "null" ]; then
+            echo "::error::❌ 无法获取上游版本"
             exit 1
           fi
           
-          upstream_full="${upstream_version}-r${upstream_release}"
-          echo "  版本号: $upstream_version"
-          echo "  修订号: $upstream_release"
-          echo "  完整版本: $upstream_full"
+          echo "  上游最新: $upstream_latest"
           echo "::endgroup::"
           
           echo "::group::📦 获取当前仓库版本"
-          my_release=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            "https://api.github.com/repos/${{ github.repository }}/releases/latest")
-          my_tag=$(echo "$my_release" | jq -r '.tag_name // "none"')
+          my_latest=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/tags" | jq -r '.[0].name // "none"')
           
-          if [ "$my_tag" != "none" ] && [ "$my_tag" != "null" ]; then
-            my_full=$(echo "$my_tag" | sed 's/^v//')
-            echo "  Tag: $my_tag"
-            echo "  版本: $my_full"
+          if [ "$my_latest" != "none" ] && [ "$my_latest" != "null" ]; then
+            echo "  当前版本: $my_latest"
           else
-            my_full="none"
-            echo "  ⚠️  无 Release（首次构建）"
+            my_latest="none"
+            echo "  ⚠️  无版本（首次构建）"
           fi
           echo "::endgroup::"
           
-          echo ""
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "📊 版本对比"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "  上游版本: $upstream_full"
-          echo "  当前版本: $my_full"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo ""
-          
-          if [ "$upstream_full" = "$my_full" ]; then
-            echo "::notice::✅ 版本一致 ($upstream_full)，跳过构建"
+          if [ "$upstream_latest" = "$my_latest" ]; then
+            echo "::notice::✅ 版本一致 ($upstream_latest)，跳过构建"
             echo "skip=true" >> $GITHUB_OUTPUT
           else
-            echo "::notice::🆕 发现新版本 $upstream_full（当前 $my_full），开始构建"
+            echo "::notice::🆕 发现新版本 $upstream_latest（当前 $my_latest），开始构建"
             echo "skip=false" >> $GITHUB_OUTPUT
-            echo "version=$upstream_version" >> $GITHUB_OUTPUT
-            echo "tag=v$upstream_full" >> $GITHUB_OUTPUT
+            version_number=$(echo "$upstream_latest" | sed 's/^v//')
+            echo "version=$version_number" >> $GITHUB_OUTPUT
+            echo "tag=$upstream_latest" >> $GITHUB_OUTPUT
           fi
 
       - name: "✅ 版本无更新，结束工作流"
@@ -75,6 +59,17 @@ jobs:
         run: |
           echo "::notice::✅ 当前已是最新版本，无需重复构建"
           exit 0
+
+      - name: "3️⃣ 拉取 luci-app-tailscale 源码并做持久化替换"
+        if: steps.version.outputs.skip != 'true'
+        run: |
+          set -e
+          SRC_DIR=$PWD/src/luci-app-tailscale
+          mkdir -p src
+          git clone https://github.com/asvow/luci-app-tailscale "$SRC_DIR"
+          cd "$SRC_DIR"
+          sed -i "s|/etc/tailscale|/etc/config/tailscale-data|g" $(grep -rl "/etc/tailscale" .)
+          echo "SRC_DIR=$SRC_DIR" >> $GITHUB_ENV
           
       - name: "3️⃣ 拉取 luci-app-tailscale 源码并做持久化替换"
         run: |
@@ -193,30 +188,36 @@ jobs:
           echo ""
           echo "=== 最终产物（已过滤 lib*, kmod-*, tailscale 主程序）==="
           ls -lh out/
+          
       - name: "1️⃣1️⃣ 发布 Release"
+        if: steps.version.outputs.skip != 'true'
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: "${{ steps.version.outputs.tag }}"
+          tag_name: "${{ steps.version.outputs.tag }}"  # 使用上游相同的 tag（如 v1.2.6）
           name: "luci-app-tailscale ${{ steps.version.outputs.version }}（ImmortalWrt 主线 APK + 24.10 IPK）"
           files: "out/*"
           body: |
             ## 📦 包含文件
             - **APK 格式**：ImmortalWrt 主线（新版 apk 包管理器）
             - **IPK 格式**：ImmortalWrt 24.10（传统 opkg 包管理器）
-            
+      
             ## 🔧 持久化配置
             - 数据路径：`/etc/config/tailscale-data`
-            
+      
             ## 📥 安装方法
             ```bash
             # APK 方式（ImmortalWrt 主线）
             apk add --allow-untrusted luci-app-tailscale*.apk
-            
+      
             # IPK 方式（ImmortalWrt 24.10 及以下）
             opkg install luci-app-tailscale*.ipk
             ```
-            
+      
+            ## 📌 版本信息
+            - 上游版本: ${{ steps.version.outputs.tag }}
+            - 发布时间: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+      
             ## ⚠️ 注意事项
-            - 仅包含 LuCI 界面插件（6 个文件）
+            - 仅包含 LuCI 界面插件
             - 不含依赖库和 Tailscale 主程序
             - 依赖请从系统源安装
