@@ -56,7 +56,7 @@ if [ "$skip_create" = false ]; then
   echo "  ✓ commit: ${latest_commit:0:8}..."
 fi
 
-## 📌 版本信息
+RELEASE_BODY="## 📌 版本信息
 - 上游版本: $TAG_NAME
 - 构建时间: $BUILD_TIME
 
