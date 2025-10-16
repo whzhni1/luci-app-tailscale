@@ -47,41 +47,53 @@ else
   releases=$(curl -s "$API_BASE/repos/$REPO/releases?$AUTH_HEADER&page=1&per_page=20")
 fi
 
-tag_exists=$(echo "$releases" | jq -r --arg tag "$TAG_NAME" '.[] | select(.tag_name == $tag) | .tag_name' | head -1)
+existing_release=$(echo "$releases" | jq -r --arg tag "$TAG_NAME" '.[] | select(.tag_name == $tag)')
 
-if [ "$tag_exists" = "$TAG_NAME" ]; then
-  echo "::notice::$PLATFORM_NAME 上已存在 Release $TAG_NAME，跳过发布"
-  exit 0
-fi
-
-# 获取最新 commit
-echo "获取最新 commit..."
-if [ "$PLATFORM" = "gitee" ]; then
-  commit_info=$(curl -s "$API_BASE/repos/$REPO/commits?$AUTH_HEADER&page=1&per_page=1")
-  latest_commit=$(echo "$commit_info" | jq -r '.[0].sha // empty')
-
-elif [ "$PLATFORM" = "gitcode" ]; then
-  # 先获取项目信息得到默认分支
-  project_info=$(curl -s -H "$AUTH_HEADER" "$API_BASE/repos/$REPO")
-  default_branch=$(echo "$project_info" | jq -r '.default_branch // "main"')
-  echo "  默认分支: $default_branch"
+if [ -n "$existing_release" ]; then
+  echo "::notice::$PLATFORM_NAME 上已存在 Release $TAG_NAME"
   
-  # 获取分支的最新 commit
-  branch_info=$(curl -s -H "$AUTH_HEADER" "$API_BASE/repos/$REPO/branches/$default_branch")
-  latest_commit=$(echo "$branch_info" | jq -r '.commit.id // empty')
+  # 尝试获取已存在 Release 的 ID
+  existing_id=$(echo "$existing_release" | jq -r '.id // empty')
   
-  # 降级方案：直接获取 commits 列表
-  if [ -z "$latest_commit" ] || [ "$latest_commit" = "null" ]; then
-    commits=$(curl -s -H "$AUTH_HEADER" "$API_BASE/repos/$REPO/commits?page=1&per_page=1")
-    latest_commit=$(echo "$commits" | jq -r '.[0].id // empty')
+  if [ -n "$existing_id" ]; then
+    echo "使用已存在的 Release ID: $existing_id"
+    release_id="$existing_id"
+    skip_create=true
+  else
+    echo "::warning::已存在的 Release 没有 ID，跳过发布"
+    exit 0
   fi
+else
+  skip_create=false
 fi
 
-if [ -z "$latest_commit" ] || [ "$latest_commit" = "null" ]; then
-  echo "  ⚠️  无法获取 commit，将不指定 ref"
-  latest_commit=""
-else
-  echo "  ✓ commit: ${latest_commit:0:8}..."
+# 获取最新 commit（如果需要创建）
+if [ "$skip_create" = false ]; then
+  echo "获取最新 commit..."
+  if [ "$PLATFORM" = "gitee" ]; then
+    commit_info=$(curl -s "$API_BASE/repos/$REPO/commits?$AUTH_HEADER&page=1&per_page=1")
+    latest_commit=$(echo "$commit_info" | jq -r '.[0].sha // empty')
+
+  elif [ "$PLATFORM" = "gitcode" ]; then
+    project_info=$(curl -s -H "$AUTH_HEADER" "$API_BASE/repos/$REPO")
+    default_branch=$(echo "$project_info" | jq -r '.default_branch // "main"')
+    echo "  默认分支: $default_branch"
+    
+    branch_info=$(curl -s -H "$AUTH_HEADER" "$API_BASE/repos/$REPO/branches/$default_branch")
+    latest_commit=$(echo "$branch_info" | jq -r '.commit.id // empty')
+    
+    if [ -z "$latest_commit" ] || [ "$latest_commit" = "null" ]; then
+      commits=$(curl -s -H "$AUTH_HEADER" "$API_BASE/repos/$REPO/commits?page=1&per_page=1")
+      latest_commit=$(echo "$commits" | jq -r '.[0].id // empty')
+    fi
+  fi
+
+  if [ -z "$latest_commit" ] || [ "$latest_commit" = "null" ]; then
+    echo "  ⚠️  无法获取 commit，将不指定 ref"
+    latest_commit=""
+  else
+    echo "  ✓ commit: ${latest_commit:0:8}..."
+  fi
 fi
 
 # 准备 Release 内容
@@ -97,71 +109,101 @@ RELEASE_BODY="## 📦 包含文件
 https://github.com/$GITHUB_REPO/releases/tag/$TAG_NAME"
 
 # 创建 Release
-echo "创建 Release..."
+if [ "$skip_create" = false ]; then
+  echo "创建 Release..."
 
-if [ "$PLATFORM" = "gitee" ]; then
-  if [ -n "$latest_commit" ]; then
-    release_payload=$(jq -n \
-      --arg token "$TOKEN" \
-      --arg tag "$TAG_NAME" \
-      --arg name "luci-app-tailscale $VERSION" \
-      --arg body "$RELEASE_BODY" \
-      --arg ref "$latest_commit" \
-      '{access_token: $token, tag_name: $tag, name: $name, body: $body, target_commitish: $ref, prerelease: false}')
-  else
-    release_payload=$(jq -n \
-      --arg token "$TOKEN" \
-      --arg tag "$TAG_NAME" \
-      --arg name "luci-app-tailscale $VERSION" \
-      --arg body "$RELEASE_BODY" \
-      '{access_token: $token, tag_name: $tag, name: $name, body: $body, prerelease: false}')
-  fi
-  
-  release_response=$(echo "$release_payload" | curl -s -X POST "$API_BASE/repos/$REPO/releases" \
-    -H "Content-Type: application/json" -d @-)
+  if [ "$PLATFORM" = "gitee" ]; then
+    if [ -n "$latest_commit" ]; then
+      release_payload=$(jq -n \
+        --arg token "$TOKEN" \
+        --arg tag "$TAG_NAME" \
+        --arg name "luci-app-tailscale $VERSION" \
+        --arg body "$RELEASE_BODY" \
+        --arg ref "$latest_commit" \
+        '{access_token: $token, tag_name: $tag, name: $name, body: $body, target_commitish: $ref, prerelease: false}')
+    else
+      release_payload=$(jq -n \
+        --arg token "$TOKEN" \
+        --arg tag "$TAG_NAME" \
+        --arg name "luci-app-tailscale $VERSION" \
+        --arg body "$RELEASE_BODY" \
+        '{access_token: $token, tag_name: $tag, name: $name, body: $body, prerelease: false}')
+    fi
+    
+    release_response=$(echo "$release_payload" | curl -s -X POST "$API_BASE/repos/$REPO/releases" \
+      -H "Content-Type: application/json" -d @-)
 
-elif [ "$PLATFORM" = "gitcode" ]; then
-  # GitCode: 同时发送 body 和 description
-  if [ -n "$latest_commit" ]; then
-    release_payload=$(jq -n \
-      --arg tag "$TAG_NAME" \
-      --arg name "luci-app-tailscale $VERSION" \
-      --arg body "$RELEASE_BODY" \
-      --arg ref "$latest_commit" \
-      '{tag_name: $tag, name: $name, body: $body, description: $body, ref: $ref}')
-  else
-    release_payload=$(jq -n \
-      --arg tag "$TAG_NAME" \
-      --arg name "luci-app-tailscale $VERSION" \
-      --arg body "$RELEASE_BODY" \
-      '{tag_name: $tag, name: $name, body: $body, description: $body}')
+  elif [ "$PLATFORM" = "gitcode" ]; then
+    if [ -n "$latest_commit" ]; then
+      release_payload=$(jq -n \
+        --arg tag "$TAG_NAME" \
+        --arg name "luci-app-tailscale $VERSION" \
+        --arg body "$RELEASE_BODY" \
+        --arg ref "$latest_commit" \
+        '{tag_name: $tag, name: $name, body: $body, description: $body, ref: $ref}')
+    else
+      release_payload=$(jq -n \
+        --arg tag "$TAG_NAME" \
+        --arg name "luci-app-tailscale $VERSION" \
+        --arg body "$RELEASE_BODY" \
+        '{tag_name: $tag, name: $name, body: $body, description: $body}')
+    fi
+    
+    echo "::group::📝 请求 JSON"
+    echo "$release_payload" | jq '.'
+    echo "::endgroup::"
+    
+    release_response=$(echo "$release_payload" | curl -s -X POST "$API_BASE/repos/$REPO/releases" \
+      -H "Content-Type: application/json" \
+      -H "$AUTH_HEADER" \
+      -d @-)
   fi
-  
-  echo "::group::📝 请求 JSON"
-  echo "$release_payload" | jq '.'
+
+  echo "::group::📥 API 响应"
+  echo "$release_response" | jq '.' 2>/dev/null || echo "$release_response"
   echo "::endgroup::"
-  
-  release_response=$(echo "$release_payload" | curl -s -X POST "$API_BASE/repos/$REPO/releases" \
-    -H "Content-Type: application/json" \
-    -H "$AUTH_HEADER" \
-    -d @-)
+
+  # 尝试从响应中获取 ID
+  release_id=$(echo "$release_response" | jq -r '.id // empty')
+
+  # 如果响应中没有 ID（GitCode 的情况），重新查询获取
+  if [ -z "$release_id" ]; then
+    echo "响应中没有 ID，重新查询 Release..."
+    sleep 2  # 等待 API 同步
+    
+    if [ "$AUTH_TYPE" = "header" ]; then
+      release_detail=$(curl -s -H "$AUTH_HEADER" "$API_BASE/repos/$REPO/releases/tags/$TAG_NAME")
+    else
+      release_detail=$(curl -s "$API_BASE/repos/$REPO/releases/tags/$TAG_NAME?$AUTH_HEADER")
+    fi
+    
+    release_id=$(echo "$release_detail" | jq -r '.id // empty')
+  fi
+
+  if [ -z "$release_id" ]; then
+    echo "::warning::无法获取 Release ID，尝试从列表中查找..."
+    
+    # 最后尝试：从列表中查找
+    if [ "$AUTH_TYPE" = "header" ]; then
+      releases_new=$(curl -s -H "$AUTH_HEADER" "$API_BASE/repos/$REPO/releases?page=1&per_page=5")
+    else
+      releases_new=$(curl -s "$API_BASE/repos/$REPO/releases?$AUTH_HEADER&page=1&per_page=5")
+    fi
+    
+    release_id=$(echo "$releases_new" | jq -r --arg tag "$TAG_NAME" '.[] | select(.tag_name == $tag) | .id // empty')
+  fi
+
+  if [ -z "$release_id" ]; then
+    echo "::error::无法获取 Release ID，Release 已创建但无法上传文件"
+    echo "::notice::请手动访问 https://${PLATFORM}.com/$REPO/releases/tag/$TAG_NAME 上传文件"
+    exit 1
+  fi
+
+  echo "✓ 创建 Release 成功，ID: $release_id"
 fi
-
-echo "::group::📥 API 响应"
-echo "$release_response" | jq '.' 2>/dev/null || echo "$release_response"
-echo "::endgroup::"
-
-release_id=$(echo "$release_response" | jq -r '.id // empty')
-
-if [ -z "$release_id" ]; then
-  echo "::error::创建 $PLATFORM_NAME Release 失败"
-  exit 1
-fi
-
-echo "✓ 创建 Release 成功，ID: $release_id"
 
 # 上传文件
-echo "上传文件..."
+echo "上传文件到 Release ID: $release_id ..."
 uploaded=0
 failed=0
 
@@ -193,6 +235,9 @@ for file in out/*; do
   else
     error_msg=$(echo "$upload_response" | jq -r '.message // .error_message // "未知错误"')
     echo "    ✗ 失败: $error_msg"
+    echo "::group::上传响应详情"
+    echo "$upload_response" | jq '.' 2>/dev/null || echo "$upload_response"
+    echo "::endgroup::"
     failed=$((failed + 1))
   fi
 done
