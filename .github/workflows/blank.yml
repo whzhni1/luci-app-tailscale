@@ -3,7 +3,7 @@ name: "构建 Tailscale（ImmortalWrt 主线 APK + ImmortalWrt 24.10 IPK）"
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 2 * * *"
+    - cron: '0 23 * * *'
 
 permissions:
   contents: write
