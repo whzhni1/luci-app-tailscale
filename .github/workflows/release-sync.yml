@@ -1,4 +1,4 @@
-name: 同步 GitHub Release 到 Gitee
+name: 同步 luci-app-lucky 到 Gitee
 
 on:
   workflow_dispatch:   # 手动触发
@@ -36,10 +36,10 @@ jobs:
         run: |
           if [ "${{ steps.github_tag.outputs.github_tag }}" != "${{ steps.gitee_tag.outputs.gitee_tag }}" ]; then
             echo "new_version=true" >> $GITHUB_OUTPUT
-            echo "检测到 GitHub 有新版本: ${{ steps.github_tag.outputs.github_tag }}"
+            echo "::notice::检测到 GitHub 有新版本: ${{ steps.github_tag.outputs.github_tag }}"
           else
             echo "new_version=false" >> $GITHUB_OUTPUT
-            echo "GitHub 与 Gitee 版本一致，无需同步"
+            echo "::notice::GitHub 与 Gitee 版本一致，无需同步，今天跳过下载和上传"
           fi
 
       - name: ⬇️ 下载 GitHub Release 资源
