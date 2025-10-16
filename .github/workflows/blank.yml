@@ -183,7 +183,6 @@ jobs:
           set -e
           mkdir -p out
           
-          # 从 out-apk 中只复制 luci-app 和 luci-i18n 开头的文件
           for file in out-apk/*; do
             filename=$(basename "$file")
             if [[ "$filename" == luci-app-tailscale* ]] || [[ "$filename" == luci-i18n-tailscale* ]]; then
@@ -191,7 +190,6 @@ jobs:
             fi
           done
           
-          # 从 out-ipk 中只复制 luci-app 和 luci-i18n 开头的文件
           for file in out-ipk/*; do
             filename=$(basename "$file")
             if [[ "$filename" == luci-app-tailscale* ]] || [[ "$filename" == luci-i18n-tailscale* ]]; then
@@ -202,31 +200,160 @@ jobs:
           echo ""
           echo "=== 最终产物（已过滤 lib*, kmod-*, tailscale 主程序）==="
           ls -lh out/
-          
-      - name: "1️⃣1️⃣ 发布 Release"
+
+      # ✅ 新增：生成构建时间
+      - name: "📅 生成构建时间"
+        if: steps.version.outputs.skip != 'true'
+        id: build_time
+        run: |
+          BUILD_TIME=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          echo "time=$BUILD_TIME" >> $GITHUB_OUTPUT
+          echo "构建时间: $BUILD_TIME"
+
+      - name: "1️⃣1️⃣ 发布到 GitHub Release"
         if: steps.version.outputs.skip != 'true'
         uses: softprops/action-gh-release@v1
         with:
-         tag_name: "${{ steps.version.outputs.tag }}"
-         name: "luci-app-tailscale ${{ steps.version.outputs.version }}（ImmortalWrt 主线 APK + 24.10 IPK）"
-         files: "out/*"
-         body: |
-          ## 📦 包含文件
-          - **APK 格式**：ImmortalWrt 主线（新版 apk 包管理器）
-          - **IPK 格式**：ImmortalWrt 24.10（传统 opkg 包管理器）
+          tag_name: "${{ steps.version.outputs.tag }}"
+          name: "luci-app-tailscale ${{ steps.version.outputs.version }}（ImmortalWrt 主线 APK + 24.10 IPK）"
+          files: "out/*"
+          body: |
+            ## 📦 包含文件
+            - **APK 格式**：ImmortalWrt 主线（新版 apk 包管理器）
+            - **IPK 格式**：ImmortalWrt 24.10（传统 opkg 包管理器）
 
-          ## 🔧 持久化配置
-          - 数据路径：`/etc/config/tailscale-data`
+            ## 🔧 持久化配置
+            - 数据路径：`/etc/config/tailscale-data`
 
-          ## 📥 安装方法
-          ```bash
-          # APK 方式（ImmortalWrt 主线）
-          apk add --allow-untrusted luci-app-tailscale*.apk
+            ## 📥 安装方法
+            ```bash
+            # APK 方式（ImmortalWrt 主线）
+            apk add --allow-untrusted luci-app-tailscale*.apk
 
-          # IPK 方式（ImmortalWrt 24.10 及以下）
-          opkg install luci-app-tailscale*.ipk
-          ```
+            # IPK 方式（ImmortalWrt 24.10 及以下）
+            opkg install luci-app-tailscale*.ipk
+            ```
 
-          ## 📌 版本信息
-          - 上游版本: ${{ steps.version.outputs.tag }}
-          - 构建时间: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+            ## 📌 版本信息
+            - 上游版本: ${{ steps.version.outputs.tag }}
+            - 构建时间: ${{ steps.build_time.outputs.time }}
+
+            ## ⚠️ 注意事项
+            - 仅包含 LuCI 界面插件
+            - 不含依赖库和 Tailscale 主程序
+            - 依赖请从系统源安装
+
+      # ✅ 新增：Gitee Release
+      - name: "1️⃣2️⃣ 发布到 Gitee Release"
+        if: steps.version.outputs.skip != 'true'
+        run: |
+          set -e
+          echo "::group::📤 上传到 Gitee"
+          
+          GITEE_REPO="whzhni/tailscale_lucky" 
+          GITEE_TOKEN="${{ secrets.GITEE_TOKEN }}"
+          
+          if [ -z "$GITEE_TOKEN" ]; then
+            echo "::warning::未配置 GITEE_TOKEN，跳过 Gitee 发布"
+            exit 0
+          fi
+          
+          tag_exists=$(curl -s -o /dev/null -w "%{http_code}" \
+            "https://gitee.com/api/v5/repos/$GITEE_REPO/releases/tags/${{ steps.version.outputs.tag }}?access_token=$GITEE_TOKEN")
+          
+          if [ "$tag_exists" = "200" ]; then
+            echo "::notice::Gitee 上已存在 ${{ steps.version.outputs.tag }}，跳过发布"
+            exit 0
+          fi
+          
+          release_response=$(curl -X POST \
+            "https://gitee.com/api/v5/repos/$GITEE_REPO/releases" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "access_token": "'"$GITEE_TOKEN"'",
+              "tag_name": "${{ steps.version.outputs.tag }}",
+              "name": "luci-app-tailscale ${{ steps.version.outputs.version }}",
+              "body": "## 📦 包含文件\n- **APK 格式**：ImmortalWrt 主线\n- **IPK 格式**：ImmortalWrt 24.10\n\n## 📌 版本信息\n- 上游版本: ${{ steps.version.outputs.tag }}\n- 构建时间: ${{ steps.build_time.outputs.time }}\n\n## 📥 完整说明\nhttps://github.com/${{ github.repository }}/releases/tag/${{ steps.version.outputs.tag }}",
+              "prerelease": false,
+              "target_commitish": "main"
+            }')
+          
+          release_id=$(echo "$release_response" | jq -r '.id // empty')
+          
+          if [ -z "$release_id" ]; then
+            echo "::error::创建 Gitee Release 失败"
+            echo "$release_response" | jq '.'
+            exit 1
+          fi
+          
+          echo "✓ 创建 Release 成功，ID: $release_id"
+          
+          for file in out/*; do
+            filename=$(basename "$file")
+            echo "上传: $filename"
+            curl -X POST \
+              "https://gitee.com/api/v5/repos/$GITEE_REPO/releases/$release_id/attach_files" \
+              -F "access_token=$GITEE_TOKEN" \
+              -F "file=@$file" \
+              || echo "::warning::上传 $filename 失败"
+          done
+          
+          echo "::notice::✅ Gitee Release 发布完成"
+          echo "::endgroup::"
+
+      # ✅ 新增：GitCode Release
+      - name: "1️⃣3️⃣ 发布到 GitCode Release"
+        if: steps.version.outputs.skip != 'true'
+        run: |
+          set -e
+          echo "::group::📤 上传到 GitCode"
+          
+          GITCODE_REPO="whzhni/luci-app-tailscale_luci-app-lucky" 
+          GITCODE_TOKEN="${{ secrets.GITCODE_TOKEN }}"
+          
+          if [ -z "$GITCODE_TOKEN" ]; then
+            echo "::warning::未配置 GITCODE_TOKEN，跳过 GitCode 发布"
+            exit 0
+          fi
+          
+          tag_exists=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "PRIVATE-TOKEN: $GITCODE_TOKEN" \
+            "https://gitcode.com/api/v5/repos/$GITCODE_REPO/releases/tags/${{ steps.version.outputs.tag }}")
+          
+          if [ "$tag_exists" = "200" ]; then
+            echo "::notice::GitCode 上已存在 ${{ steps.version.outputs.tag }}，跳过发布"
+            exit 0
+          fi
+          
+          release_response=$(curl -X POST \
+            "https://gitcode.com/api/v5/repos/$GITCODE_REPO/releases" \
+            -H "Content-Type: application/json" \
+            -H "PRIVATE-TOKEN: $GITCODE_TOKEN" \
+            -d '{
+              "tag_name": "${{ steps.version.outputs.tag }}",
+              "name": "luci-app-tailscale ${{ steps.version.outputs.version }}",
+              "description": "## 📦 包含文件\n- **APK 格式**：ImmortalWrt 主线\n- **IPK 格式**：ImmortalWrt 24.10\n\n## 📌 版本信息\n- 上游版本: ${{ steps.version.outputs.tag }}\n- 构建时间: ${{ steps.build_time.outputs.time }}\n\n## 📥 完整说明\nhttps://github.com/${{ github.repository }}/releases/tag/${{ steps.version.outputs.tag }}"
+            }')
+          
+          release_id=$(echo "$release_response" | jq -r '.id // empty')
+          
+          if [ -z "$release_id" ]; then
+            echo "::error::创建 GitCode Release 失败"
+            echo "$release_response" | jq '.'
+            exit 1
+          fi
+          
+          echo "✓ 创建 Release 成功，ID: $release_id"
+          
+          for file in out/*; do
+            filename=$(basename "$file")
+            echo "上传: $filename"
+            curl -X POST \
+              "https://gitcode.com/api/v5/repos/$GITCODE_REPO/releases/$release_id/attach_files" \
+              -H "PRIVATE-TOKEN: $GITCODE_TOKEN" \
+              -F "file=@$file" \
+              || echo "::warning::上传 $filename 失败"
+          done
+          
+          echo "::notice::✅ GitCode Release 发布完成"
+          echo "::endgroup::"
