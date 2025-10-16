@@ -254,5 +254,5 @@ jobs:
             "${{ steps.version.outputs.tag }}" \
             "${{ steps.version.outputs.version }}" \
             "${{ steps.build_time.outputs.time }}" \
-            "${{ github.repository }}"
+            "${{ github.repository }}" \
             "luci-app-lucky"
