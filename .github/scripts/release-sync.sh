@@ -109,16 +109,16 @@ if [ "$PLATFORM" = "gitee" ]; then
       -d @-)
 
 elif [ "$PLATFORM" = "gitcode" ]; then
-  # GitCode 使用 description 字段 + header 认证
+  # GitCode 使用 body 字段 + header 认证
   release_response=$(jq -n \
     --arg tag "$TAG_NAME" \
     --arg name "luci-app-tailscale $VERSION" \
-    --arg desc "$RELEASE_BODY" \
+    --arg body "$RELEASE_BODY" \
     --arg ref "$latest_commit" \
     '{
       tag_name: $tag,
       name: $name,
-      description: $desc,
+      body: $body,
       ref: $ref
     }' | curl -s -X POST "$API_BASE/repos/$REPO/releases" \
       -H "Content-Type: application/json" \
