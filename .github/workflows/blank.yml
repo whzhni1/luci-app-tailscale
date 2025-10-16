@@ -247,9 +247,8 @@ jobs:
         if: steps.version.outputs.skip != 'true'
         continue-on-error: true
         run: |
-          chmod +x .github/scripts/release-sync.sh
-          .github/scripts/release-sync.sh \
-            "gitee" \
+          chmod +x .github/scripts/release-gitee.sh
+          .github/scripts/release-gitee.sh \
             "whzhni/tailscale_lucky" \
             "${{ secrets.GITEE_TOKEN }}" \
             "${{ steps.version.outputs.tag }}" \
