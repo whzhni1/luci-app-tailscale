@@ -1,4 +1,4 @@
-name: Sync Release to Gitee
+name: 同步 GitHub Release 到 Gitee
 
 on:
   workflow_dispatch:   # 手动触发
@@ -9,29 +9,29 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: 📥 检出代码
         uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: 🛠️ 安装依赖
         run: |
           sudo apt-get update
           sudo apt-get install -y jq curl
 
-      - name: Get latest GitHub tag
+      - name: 🔍 获取 GitHub 最新标签
         id: github_tag
         run: |
           GH_TAG=$(curl -s https://api.github.com/repos/gdy666/luci-app-lucky/tags | jq -r '.[0].name')
           echo "github_tag=$GH_TAG" >> $GITHUB_OUTPUT
           echo "GitHub 最新版本: $GH_TAG"
 
-      - name: Get latest Gitee tag
+      - name: 🔍 获取 Gitee 最新标签
         id: gitee_tag
         run: |
           GITEE_TAG=$(curl -s "https://gitee.com/api/v5/repos/whzhni/luci-app-lucky/tags?access_token=${{ secrets.GITEE_TOKEN }}" | jq -r '.[0].name')
           echo "gitee_tag=$GITEE_TAG" >> $GITHUB_OUTPUT
           echo "Gitee 最新版本: $GITEE_TAG"
 
-      - name: Compare versions
+      - name: 🔄 比较版本
         id: compare
         run: |
           if [ "${{ steps.github_tag.outputs.github_tag }}" != "${{ steps.gitee_tag.outputs.gitee_tag }}" ]; then
@@ -42,31 +42,30 @@ jobs:
             echo "GitHub 与 Gitee 版本一致，无需同步"
           fi
 
-      - name: Download GitHub release assets
+      - name: ⬇️ 下载 GitHub Release 资源
         if: steps.compare.outputs.new_version == 'true'
         run: |
           TAG=${{ steps.github_tag.outputs.github_tag }}
           mkdir -p out
-          # 获取 release 信息
+          echo "获取 GitHub Release 信息..."
           release_info=$(curl -s https://api.github.com/repos/gdy666/luci-app-lucky/releases/tags/$TAG)
-          # 下载所有 assets
+          echo "下载 Release 附件..."
           echo "$release_info" | jq -r '.assets[].browser_download_url' | while read url; do
             echo "下载: $url"
             curl -L -o "out/$(basename $url)" "$url"
           done
-          # 额外下载源码包（zip/tar.gz）
+          echo "下载源码包..."
           curl -L -o "out/source-$TAG.zip" "https://github.com/gdy666/luci-app-lucky/archive/refs/tags/$TAG.zip"
           curl -L -o "out/source-$TAG.tar.gz" "https://github.com/gdy666/luci-app-lucky/archive/refs/tags/$TAG.tar.gz"
           ls -lh out
 
-      - name: Run release-sync.sh
+      - name: 📤 发布到 Gitee
         if: steps.compare.outputs.new_version == 'true'
         run: |
-          chmod +x .github/scripts/release-sync.sh
+          chmod +x .github/scripts/release-gitee.sh
           BUILD_TIME=$(date +"%Y-%m-%d %H:%M:%S")
           VERSION=${{ steps.github_tag.outputs.github_tag }}
-          .github/scripts/release-sync.sh \
-            gitee \
+          .github/scripts/release-gitee.sh \
             "whzhni/luci-app-lucky" \
             "${{ secrets.GITEE_TOKEN }}" \
             "$VERSION" \
