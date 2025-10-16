@@ -123,13 +123,25 @@ elif [ "$PLATFORM" = "gitcode" ]; then
       -d @-)
 fi
 
-release_id=$(echo "$release_response" | jq -r '.id // empty')
+# 创建 Release
+release_response=$( ... curl POST ... )
 
-if [ -z "$release_id" ]; then
+release_tag=$(echo "$release_response" | jq -r '.tag_name // empty')
+
+if [ "$release_tag" != "$TAG_NAME" ]; then
   echo "::error::创建 $PLATFORM_NAME Release 失败"
   echo "$release_response" | jq '.'
   exit 1
 fi
+
+echo "✓ 创建 Release 成功: $release_tag"
+
+# 获取 release_id（GitCode 需要二次查询）
+if [ "$PLATFORM" = "gitcode" ]; then
+  release_info=$(curl -s "$API_BASE/repos/$REPO/releases/tags/$TAG_NAME?access_token=$TOKEN")
+  release_id=$(echo "$release_info" | jq -r '.id // empty')
+fi
+
 
 echo "✓ 创建 Release 成功，ID: $release_id"
 
