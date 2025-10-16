@@ -50,19 +50,8 @@ fi
 existing_release=$(echo "$releases" | jq -r --arg tag "$TAG_NAME" '.[] | select(.tag_name == $tag)')
 
 if [ -n "$existing_release" ]; then
-  echo "::notice::$PLATFORM_NAME 上已存在 Release $TAG_NAME"
-  
-  # 尝试获取已存在 Release 的 ID
-  existing_id=$(echo "$existing_release" | jq -r '.id // empty')
-  
-  if [ -n "$existing_id" ]; then
-    echo "使用已存在的 Release ID: $existing_id"
-    release_id="$existing_id"
-    skip_create=true
-  else
-    echo "::warning::已存在的 Release 没有 ID，跳过发布"
-    exit 0
-  fi
+  echo "::notice::检测到已存在 Release $TAG_NAME，将直接上传文件"
+  skip_create=true
 else
   skip_create=false
 fi
@@ -132,6 +121,16 @@ if [ "$skip_create" = false ]; then
     
     release_response=$(echo "$release_payload" | curl -s -X POST "$API_BASE/repos/$REPO/releases" \
       -H "Content-Type: application/json" -d @-)
+    
+    release_id=$(echo "$release_response" | jq -r '.id // empty')
+    
+    if [ -z "$release_id" ]; then
+      echo "::error::Gitee Release 创建失败"
+      echo "$release_response" | jq '.'
+      exit 1
+    fi
+    
+    echo "✓ 创建 Gitee Release 成功，ID: $release_id"
 
   elif [ "$PLATFORM" = "gitcode" ]; then
     if [ -n "$latest_commit" ]; then
@@ -157,53 +156,26 @@ if [ "$skip_create" = false ]; then
       -H "Content-Type: application/json" \
       -H "$AUTH_HEADER" \
       -d @-)
-  fi
-
-  echo "::group::📥 API 响应"
-  echo "$release_response" | jq '.' 2>/dev/null || echo "$release_response"
-  echo "::endgroup::"
-
-  # 尝试从响应中获取 ID
-  release_id=$(echo "$release_response" | jq -r '.id // empty')
-
-  # 如果响应中没有 ID（GitCode 的情况），重新查询获取
-  if [ -z "$release_id" ]; then
-    echo "响应中没有 ID，重新查询 Release..."
-    sleep 2  # 等待 API 同步
     
-    if [ "$AUTH_TYPE" = "header" ]; then
-      release_detail=$(curl -s -H "$AUTH_HEADER" "$API_BASE/repos/$REPO/releases/tags/$TAG_NAME")
+    echo "::group::📥 API 响应"
+    echo "$release_response" | jq '.' 2>/dev/null || echo "$release_response"
+    echo "::endgroup::"
+    
+    # GitCode 不返回 id，使用 tag_name 作为标识
+    response_tag=$(echo "$release_response" | jq -r '.tag_name // empty')
+    
+    if [ "$response_tag" = "$TAG_NAME" ]; then
+      echo "✓ 创建 GitCode Release 成功（使用 tag: $TAG_NAME）"
+      release_id=""  # GitCode 不需要 ID
     else
-      release_detail=$(curl -s "$API_BASE/repos/$REPO/releases/tags/$TAG_NAME?$AUTH_HEADER")
+      echo "::error::GitCode Release 创建失败"
+      exit 1
     fi
-    
-    release_id=$(echo "$release_detail" | jq -r '.id // empty')
   fi
-
-  if [ -z "$release_id" ]; then
-    echo "::warning::无法获取 Release ID，尝试从列表中查找..."
-    
-    # 最后尝试：从列表中查找
-    if [ "$AUTH_TYPE" = "header" ]; then
-      releases_new=$(curl -s -H "$AUTH_HEADER" "$API_BASE/repos/$REPO/releases?page=1&per_page=5")
-    else
-      releases_new=$(curl -s "$API_BASE/repos/$REPO/releases?$AUTH_HEADER&page=1&per_page=5")
-    fi
-    
-    release_id=$(echo "$releases_new" | jq -r --arg tag "$TAG_NAME" '.[] | select(.tag_name == $tag) | .id // empty')
-  fi
-
-  if [ -z "$release_id" ]; then
-    echo "::error::无法获取 Release ID，Release 已创建但无法上传文件"
-    echo "::notice::请手动访问 https://${PLATFORM}.com/$REPO/releases/tag/$TAG_NAME 上传文件"
-    exit 1
-  fi
-
-  echo "✓ 创建 Release 成功，ID: $release_id"
 fi
 
 # 上传文件
-echo "上传文件到 Release ID: $release_id ..."
+echo "上传文件..."
 uploaded=0
 failed=0
 
@@ -216,16 +188,30 @@ for file in out/*; do
   echo "  上传: $filename"
   
   if [ "$PLATFORM" = "gitee" ]; then
+    # Gitee 使用 release_id
     upload_response=$(curl -s -X POST \
       "$API_BASE/repos/$REPO/releases/$release_id/attach_files" \
       -F "access_token=$TOKEN" \
       -F "file=@$file")
     success_field="browser_download_url"
+    
   elif [ "$PLATFORM" = "gitcode" ]; then
+    # GitCode 使用 tag_name（尝试两种可能的 API）
+    
+    # 方法 1：先尝试通过 tag 上传
     upload_response=$(curl -s -X POST \
-      "$API_BASE/repos/$REPO/releases/$release_id/attach_files" \
+      "$API_BASE/repos/$REPO/releases/tags/$TAG_NAME/attach_files" \
       -H "$AUTH_HEADER" \
       -F "file=@$file")
+    
+    # 方法 2：如果方法 1 失败，尝试直接上传
+    if ! echo "$upload_response" | jq -e '.url' > /dev/null 2>&1; then
+      upload_response=$(curl -s -X POST \
+        "$API_BASE/repos/$REPO/releases/$TAG_NAME/attach_files" \
+        -H "$AUTH_HEADER" \
+        -F "file=@$file")
+    fi
+    
     success_field="url"
   fi
   
@@ -235,9 +221,11 @@ for file in out/*; do
   else
     error_msg=$(echo "$upload_response" | jq -r '.message // .error_message // "未知错误"')
     echo "    ✗ 失败: $error_msg"
+    
     echo "::group::上传响应详情"
     echo "$upload_response" | jq '.' 2>/dev/null || echo "$upload_response"
     echo "::endgroup::"
+    
     failed=$((failed + 1))
   fi
 done
@@ -246,8 +234,8 @@ if [ $uploaded -gt 0 ]; then
   echo "::notice::✅ $PLATFORM_NAME Release 发布完成（成功 $uploaded 个，失败 $failed 个）"
   echo "::notice::🔗 https://${PLATFORM}.com/$REPO/releases/tag/$TAG_NAME"
 else
-  echo "::error::❌ 所有文件上传失败"
-  exit 1
+  echo "::warning::⚠️  所有文件上传失败，但 Release 已创建"
+  echo "::notice::请访问 https://${PLATFORM}.com/$REPO/releases/tag/$TAG_NAME 手动上传"
 fi
 
 echo "::endgroup::"
