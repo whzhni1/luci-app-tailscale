@@ -256,17 +256,3 @@ jobs:
             "${{ steps.version.outputs.version }}" \
             "${{ steps.build_time.outputs.time }}" \
             "${{ github.repository }}"
-
-      - name: "1️⃣3️⃣ 同步到 GitCode Release"
-        if: steps.version.outputs.skip != 'true'
-        continue-on-error: true
-        run: |
-          chmod +x .github/scripts/release-sync.sh
-          .github/scripts/release-sync.sh \
-            "gitcode" \
-            "whzhni/luci-app-tailscale_luci-app-lucky" \
-            "${{ secrets.GITCODE_TOKEN }}" \
-            "${{ steps.version.outputs.tag }}" \
-            "${{ steps.version.outputs.version }}" \
-            "${{ steps.build_time.outputs.time }}" \
-            "${{ github.repository }}"
