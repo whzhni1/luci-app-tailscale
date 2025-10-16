@@ -1,15 +1,14 @@
 #!/bin/bash
 set -e
 
-PLATFORM="${1}"        # gitee 或 gitcode
-REPO="${2}"           # 仓库路径 (user/repo)
-TOKEN="${3}"          # Access Token
-TAG_NAME="${4}"       # 版本标签
-VERSION="${5}"        # 版本号
-BUILD_TIME="${6}"     # 构建时间
-GITHUB_REPO="${7}"    # GitHub 仓库路径
+PLATFORM="${1}"
+REPO="${2}"
+TOKEN="${3}"
+TAG_NAME="${4}"
+VERSION="${5}"
+BUILD_TIME="${6}"
+GITHUB_REPO="${7}"
 
-# 平台配置
 case "$PLATFORM" in
   gitee)
     PLATFORM_NAME="Gitee"
@@ -19,12 +18,12 @@ case "$PLATFORM" in
     ;;
   gitcode)
     PLATFORM_NAME="GitCode"
-    API_BASE="https://api.gitcode.com/api/v5"
+    API_BASE="https://gitcode.com/api/v5"
     AUTH_HEADER="PRIVATE-TOKEN: $TOKEN"
     AUTH_TYPE="header"
     ;;
   *)
-    echo "::error::未知平台: $PLATFORM (支持 gitee/gitcode)"
+    echo "::error::未知平台: $PLATFORM"
     exit 1
     ;;
 esac
@@ -40,41 +39,57 @@ echo "平台: $PLATFORM_NAME"
 echo "仓库: https://${PLATFORM}.com/$REPO"
 echo "标签: $TAG_NAME"
 
-# ==================== 检查 Release 是否已存在 ====================
+# 检查 Release 是否已存在
 echo "检查 Release 是否已存在..."
-
-if [ "$PLATFORM" = "gitee" ]; then
+if [ "$AUTH_TYPE" = "header" ]; then
+  releases=$(curl -s -H "$AUTH_HEADER" "$API_BASE/repos/$REPO/releases?page=1&per_page=20")
+else
   releases=$(curl -s "$API_BASE/repos/$REPO/releases?$AUTH_HEADER&page=1&per_page=20")
-elif [ "$PLATFORM" = "gitcode" ]; then
-  releases=$(curl -s "$API_BASE/repos/$REPO/releases?access_token=$TOKEN&page=1&per_page=20")
 fi
 
-tag_exists=$(echo "$releases" | jq -r --arg tag "$TAG_NAME" '.[] | select(.tag_name == $tag) | .tag_name' | head -1)
+existing_release=$(echo "$releases" | jq -r --arg tag "$TAG_NAME" '.[] | select(.tag_name == $tag)')
 
-if [ "$tag_exists" = "$TAG_NAME" ]; then
-  echo "::notice::$PLATFORM_NAME 上已存在 Release $TAG_NAME，跳过发布"
-  exit 0
+if [ -n "$existing_release" ]; then
+  echo "::notice::检测到已存在 Release $TAG_NAME，将直接上传文件"
+  skip_create=true
+  # 获取现有 release 的信息
+  if [ "$PLATFORM" = "gitcode" ]; then
+    release_info=$(curl -s -H "$AUTH_HEADER" "$API_BASE/repos/$REPO/releases/tags/$TAG_NAME")
+  fi
+else
+  skip_create=false
 fi
 
-# ==================== 获取最新 commit ====================
-echo "获取最新 commit..."
+# 获取最新 commit（如果需要创建）
+if [ "$skip_create" = false ]; then
+  echo "获取最新 commit..."
+  if [ "$PLATFORM" = "gitee" ]; then
+    commit_info=$(curl -s "$API_BASE/repos/$REPO/commits?$AUTH_HEADER&page=1&per_page=1")
+    latest_commit=$(echo "$commit_info" | jq -r '.[0].sha // empty')
 
-if [ "$PLATFORM" = "gitee" ]; then
-  commit_info=$(curl -s "$API_BASE/repos/$REPO/commits?$AUTH_HEADER&page=1&per_page=1")
-  latest_commit=$(echo "$commit_info" | jq -r '.[0].sha // empty')
-elif [ "$PLATFORM" = "gitcode" ]; then
-  branches=$(curl -s "$API_BASE/repos/$REPO/branches?access_token=$TOKEN")
-  latest_commit=$(echo "$branches" | jq -r '.[0].commit.id // empty')
+  elif [ "$PLATFORM" = "gitcode" ]; then
+    project_info=$(curl -s -H "$AUTH_HEADER" "$API_BASE/repos/$REPO")
+    default_branch=$(echo "$project_info" | jq -r '.default_branch // "main"')
+    echo "  默认分支: $default_branch"
+    
+    branch_info=$(curl -s -H "$AUTH_HEADER" "$API_BASE/repos/$REPO/branches/$default_branch")
+    latest_commit=$(echo "$branch_info" | jq -r '.commit.id // empty')
+    
+    if [ -z "$latest_commit" ] || [ "$latest_commit" = "null" ]; then
+      commits=$(curl -s -H "$AUTH_HEADER" "$API_BASE/repos/$REPO/commits?page=1&per_page=1")
+      latest_commit=$(echo "$commits" | jq -r '.[0].id // empty')
+    fi
+  fi
+
+  if [ -z "$latest_commit" ] || [ "$latest_commit" = "null" ]; then
+    echo "  ⚠️  无法获取 commit，将不指定 ref"
+    latest_commit=""
+  else
+    echo "  ✓ commit: ${latest_commit:0:8}..."
+  fi
 fi
 
-if [ -z "$latest_commit" ] || [ "$latest_commit" = "null" ]; then
-  echo "::warning::无法获取最新 commit，尝试使用 main 分支"
-  latest_commit="main"
-fi
-
-echo "最新 commit: $latest_commit"
-
-# ==================== 准备 Release 内容 ====================
+# 准备 Release 内容
 RELEASE_BODY="## 📦 包含文件
 - **APK 格式**：ImmortalWrt 主线
 - **IPK 格式**：ImmortalWrt 24.10
@@ -86,127 +101,185 @@ RELEASE_BODY="## 📦 包含文件
 ## 📥 完整说明
 https://github.com/$GITHUB_REPO/releases/tag/$TAG_NAME"
 
-# ==================== 创建 Release ====================
-echo "创建 Release..."
-
-if [ "$PLATFORM" = "gitee" ]; then
-  release_response=$(jq -n \
-    --arg token "$TOKEN" \
-    --arg tag "$TAG_NAME" \
-    --arg name "luci-app-tailscale $VERSION" \
-    --arg body "$RELEASE_BODY" \
-    --arg ref "$latest_commit" \
-    '{
-      access_token: $token,
-      tag_name: $tag,
-      name: $name,
-      body: $body,
-      target_commitish: $ref,
-      prerelease: false
-    }' | curl -s -X POST "$API_BASE/repos/$REPO/releases" \
-      -H "Content-Type: application/json" \
-      -d @-)
-
-elif [ "$PLATFORM" = "gitcode" ]; then
-  release_response=$(jq -n \
-    --arg tag "$TAG_NAME" \
-    --arg name "luci-app-tailscale $VERSION" \
-    --arg body "$RELEASE_BODY" \
-    --arg ref "$latest_commit" \
-    '{
-      tag_name: $tag,
-      name: $name,
-      body: $body,
-      ref: $ref
-    }' | curl -s -X POST "$API_BASE/repos/$REPO/releases?access_token=$TOKEN" \
-      -H "Content-Type: application/json" \
-      -d @-)
-fi
-
 # 创建 Release
-release_response=$( ... curl POST ... )
+if [ "$skip_create" = false ]; then
+  echo "创建 Release..."
 
-release_tag=$(echo "$release_response" | jq -r '.tag_name // empty')
+  if [ "$PLATFORM" = "gitee" ]; then
+    if [ -n "$latest_commit" ]; then
+      release_payload=$(jq -n \
+        --arg token "$TOKEN" \
+        --arg tag "$TAG_NAME" \
+        --arg name "luci-app-tailscale $VERSION" \
+        --arg body "$RELEASE_BODY" \
+        --arg ref "$latest_commit" \
+        '{access_token: $token, tag_name: $tag, name: $name, body: $body, target_commitish: $ref, prerelease: false}')
+    else
+      release_payload=$(jq -n \
+        --arg token "$TOKEN" \
+        --arg tag "$TAG_NAME" \
+        --arg name "luci-app-tailscale $VERSION" \
+        --arg body "$RELEASE_BODY" \
+        '{access_token: $token, tag_name: $tag, name: $name, body: $body, prerelease: false}')
+    fi
+    
+    release_response=$(echo "$release_payload" | curl -s -X POST "$API_BASE/repos/$REPO/releases" \
+      -H "Content-Type: application/json" -d @-)
+    
+    release_id=$(echo "$release_response" | jq -r '.id // empty')
+    
+    if [ -z "$release_id" ]; then
+      echo "::error::Gitee Release 创建失败"
+      echo "$release_response" | jq '.'
+      exit 1
+    fi
+    
+    echo "✓ 创建 Gitee Release 成功，ID: $release_id"
 
-if [ "$release_tag" != "$TAG_NAME" ]; then
-  echo "::error::创建 $PLATFORM_NAME Release 失败"
-  echo "$release_response" | jq '.'
-  exit 1
+  elif [ "$PLATFORM" = "gitcode" ]; then
+    # GitCode 创建 Release
+    if [ -n "$latest_commit" ]; then
+      release_payload=$(jq -n \
+        --arg tag "$TAG_NAME" \
+        --arg name "luci-app-tailscale $VERSION" \
+        --arg body "$RELEASE_BODY" \
+        --arg ref "$latest_commit" \
+        '{tag_name: $tag, name: $name, body: $body, ref: $ref}')
+    else
+      release_payload=$(jq -n \
+        --arg tag "$TAG_NAME" \
+        --arg name "luci-app-tailscale $VERSION" \
+        --arg body "$RELEASE_BODY" \
+        '{tag_name: $tag, name: $name, body: $body}')
+    fi
+    
+    echo "::group::📝 请求 JSON"
+    echo "$release_payload" | jq '.'
+    echo "::endgroup::"
+    
+    release_response=$(echo "$release_payload" | curl -s -X POST "$API_BASE/repos/$REPO/releases" \
+      -H "Content-Type: application/json" \
+      -H "$AUTH_HEADER" \
+      -d @-)
+    
+    echo "::group::📥 API 响应"
+    echo "$release_response" | jq '.' 2>/dev/null || echo "$release_response"
+    echo "::endgroup::"
+    
+    # GitCode 不返回 id，使用 tag_name 作为标识
+    response_tag=$(echo "$release_response" | jq -r '.tag_name // empty')
+    
+    if [ "$response_tag" = "$TAG_NAME" ]; then
+      echo "✓ 创建 GitCode Release 成功（使用 tag: $TAG_NAME）"
+      release_id=""  # GitCode 不需要 ID
+    else
+      echo "::error::GitCode Release 创建失败"
+      exit 1
+    fi
+  fi
 fi
 
-echo "✓ 创建 Release 成功: $release_tag"
-
-# 获取 release_id（GitCode 需要二次查询）
-if [ "$PLATFORM" = "gitcode" ]; then
-  release_info=$(curl -s "$API_BASE/repos/$REPO/releases/tags/$TAG_NAME?access_token=$TOKEN")
-  release_id=$(echo "$release_info" | jq -r '.id // empty')
-fi
-
-
-echo "✓ 创建 Release 成功，ID: $release_id"
-
-# ==================== 上传文件 ====================
+# 上传文件
 echo "上传文件..."
 uploaded=0
 failed=0
-download_links=""
 
 for file in out/*; do
-  [ -f "$file" ] || continue
+  if [ ! -f "$file" ]; then
+    continue
+  fi
+  
   filename=$(basename "$file")
   echo "  上传: $filename"
-
+  
   if [ "$PLATFORM" = "gitee" ]; then
+    # Gitee 使用 release_id
     upload_response=$(curl -s -X POST \
       "$API_BASE/repos/$REPO/releases/$release_id/attach_files" \
       -F "access_token=$TOKEN" \
       -F "file=@$file")
-    file_url=$(echo "$upload_response" | jq -r '.browser_download_url // empty')
-
+    success_field="browser_download_url"
+    
   elif [ "$PLATFORM" = "gitcode" ]; then
-    owner=$(echo "$REPO" | cut -d'/' -f1)
-    repo=$(echo "$REPO" | cut -d'/' -f2)
+    # GitCode 文件上传 - 根据文档，GitCode 似乎没有直接的文件上传 API
+    # 但我们可以尝试使用 GitLab 兼容的 API（GitCode 基于 GitLab）
+    
+    # 方法 1: 尝试使用 GitLab 风格的 API
     upload_response=$(curl -s -X POST \
-      "https://api.gitcode.com/api/v5/repos/$owner/$repo/file/upload?access_token=$TOKEN" \
-      -F "file=@$file")
-    file_url=$(echo "$upload_response" | jq -r '.full_path // empty')
+      "$API_BASE/repos/$REPO/releases/$TAG_NAME/assets/links" \
+      -H "Content-Type: application/json" \
+      -H "$AUTH_HEADER" \
+      -d "{
+        \"name\": \"$filename\",
+        \"url\": \"https://github.com/$GITHUB_REPO/releases/download/$TAG_NAME/$filename\"
+      }")
+    
+    # 检查是否成功
+    if echo "$upload_response" | jq -e '.name' > /dev/null 2>&1; then
+      echo "    ✓ 成功创建资源链接"
+      uploaded=$((uploaded + 1))
+    else
+      # 方法 2: 如果链接方式失败，尝试直接上传（如果支持）
+      echo "    ⚠️  资源链接创建失败，尝试直接上传..."
+      
+      # 尝试使用 multipart/form-data 上传
+      upload_response=$(curl -s -X POST \
+        "$API_BASE/repos/$REPO/uploads" \
+        -H "$AUTH_HEADER" \
+        -F "file=@$file")
+      
+      if echo "$upload_response" | jq -e '.url' > /dev/null 2>&1; then
+        echo "    ✓ 直接上传成功"
+        uploaded=$((uploaded + 1))
+        
+        # 将上传的文件链接到 release
+        file_url=$(echo "$upload_response" | jq -r '.url')
+        link_response=$(curl -s -X POST \
+          "$API_BASE/repos/$REPO/releases/$TAG_NAME/assets/links" \
+          -H "Content-Type: application/json" \
+          -H "$AUTH_HEADER" \
+          -d "{
+            \"name\": \"$filename\",
+            \"url\": \"$file_url\"
+          }")
+      else
+        error_msg=$(echo "$upload_response" | jq -r '.message // .error // "未知错误"')
+        echo "    ✗ 失败: $error_msg"
+        
+        echo "::group::上传响应详情"
+        echo "$upload_response" | jq '.' 2>/dev/null || echo "$upload_response"
+        echo "::endgroup::"
+        
+        failed=$((failed + 1))
+      fi
+    fi
+    success_field="url"
   fi
-
-  if [ -n "$file_url" ]; then
-    echo "    ✓ 上传成功: $file_url"
-    uploaded=$((uploaded + 1))
-    download_links="$download_links\n- [$filename]($file_url)"
-  else
-    echo "    ✗ 上传失败: $(echo "$upload_response" | jq -r '.message // "未知错误"')"
-    failed=$((failed + 1))
+  
+  # 检查上传结果（Gitee）
+  if [ "$PLATFORM" = "gitee" ]; then
+    if echo "$upload_response" | jq -e ".$success_field" > /dev/null 2>&1; then
+      echo "    ✓ 成功"
+      uploaded=$((uploaded + 1))
+    else
+      error_msg=$(echo "$upload_response" | jq -r '.message // .error_message // "未知错误"')
+      echo "    ✗ 失败: $error_msg"
+      
+      echo "::group::上传响应详情"
+      echo "$upload_response" | jq '.' 2>/dev/null || echo "$upload_response"
+      echo "::endgroup::"
+      
+      failed=$((failed + 1))
+    fi
   fi
 done
 
-# ==================== 更新 GitCode Release Body，追加下载链接 ====================
-if [ "$PLATFORM" = "gitcode" ] && [ -n "$download_links" ]; then
-  new_body="$RELEASE_BODY\n\n## 📥 下载链接$download_links"
-  update_response=$(jq -n \
-    --arg tag "$TAG_NAME" \
-    --arg name "luci-app-tailscale $VERSION" \
-    --arg body "$new_body" \
-    '{
-      tag_name: $tag,
-      name: $name,
-      body: $body
-    }' | curl -s -X PATCH \
-      "$API_BASE/repos/$REPO/releases/$release_id?access_token=$TOKEN" \
-      -H "Content-Type: application/json" \
-      -d @-)
-
-  echo "✓ 已更新 Release，追加下载链接"
-fi
-
-# ==================== 总结 ====================
 if [ $uploaded -gt 0 ]; then
-  echo "::notice::✅ $PLATFORM_NAME Release 发布完成（成功 $uploaded 个，失败 $failed 个）: https://${PLATFORM}.com/$REPO/releases/tag/$TAG_NAME"
+  echo "::notice::✅ $PLATFORM_NAME Release 发布完成（成功 $uploaded 个，失败 $failed 个）"
+  echo "::notice::🔗 https://${PLATFORM}.com/$REPO/releases/tag/$TAG_NAME"
 else
-  echo "::error::❌ $PLATFORM_NAME 文件上传失败"
-  exit 1
+  echo "::warning::⚠️  所有文件上传失败，但 Release 已创建"
+  echo "::notice::请访问 https://${PLATFORM}.com/$REPO/releases/tag/$TAG_NAME 手动上传"
 fi
 
 echo "::endgroup::"
