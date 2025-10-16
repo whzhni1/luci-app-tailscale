@@ -243,145 +243,30 @@ jobs:
             - 不含依赖库和 Tailscale 主程序
             - 依赖请从系统源安装
 
-      
-      - name: "1️⃣2️⃣ 发布到 Gitee Release"
+      - name: "1️⃣2️⃣ 同步到 Gitee Release"
         if: steps.version.outputs.skip != 'true'
         continue-on-error: true
         run: |
-          set -e
-          echo "::group::📤 上传到 Gitee"
-          
-          GITEE_REPO="whzhni/tailscale_lucky"
-          GITEE_TOKEN="${{ secrets.GITEE_TOKEN }}"
-          
-          if [ -z "$GITEE_TOKEN" ]; then
-            echo "::warning::未配置 GITEE_TOKEN，跳过 Gitee 发布"
-            exit 0
-          fi
-          
-          echo "检查 Release 是否已存在..."
-          releases=$(curl -s "https://gitee.com/api/v5/repos/$GITEE_REPO/releases?access_token=$GITEE_TOKEN&page=1&per_page=20")
-          tag_exists=$(echo "$releases" | jq -r --arg tag "${{ steps.version.outputs.tag }}" '.[] | select(.tag_name == $tag) | .tag_name' | head -1)
-          
-          if [ "$tag_exists" = "${{ steps.version.outputs.tag }}" ]; then
-            echo "::notice::Gitee 上已存在 Release ${{ steps.version.outputs.tag }}，跳过发布"
-            exit 0
-          fi
-          
-          echo "创建新 Release..."
-          cat > /tmp/gitee_release.json <<'EOJSON'
-          {
-            "access_token": "GITEE_TOKEN_PLACEHOLDER",
-            "tag_name": "TAG_PLACEHOLDER",
-            "name": "NAME_PLACEHOLDER",
-            "body": "BODY_PLACEHOLDER",
-            "prerelease": false,
-            "target_commitish": "main"
-          }
-          EOJSON
-          
-          RELEASE_BODY="## 📦 包含文件\\n- **APK 格式**：ImmortalWrt 主线\\n- **IPK 格式**：ImmortalWrt 24.10\\n\\n## 📌 版本信息\\n- 上游版本: ${{ steps.version.outputs.tag }}\\n- 构建时间: ${{ steps.build_time.outputs.time }}\\n\\n## 📥 完整说明\\nhttps://github.com/${{ github.repository }}/releases/tag/${{ steps.version.outputs.tag }}"
-          
-          sed -i "s|GITEE_TOKEN_PLACEHOLDER|$GITEE_TOKEN|g" /tmp/gitee_release.json
-          sed -i "s|TAG_PLACEHOLDER|${{ steps.version.outputs.tag }}|g" /tmp/gitee_release.json
-          sed -i "s|NAME_PLACEHOLDER|luci-app-tailscale ${{ steps.version.outputs.version }}|g" /tmp/gitee_release.json
-          sed -i "s|BODY_PLACEHOLDER|$RELEASE_BODY|g" /tmp/gitee_release.json
-          
-          release_response=$(curl -s -X POST \
-            "https://gitee.com/api/v5/repos/$GITEE_REPO/releases" \
-            -H "Content-Type: application/json" \
-            -d @/tmp/gitee_release.json)
-          
-          release_id=$(echo "$release_response" | jq -r '.id // empty')
-          
-          if [ -z "$release_id" ]; then
-            echo "::error::创建 Gitee Release 失败"
-            echo "$release_response" | jq '.'
-            exit 1
-          fi
-          
-          echo "✓ 创建 Release 成功，ID: $release_id"
-          
-          echo "上传文件..."
-          for file in out/*; do
-            if [ ! -f "$file" ]; then
-              continue
-            fi
-            filename=$(basename "$file")
-            echo "  上传: $filename"
-            curl -s -X POST \
-              "https://gitee.com/api/v5/repos/$GITEE_REPO/releases/$release_id/attach_files" \
-              -F "access_token=$GITEE_TOKEN" \
-              -F "file=@$file" > /dev/null
-          done
-          
-          echo "::notice::✅ Gitee Release 发布完成: https://gitee.com/$GITEE_REPO/releases/tag/${{ steps.version.outputs.tag }}"
-          echo "::endgroup::"
+          chmod +x .github/scripts/release-sync.sh
+          .github/scripts/release-sync.sh \
+            "gitee" \
+            "whzhni/tailscale_lucky" \
+            "${{ secrets.GITEE_TOKEN }}" \
+            "${{ steps.version.outputs.tag }}" \
+            "${{ steps.version.outputs.version }}" \
+            "${{ steps.build_time.outputs.time }}" \
+            "${{ github.repository }}"
 
-      - name: "1️⃣3️⃣ 发布到 GitCode Release"
+      - name: "1️⃣3️⃣ 同步到 GitCode Release"
         if: steps.version.outputs.skip != 'true'
         continue-on-error: true
         run: |
-          set -e
-          echo "::group::📤 上传到 GitCode"
-          
-          GITCODE_REPO="whzhni/luci-app-tailscale_luci-app-lucky"
-          GITCODE_TOKEN="${{ secrets.GITCODE_TOKEN }}"
-          
-          if [ -z "$GITCODE_TOKEN" ]; then
-            echo "::warning::未配置 GITCODE_TOKEN，跳过 GitCode 发布"
-            exit 0
-          fi
-          
-          echo "检查 Release 是否已存在..."
-          releases=$(curl -s -H "PRIVATE-TOKEN: $GITCODE_TOKEN" \
-            "https://gitcode.com/api/v5/repos/$GITCODE_REPO/releases?page=1&per_page=20")
-          tag_exists=$(echo "$releases" | jq -r --arg tag "${{ steps.version.outputs.tag }}" '.[] | select(.tag_name == $tag) | .tag_name' | head -1)
-          
-          if [ "$tag_exists" = "${{ steps.version.outputs.tag }}" ]; then
-            echo "::notice::GitCode 上已存在 Release ${{ steps.version.outputs.tag }}，跳过发布"
-            exit 0
-          fi
-          
-          echo "创建新 Release..."
-          RELEASE_DESC="## 📦 包含文件\n- **APK 格式**：ImmortalWrt 主线\n- **IPK 格式**：ImmortalWrt 24.10\n\n## 📌 版本信息\n- 上游版本: ${{ steps.version.outputs.tag }}\n- 构建时间: ${{ steps.build_time.outputs.time }}\n\n## 📥 完整说明\nhttps://github.com/${{ github.repository }}/releases/tag/${{ steps.version.outputs.tag }}"
-          
-          cat > /tmp/gitcode_release.json <<EOJSON
-          {
-            "tag_name": "${{ steps.version.outputs.tag }}",
-            "name": "luci-app-tailscale ${{ steps.version.outputs.version }}",
-            "description": $(echo "$RELEASE_DESC" | jq -Rs .)
-          }
-          EOJSON
-          
-          release_response=$(curl -s -X POST \
-            "https://gitcode.com/api/v5/repos/$GITCODE_REPO/releases" \
-            -H "Content-Type: application/json" \
-            -H "PRIVATE-TOKEN: $GITCODE_TOKEN" \
-            -d @/tmp/gitcode_release.json)
-          
-          release_id=$(echo "$release_response" | jq -r '.id // empty')
-          
-          if [ -z "$release_id" ]; then
-            echo "::error::创建 GitCode Release 失败"
-            echo "$release_response" | jq '.'
-            exit 1
-          fi
-          
-          echo "✓ 创建 Release 成功，ID: $release_id"
-          
-          echo "上传文件..."
-          for file in out/*; do
-            if [ ! -f "$file" ]; then
-              continue
-            fi
-            filename=$(basename "$file")
-            echo "  上传: $filename"
-            curl -s -X POST \
-              "https://gitcode.com/api/v5/repos/$GITCODE_REPO/releases/$release_id/attach_files" \
-              -H "PRIVATE-TOKEN: $GITCODE_TOKEN" \
-              -F "file=@$file" > /dev/null
-          done
-          
-          echo "::notice::✅ GitCode Release 发布完成: https://gitcode.com/$GITCODE_REPO/releases/tag/${{ steps.version.outputs.tag }}"
-          echo "::endgroup::"
+          chmod +x .github/scripts/release-sync.sh
+          .github/scripts/release-sync.sh \
+            "gitcode" \
+            "whzhni/luci-app-tailscale_luci-app-lucky" \
+            "${{ secrets.GITCODE_TOKEN }}" \
+            "${{ steps.version.outputs.tag }}" \
+            "${{ steps.version.outputs.version }}" \
+            "${{ steps.build_time.outputs.time }}" \
+            "${{ github.repository }}"
