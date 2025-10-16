@@ -7,6 +7,7 @@ TAG_NAME="${3}"       # 版本标签
 VERSION="${4}"        # 版本号
 BUILD_TIME="${5}"     # 构建时间
 GITHUB_REPO="${6}"    # GitHub 仓库路径
+APP_NAME="${7}"       # 应用名称
 
 PLATFORM_NAME="Gitee"
 API_BASE="https://gitee.com/api/v5"
@@ -55,11 +56,6 @@ if [ "$skip_create" = false ]; then
   echo "  ✓ commit: ${latest_commit:0:8}..."
 fi
 
-# 准备 Release 内容
-RELEASE_BODY="## 📦 包含文件
-- **APK 格式**：ImmortalWrt 主线
-- **IPK 格式**：ImmortalWrt 24.10
-
 ## 📌 版本信息
 - 上游版本: $TAG_NAME
 - 构建时间: $BUILD_TIME
@@ -74,7 +70,7 @@ if [ "$skip_create" = false ]; then
   release_payload=$(jq -n \
     --arg token "$TOKEN" \
     --arg tag "$TAG_NAME" \
-    --arg name "luci-app-tailscale $VERSION" \
+    --arg name "$APP_NAME $VERSION" \
     --arg body "$RELEASE_BODY" \
     --arg ref "$latest_commit" \
     '{
