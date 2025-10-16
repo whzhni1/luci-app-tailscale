@@ -71,5 +71,5 @@ jobs:
             "$VERSION" \
             "$VERSION" \
             "$BUILD_TIME" \
-            "gdy666/luci-app-lucky"
+            "gdy666/luci-app-lucky" \
             "luci-app-lucky"
