@@ -77,8 +77,53 @@ jobs:
           mkdir -p src
           git clone https://github.com/asvow/luci-app-tailscale "$SRC_DIR"
           cd "$SRC_DIR"
+
+          # 替换路径 /etc/tailscale → /etc/config/tailscale-data
           sed -i "s|/etc/tailscale|/etc/config/tailscale-data|g" $(grep -rl "/etc/tailscale" .)
+
+          # 生成 uci-defaults 脚本，把原始配置文件内容写进去
+          mkdir -p root/etc/uci-defaults
+          {
+            echo '#!/bin/sh'
+            echo ''
+            echo '# 如果已有 tailscale 配置文件，就不再生成默认配置'
+            echo '[ -f /etc/config/tailscale ] && exit 0'
+            echo ''
+            echo '# 写入默认配置'
+            echo 'cat > /etc/config/tailscale << "EOC"'
+            cat root/etc/config/tailscale
+            echo 'EOC'
+            echo ''
+            echo '# 清理 ucitrack 旧项'
+            echo 'uci -q batch <<-EOF'
+            echo '    delete ucitrack.@tailscale[-1]'
+            echo '    commit ucitrack'
+            echo 'EOF'
+            echo ''
+            echo '# 刷新 LuCI 菜单缓存'
+            echo 'rm -f /tmp/luci-indexcache'
+            echo ''
+            echo 'exit 0'
+          } > root/etc/uci-defaults/40_luci-tailscale
+
+          chmod +x root/etc/uci-defaults/40_luci-tailscale
+
+          # 删除原始配置文件，避免安装时覆盖用户配置
+          rm -f root/etc/config/tailscale
+
+          # 修改 Makefile，增加 CONFFILES 声明，确保升级时保留用户配置
+          if ! grep -q "CONFFILES" Makefile; then
+            sed -i '/PKG_VERSION:=/a CONFFILES:=/etc/config/tailscale' Makefile
+          fi
+
+          # 调试输出：打印生成的脚本内容到日志
+          echo "===== 生成的 40_luci-tailscale 脚本内容 ====="
+          cat root/etc/uci-defaults/40_luci-tailscale
+          echo "==========================================="
+
           echo "SRC_DIR=$SRC_DIR" >> $GITHUB_ENV
+
+
       # =========================
       # ImmortalWrt 主线 SDK (apk)
       # =========================
