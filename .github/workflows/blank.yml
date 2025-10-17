@@ -249,7 +249,7 @@ jobs:
         run: |
           chmod +x .github/scripts/release-gitee.sh
           .github/scripts/release-gitee.sh \
-            "whzhni/tailscale" \
+            "whzhni/luci-app-tailscale" \
             "${{ secrets.GITEE_TOKEN }}" \
             "${{ steps.version.outputs.tag }}" \
             "${{ steps.version.outputs.version }}" \
