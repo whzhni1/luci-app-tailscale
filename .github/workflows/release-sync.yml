@@ -1,4 +1,4 @@
-name: 同步 luci-app-lucky 到 Gitee
+name: 同步 GitHub 仓库到 Gitee
 
 on:
   workflow_dispatch:   # 手动触发
@@ -8,6 +8,24 @@ on:
 jobs:
   sync:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        repo:
+          # 第一个仓库：luci-app-lucky
+          - github_owner: "gdy666"
+            github_repo: "luci-app-lucky"
+            gitee_owner: "whzhni"
+            gitee_repo: "luci-app-lucky"
+          # 第二个仓库：luci-theme-aurora
+          - github_owner: "eamonxg"
+            github_repo: "luci-theme-aurora"
+            gitee_owner: "whzhni"
+            gitee_repo: "luci-theme-aurora"
+          # 后续添加更多仓库只需在此继续添加即可
+      fail-fast: false  # 一个仓库失败不影响其他仓库
+    
+    name: 同步 ${{ matrix.repo.github_repo }}
+    
     steps:
       - name: 📥 检出代码
         uses: actions/checkout@v4
@@ -20,43 +38,67 @@ jobs:
       - name: 🔍 获取 GitHub 最新标签
         id: github_tag
         run: |
-          GH_TAG=$(curl -s https://api.github.com/repos/gdy666/luci-app-lucky/tags | jq -r '.[0].name')
-          echo "github_tag=$GH_TAG" >> $GITHUB_OUTPUT
-          echo "GitHub 最新版本: $GH_TAG"
+          GH_TAG=$(curl -s https://api.github.com/repos/${{ matrix.repo.github_owner }}/${{ matrix.repo.github_repo }}/tags | jq -r '.[0].name // empty')
+          if [ -z "$GH_TAG" ] || [ "$GH_TAG" = "null" ]; then
+            echo "::warning::未找到 GitHub 标签，跳过 ${{ matrix.repo.github_repo }}"
+            echo "github_tag=" >> $GITHUB_OUTPUT
+          else
+            echo "github_tag=$GH_TAG" >> $GITHUB_OUTPUT
+            echo "GitHub 最新版本 (${{ matrix.repo.github_repo }}): $GH_TAG"
+          fi
 
       - name: 🔍 获取 Gitee 最新标签
         id: gitee_tag
+        if: steps.github_tag.outputs.github_tag != ''
         run: |
-          GITEE_TAG=$(curl -s "https://gitee.com/api/v5/repos/whzhni/luci-app-lucky/tags?access_token=${{ secrets.GITEE_TOKEN }}" | jq -r '.[0].name')
+          GITEE_TAG=$(curl -s "https://gitee.com/api/v5/repos/${{ matrix.repo.gitee_owner }}/${{ matrix.repo.gitee_repo }}/tags?access_token=${{ secrets.GITEE_TOKEN }}" | jq -r '.[0].name // empty')
           echo "gitee_tag=$GITEE_TAG" >> $GITHUB_OUTPUT
-          echo "Gitee 最新版本: $GITEE_TAG"
+          echo "Gitee 最新版本 (${{ matrix.repo.gitee_repo }}): $GITEE_TAG"
 
       - name: 🔄 比较版本
         id: compare
+        if: steps.github_tag.outputs.github_tag != ''
         run: |
-          if [ "${{ steps.github_tag.outputs.github_tag }}" != "${{ steps.gitee_tag.outputs.gitee_tag }}" ]; then
+          GITHUB_VER="${{ steps.github_tag.outputs.github_tag }}"
+          GITEE_VER="${{ steps.gitee_tag.outputs.gitee_tag }}"
+          
+          if [ "$GITHUB_VER" != "$GITEE_VER" ]; then
             echo "new_version=true" >> $GITHUB_OUTPUT
-            echo "::notice::检测到 GitHub 有新版本: ${{ steps.github_tag.outputs.github_tag }}"
+            echo "::notice::[${{ matrix.repo.github_repo }}] 检测到新版本: $GITHUB_VER (Gitee: $GITEE_VER)"
           else
             echo "new_version=false" >> $GITHUB_OUTPUT
-            echo "::notice::GitHub 与 Gitee 版本一致，无需同步，今天跳过下载和上传"
+            echo "::notice::[${{ matrix.repo.github_repo }}] 版本一致 ($GITHUB_VER)，无需同步"
           fi
 
       - name: ⬇️ 下载 GitHub Release 资源
         if: steps.compare.outputs.new_version == 'true'
         run: |
           TAG=${{ steps.github_tag.outputs.github_tag }}
+          GITHUB_REPO="${{ matrix.repo.github_owner }}/${{ matrix.repo.github_repo }}"
+          
           mkdir -p out
-          echo "获取 GitHub Release 信息..."
-          release_info=$(curl -s https://api.github.com/repos/gdy666/luci-app-lucky/releases/tags/$TAG)
-          echo "下载 Release 附件..."
-          echo "$release_info" | jq -r '.assets[].browser_download_url' | while read url; do
-            echo "下载: $url"
-            curl -L -o "out/$(basename $url)" "$url"
-          done
-          echo "下载源码包..."
-          curl -L -o "out/source-$TAG.zip" "https://github.com/gdy666/luci-app-lucky/archive/refs/tags/$TAG.zip"
-          curl -L -o "out/source-$TAG.tar.gz" "https://github.com/gdy666/luci-app-lucky/archive/refs/tags/$TAG.tar.gz"
+          echo "📦 获取 $GITHUB_REPO Release 信息 (Tag: $TAG)..."
+          
+          release_info=$(curl -s https://api.github.com/repos/$GITHUB_REPO/releases/tags/$TAG)
+          
+          # 下载 Release 附件
+          assets_count=$(echo "$release_info" | jq '.assets | length')
+          if [ "$assets_count" -gt 0 ]; then
+            echo "📥 下载 $assets_count 个 Release 附件..."
+            echo "$release_info" | jq -r '.assets[].browser_download_url' | while read url; do
+              echo "  ↓ $(basename $url)"
+              curl -L -o "out/$(basename $url)" "$url"
+            done
+          else
+            echo "⚠️  未找到 Release 附件"
+          fi
+          
+          # 下载源码包
+          echo "📥 下载源码包..."
+          curl -L -o "out/source-$TAG.zip" "https://github.com/$GITHUB_REPO/archive/refs/tags/$TAG.zip"
+          curl -L -o "out/source-$TAG.tar.gz" "https://github.com/$GITHUB_REPO/archive/refs/tags/$TAG.tar.gz"
+          
+          echo "✅ 下载完成:"
           ls -lh out
 
       - name: 📤 发布到 Gitee
@@ -65,11 +107,12 @@ jobs:
           chmod +x .github/scripts/release-gitee.sh
           BUILD_TIME=$(date +"%Y-%m-%d %H:%M:%S")
           VERSION=${{ steps.github_tag.outputs.github_tag }}
+          
           .github/scripts/release-gitee.sh \
-            "whzhni/luci-app-lucky" \
+            "${{ matrix.repo.gitee_owner }}/${{ matrix.repo.gitee_repo }}" \
             "${{ secrets.GITEE_TOKEN }}" \
             "$VERSION" \
             "$VERSION" \
             "$BUILD_TIME" \
-            "gdy666/luci-app-lucky" \
-            "luci-app-lucky"
+            "${{ matrix.repo.github_owner }}/${{ matrix.repo.github_repo }}" \
+            "${{ matrix.repo.github_repo }}"
