@@ -3,8 +3,13 @@ name: 同步代码到 Gitee 和 GitCode
 on:
   push:
     branches:
-      - main   # 这里指定要同步的分支
-  workflow_dispatch:  # 允许手动触发
+      - main
+  workflow_dispatch:
+
+env:
+  BRANCH: main
+  USERNAME: whzhni
+  REPO: luci-app-tailscale
 
 jobs:
   sync:
@@ -23,11 +28,11 @@ jobs:
 
       - name: 添加 Gitee 远程仓库
         run: |
-          git remote add gitee https://oauth2:${{ secrets.GITEE_TOKEN }}@gitee.com/whzhni/luci-app-tailscale.git
+          git remote add gitee https://oauth2:${{ secrets.GITEE_TOKEN }}@gitee.com/${{ env.USERNAME }}/${{ env.REPO }}.git
 
       - name: 推送代码到 Gitee
         run: |
-          if git push gitee main --force; then
+          if git push gitee ${{ env.BRANCH }} --force; then
             echo "✅ 推送到 Gitee 成功"
           else
             echo "❌ 推送到 Gitee 失败"
@@ -36,11 +41,11 @@ jobs:
 
       - name: 添加 GitCode 远程仓库
         run: |
-          git remote add gitcode https://oauth2:${{ secrets.GITCODE_TOKEN }}@gitcode.com/whzhni/luci-app-tailscale.git
+          git remote add gitcode https://oauth2:${{ secrets.GITCODE_TOKEN }}@gitcode.com/${{ env.USERNAME }}/${{ env.REPO }}.git
 
       - name: 推送代码到 GitCode
         run: |
-          if git push gitcode main --force; then
+          if git push gitcode ${{ env.BRANCH }} --force; then
             echo "✅ 推送到 GitCode 成功"
           else
             echo "❌ 推送到 GitCode 失败"
