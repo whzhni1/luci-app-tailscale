@@ -1,65 +1,30 @@
-name: Sync to Gitee
+name: 同步代码到 Gitee
 
 on:
   push:
-    branches: [ main, master ]
-
-env:
-  # 使用英文变量名
-  REPO_NAME: "luci-app-tailscale"
-  GITHUB_USER: "whzhni1"
-  GITEE_USER: "whzhni"
+    branches:
+      - main   # 这里指定你要同步的分支，比如 main 或 master
+  workflow_dispatch:  # 允许手动触发
 
 jobs:
   sync:
     runs-on: ubuntu-latest
+
     steps:
-      - name: 检出代码
-        uses: actions/checkout@v4
+      - name: 检出 GitHub 仓库代码
+        uses: actions/checkout@v3
         with:
-          fetch-depth: 0
+          fetch-depth: 0   # 保留完整提交历史，避免推送时出错
 
-      - name: 显示同步信息
+      - name: 设置 Git 用户信息
         run: |
-          echo "🚀 开始同步仓库到 Gitee"
-          echo "📦 源仓库: github/${{ env.GITHUB_USER }}/${{ env.REPO_NAME }}"
-          echo "🎯 目标仓库: gitee/${{ env.GITEE_USER }}/${{ env.REPO_NAME }}"
-          echo "🕐 触发时间: $(date)"
-          echo "📝 提交ID: ${{ github.sha }}"
-          echo "🔗 触发分支: ${{ github.ref }}"
-          echo "👤 触发用户: ${{ github.actor }}"
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: 执行同步到Gitee
-        uses: Yikun/hub-mirror-action@master
-        with:
-          src: github/${{ env.GITHUB_USER }}
-          dst: gitee/${{ env.GITEE_USER }}
-          static_list: ${{ env.REPO_NAME }}
-          force_update: true
-          debug: true
-        env:
-          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
-
-      - name: 同步成功通知
-        if: success()
+      - name: 添加 Gitee 远程仓库
         run: |
-          echo "✅ 同步成功！Gitee 仓库已更新"
-          echo "📊 查看最新代码: https://gitee.com/${{ env.GITEE_USER }}/${{ env.REPO_NAME }}"
-          echo "🔄 下次推送代码到 GitHub 时会自动同步"
-          echo "⏰ 完成时间: $(date)"
+          git remote add gitee https://oauth2:${{ secrets.GITEE_TOKEN }}@gitee.com/你的用户名/luci-app-tailscale.git
 
-      - name: 同步失败通知
-        if: failure()
+      - name: 推送代码到 Gitee
         run: |
-          echo "❌ 同步失败: ${{ env.REPO_NAME }}"
-          echo "🔍 可能的原因："
-          echo "   - Gitee Token 无效或过期"
-          echo "   - 仓库权限不足"
-          echo "   - 网络连接问题"
-          echo "   - 仓库不存在或名称错误"
-          echo "💡 解决方案："
-          echo "   1. 检查 GITEE_TOKEN secret 配置"
-          echo "   2. 确认 Gitee 令牌有仓库读写权限"
-          echo "   3. 检查仓库名称是否正确"
-          echo "   4. 查看详细错误日志"
-          echo "🆘 需要帮助请检查 GitHub Actions 日志"
+          git push gitee main --force
