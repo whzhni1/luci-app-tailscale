@@ -4,6 +4,7 @@ LOG_FILE="/tmp/auto-update-$(date +%Y%m%d-%H%M%S).log"
 GITEE_OWNERS="whzhni sirpdboy kiddin9"
 DEVICE_MODEL="$(cat /tmp/sysinfo/model 2>/dev/null || echo '未知设备')"
 PUSH_TITLE="$DEVICE_MODEL 插件更新通知"
+CONFIG_BACKUP_DIR="/tmp/config_Backup"
 
 # 排除列表：不应该自动更新的包
 EXCLUDE_PACKAGES="kernel kmod- base-files busybox lib opkg uclient-fetch ca-bundle ca-certificates luci-app-lucky"
@@ -257,32 +258,58 @@ install_language_package() {
     return 0
 }
 
-# 包名到 Gitee 仓库名的映射
-get_gitee_repo_name() {
-    local pkg="$1"
+# 备份配置文件
+backup_config() {
+    log "  备份配置文件到 $CONFIG_BACKUP_DIR ..."
     
-    # 特殊映射（包名 -> 仓库名）
-    case "$pkg" in
-        lucky)
-            echo "luci-app-lucky"
-            return 0
-            ;;
-        *)
-            # 默认使用包名作为仓库名
-            echo "$pkg"
-            return 0
-            ;;
-    esac
+    # 清理旧备份
+    rm -rf "$CONFIG_BACKUP_DIR" 2>/dev/null
+    
+    # 创建备份目录
+    mkdir -p "$CONFIG_BACKUP_DIR"
+    
+    # 复制整个 /etc/config 目录
+    if cp -r /etc/config/* "$CONFIG_BACKUP_DIR/" 2>/dev/null; then
+        log "  ✓ 配置文件备份成功"
+        return 0
+    else
+        log "  ⚠ 配置文件备份失败"
+        return 1
+    fi
+}
+
+# 恢复配置文件
+restore_config() {
+    if [ ! -d "$CONFIG_BACKUP_DIR" ]; then
+        log "  ⚠ 备份目录不存在，跳过恢复"
+        return 1
+    fi
+    
+    log "  恢复配置文件..."
+    
+    if cp -r "$CONFIG_BACKUP_DIR"/* /etc/config/ 2>/dev/null; then
+        log "  ✓ 配置文件恢复成功"
+        rm -rf "$CONFIG_BACKUP_DIR" 2>/dev/null
+        return 0
+    else
+        log "  ✗ 配置文件恢复失败"
+        return 1
+    fi
+}
+
+# 清理备份
+cleanup_backup() {
+    if [ -d "$CONFIG_BACKUP_DIR" ]; then
+        log "  清理配置备份..."
+        rm -rf "$CONFIG_BACKUP_DIR" 2>/dev/null
+    fi
 }
 
 find_gitee_repo() {
     local pkg="$1"
     
-    # 获取对应的仓库名
-    local repo_name=$(get_gitee_repo_name "$pkg")
-    
     for owner in $GITEE_OWNERS; do
-        local repo="${owner}/${repo_name}"
+        local repo="${owner}/${pkg}"
         local api_url="https://gitee.com/api/v5/repos/${repo}/releases/latest"
         local http_code=$(curl -s -o /dev/null -w "%{http_code}" "$api_url")
         
@@ -376,12 +403,16 @@ update_from_gitee() {
     
     log "  从 Gitee 更新 $main_pkg (仓库: $repo)"
     
+    # 备份配置文件
+    backup_config
+    
     local sys_arch=$(get_system_arch)
     local api_url="https://gitee.com/api/v5/repos/${repo}/releases/latest"
     local release_json=$(curl -s "$api_url")
     
     if [ -z "$release_json" ]; then
         log "  ✗ API 请求失败"
+        cleanup_backup
         return 1
     fi
     
@@ -389,6 +420,7 @@ update_from_gitee() {
     
     if [ -z "$latest_version" ]; then
         log "  ✗ 未能获取最新版本"
+        cleanup_backup
         return 1
     fi
     
@@ -398,6 +430,7 @@ update_from_gitee() {
     
     if [ -z "$all_files" ]; then
         log "  ✗ 未找到任何 ipk 文件"
+        cleanup_backup
         return 1
     fi
     
@@ -441,6 +474,7 @@ EOF
     
     if [ -z "$install_order" ]; then
         log "  ✗ 未找到匹配的包"
+        cleanup_backup
         return 1
     fi
     
@@ -448,6 +482,8 @@ EOF
     
     # 下载并安装
     local success_count=0
+    local install_failed=0
+    
     for filename in $install_order; do
         filename=$(echo "$filename" | xargs)
         [ -z "$filename" ] && continue
@@ -463,21 +499,45 @@ EOF
         if ! curl -fsSL -o "/tmp/$filename" "$download_url"; then
             log "  ✗ 下载失败"
             rm -f /tmp/*${app_name}*.ipk 2>/dev/null
+            restore_config
             return 1
         fi
         
         log "  安装 $filename..."
         if ! opkg install --force-reinstall "/tmp/$filename" >>"$LOG_FILE" 2>&1; then
-            log "  ✗ 安装失败"
-            rm -f /tmp/*${app_name}*.ipk 2>/dev/null
-            return 1
+            log "  ✗ 首次安装失败，尝试卸载后重新安装..."
+            install_failed=1
+            
+            # 提取包名（去除版本号和架构）
+            local pkg_name=$(echo "$filename" | sed 's/_.*\.ipk$//')
+            
+            # 卸载包
+            log "  卸载 $pkg_name..."
+            opkg remove "$pkg_name" >>"$LOG_FILE" 2>&1
+            
+            # 再次尝试安装
+            log "  重新安装 $filename..."
+            if opkg install "/tmp/$filename" >>"$LOG_FILE" 2>&1; then
+                log "  ✓ $filename 重新安装成功"
+                success_count=$((success_count + 1))
+                install_failed=0
+            else
+                log "  ✗ $filename 重新安装失败"
+                rm -f /tmp/*${app_name}*.ipk 2>/dev/null
+                restore_config
+                return 1
+            fi
+        else
+            log "  ✓ $filename 安装成功"
+            success_count=$((success_count + 1))
         fi
-        
-        log "  ✓ $filename 安装成功"
-        success_count=$((success_count + 1))
     done
     
     rm -f /tmp/*${app_name}*.ipk 2>/dev/null
+    
+    # 更新成功，恢复配置
+    restore_config
+    
     log "  ✓ $main_pkg 更新完成 (版本: $latest_version, 共安装 $success_count 个包)"
     
     return 0
@@ -580,11 +640,11 @@ update_gitee_packages() {
     GITEE_NOTFOUND_LIST=""
     GITEE_FAILED_LIST=""
     
-    # 获取不在官方源的包，包括 luci-app、luci-theme 和其他需要检查的包（如 lucky）
+    # 获取不在官方源的包，包括 luci-app、luci-theme 和其他需要检查的包
     local check_list=""
     for pkg in $NON_OFFICIAL_PACKAGES; do
         case "$pkg" in
-            luci-app-*|luci-theme-*|lucky)
+            luci-app-*|luci-theme-*)
                 check_list="$check_list $pkg"
                 ;;
         esac
@@ -743,4 +803,6 @@ run_update() {
     
     return 0
 }
+
+# 直接执行更新
 run_update
