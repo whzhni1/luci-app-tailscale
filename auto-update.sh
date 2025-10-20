@@ -644,7 +644,7 @@ update_gitee_packages() {
     local check_list=""
     for pkg in $NON_OFFICIAL_PACKAGES; do
         case "$pkg" in
-            luci-app-*|luci-theme-*)
+            luci-app-*|luci-theme-*|lucky)
                 check_list="$check_list $pkg"
                 ;;
         esac
