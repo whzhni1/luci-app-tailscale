@@ -2,9 +2,15 @@ name: Sync to Gitee
 
 on:
   push:
-    branches: [ main, master ]  # 根据你的默认分支名称调整
+    branches: [ main, master ]
   pull_request:
     branches: [ main, master ]
+
+env:
+  # 定义变量 - 在这里修改仓库信息即可
+  REPO_NAME: "luci-app-tailscale"
+  GITHUB_USER: "whzhni1"
+  GITEE_USER: "whzhni"
 
 jobs:
   sync:
@@ -15,13 +21,43 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Display Sync Info
+        run: |
+          echo "🚀 开始同步仓库到 Gitee"
+          echo "📦 源仓库: github/${{ env.GITHUB_USER }}/${{ env.REPO_NAME }}"
+          echo "🎯 目标仓库: gitee/${{ env.GITEE_USER }}/${{ env.REPO_NAME }}"
+          echo "🕐 触发时间: $(date)"
+          echo "📝 Commit ID: ${{ github.sha }}"
+          echo "🔗 触发分支: ${{ github.ref }}"
+          echo "👤 触发用户: ${{ github.actor }}"
+
       - name: Sync to Gitee
         uses: Yikun/hub-mirror-action@master
         with:
-          src: github/whzhni1
-          dst: gitee/whzhni
-          static_list: "luci-app-tailscale"
+          src: github/${{ env.GITHUB_USER }}
+          dst: gitee/${{ env.GITEE_USER }}
+          static_list: ${{ env.REPO_NAME }}
           force_update: true
           debug: true
         env:
-          GITEE_PRIVATE_KEY: ${{ secrets.GITEE_PRIVATE_KEY }}
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+
+      - name: Sync Success Notification
+        if: success()
+        run: |
+          echo "✅ 同步成功！Gitee 仓库已更新"
+          echo "📊 查看最新代码: https://gitee.com/${{ env.GITEE_USER }}/${{ env.REPO_NAME }}"
+          echo "🔄 下次推送代码到 GitHub 时会自动同步"
+
+      - name: Sync Failure Notification
+        if: failure()
+        run: |
+          echo "❌ 同步失败: ${{ env.REPO_NAME }}"
+          echo "🔍 可能的原因："
+          echo "   - Gitee Token 无效或过期"
+          echo "   - 仓库权限不足"
+          echo "   - 网络连接问题"
+          echo "💡 解决方案："
+          echo "   1. 检查 GITEE_TOKEN secret 配置"
+          echo "   2. 确认 Gitee 令牌有仓库读写权限"
+          echo "   3. 查看详细错误日志"
