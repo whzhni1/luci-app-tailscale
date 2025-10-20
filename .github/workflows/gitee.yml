@@ -23,7 +23,7 @@ jobs:
 
       - name: 添加 Gitee 远程仓库
         run: |
-          git remote add gitee https://oauth2:${{ secrets.GITEE_TOKEN }}@gitee.com/你的用户名/luci-app-tailscale.git
+          git remote add gitee https://oauth2:${{ secrets.GITEE_TOKEN }}@gitee.com/whzhni/luci-app-tailscale.git
 
       - name: 推送代码到 Gitee
         run: |
