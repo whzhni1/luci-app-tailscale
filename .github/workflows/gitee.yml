@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - main
+    paths-ignore:        # 忽略 .github 目录的改动，不触发工作流
+      - '.github/**'
   workflow_dispatch:
 
 env:
@@ -25,6 +27,11 @@ jobs:
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: 移除 .github 文件夹
+        run: |
+          rm -rf .github
+          git rm -r --cached .github || true
 
       - name: 添加 Gitee 远程仓库
         run: |
