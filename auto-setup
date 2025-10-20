@@ -3,21 +3,25 @@
 START=99
 STOP=01
 
+# ==================== 全局变量配置区 ====================
 LOG_FILE="/tmp/auto-setup-$(date +%Y%m%d-%H%M%S).log"
-PING_RETRY=5
-PING_WAIT=60
-# 设置变量 (1=启用自动更新脚本, 0=禁用)
-AUTO_UPDATE_ENABLE=1
+AUTO_UPDATE_ENABLE=1  # 1=启用自动更新脚本, 0=禁用
+SYS_ARCH=""  # 系统架构（启动时自动获取）
+USER_AGENT="Mozilla/5.0 (compatible; OpenWrt-AutoSetup/1.0)"
 
 # 软件包列表
 PACKAGES_TO_INSTALL="luci-app-wechatpush luci-app-passwall luci-app-openlist luci-app-filemanager luci-i18n-package-manager-zh-cn luci-i18n-firewall-zh-cn vsftpd openssh-sftp-server luci-app-ttyd luci-app-lucky luci-app-tailscale luci-theme-aurora"
 
-# 测试网络的 IP 列表
-TEST_IPS="223.5.5.5 114.114.114.114 8.8.8.8 1.1.1.1"
-
-# ==================== Gitee 配置区 ====================
 # Gitee 仓库所有者列表（按优先级顺序尝试）
 GITEE_OWNERS="whzhni sirpdboy kiddin9"
+
+# 自动更新脚本下载地址
+AUTO_UPDATE_SCRIPT_URL1="https://gitee.com/whzhni/luci-app-tailscale/raw/main/auto-update.sh"
+AUTO_UPDATE_SCRIPT_URL2="https://raw.gitcode.com/whzhni/luci-app-tailscale/raw/main/auto-update.sh"
+AUTO_UPDATE_SCRIPT_PATH="/usr/bin/auto-update.sh"
+
+# Gitee API URL 模板
+GITEE_API_TEMPLATE="https://gitee.com/api/v5/repos/%s/releases/latest"
 # ========================================================
 
 # 日志函数
@@ -27,76 +31,78 @@ log() {
     logger -t "auto-setup" "$1"
 }
 
-# 删除自己
+# 初始化系统架构
+init_system_arch() {
+    if [ -z "$SYS_ARCH" ]; then
+        local arch=$(uname -m)
+        case "$arch" in
+            aarch64)   SYS_ARCH="arm64" ;;
+            armv7l)    SYS_ARCH="armv7" ;;
+            armv6l)    SYS_ARCH="armv6" ;;
+            armv5tel)  SYS_ARCH="armv5" ;;
+            x86_64)    SYS_ARCH="x86_64" ;;
+            i686|i386) SYS_ARCH="i386" ;;
+            mips)      SYS_ARCH="mips" ;;
+            mipsel)    SYS_ARCH="mipsle" ;;
+            riscv64)   SYS_ARCH="riscv64" ;;
+            *)         SYS_ARCH="unknown" ;;
+        esac
+        log "系统架构: $SYS_ARCH"
+    fi
+}
+
+# 删除自己并设置自动更新
 remove_self() {
     log "准备清理自动配置脚本..."
- 
+    
     if [ "$AUTO_UPDATE_ENABLE" = "1" ]; then
         log "启用自动更新功能..."
-        
-        # 创建自动更新脚本目录
         mkdir -p /usr/bin/
         
-        # 下载自动更新脚本（sh版本）
-        curl -s -o /usr/bin/auto-update.sh "https://gitee.com/whzhni/luci-app-lucky/raw/master/auto-update.sh"
+        # 尝试下载
+        local downloaded=0
+        for url in "$AUTO_UPDATE_SCRIPT_URL1" "$AUTO_UPDATE_SCRIPT_URL2"; do
+            log "尝试下载: $url"
+            if curl -s -o "$AUTO_UPDATE_SCRIPT_PATH" -H "User-Agent: $USER_AGENT" "$url" && \
+               [ -f "$AUTO_UPDATE_SCRIPT_PATH" ] && [ -s "$AUTO_UPDATE_SCRIPT_PATH" ]; then
+                log "✓ 下载成功"
+                downloaded=1
+                break
+            else
+                log "✗ 下载失败"
+                rm -f "$AUTO_UPDATE_SCRIPT_PATH"
+            fi
+        done
         
-        if [ -f "/usr/bin/auto-update.sh" ]; then
-            # 设置执行权限
-            chmod +x /usr/bin/auto-update.sh
+        # 处理下载结果
+        if [ "$downloaded" = "1" ]; then
+            chmod +x "$AUTO_UPDATE_SCRIPT_PATH"
             
-            # 删除可能存在的旧定时任务
-            cru d auto-update 2>/dev/null
-            
-            # 设置每天凌晨3点运行（使用 sh 执行）
-            cru a auto-update "0 3 * * * /usr/bin/auto-update.sh"
-            
-            # 立即运行一次自动更新
-            log "立即执行一次自动更新..."
-            /usr/bin/auto-update.sh
+            # 添加定时任务
+            (crontab -l 2>/dev/null | grep -v "$AUTO_UPDATE_SCRIPT_PATH"; \
+             echo "0 3 * * * $AUTO_UPDATE_SCRIPT_PATH") | crontab -
             
             log "✓ 自动更新脚本已安装并设置为每天凌晨3点运行"
             log "✓ 定时任务已添加，可使用 'crontab -l' 查看"
+            
+            log "立即执行一次自动更新..."
+            "$AUTO_UPDATE_SCRIPT_PATH" &
         else
-            log "✗ 自动更新脚本下载失败"
+            log "✗ 自动更新脚本下载失败，所有地址均不可用"
         fi
     else
         log "自动更新功能已禁用"
         
-        # 即使禁用也清理旧的定时任务
-        cru d auto-update 2>/dev/null
+        # 清理定时任务
+        crontab -l 2>/dev/null | grep -v "$AUTO_UPDATE_SCRIPT_PATH" | crontab -
+        
         log "✓ 已清理自动更新定时任务"
     fi
     
-    # 删除当前的自动配置脚本
+    # 删除当前脚本
     rm -f /etc/rc.d/S99auto-setup /etc/rc.d/K01auto-setup 2>/dev/null
     (sleep 5 && rm -f /etc/init.d/auto-setup) &
-    
     log "✓ 自动配置脚本已删除"
-}
-# 检查网络
-check_network_with_retry() {
-    log "步骤2: 检查网络连接（最多重试 ${PING_RETRY} 次）"
-    
-    local retry=0
-    while [ $retry -lt $PING_RETRY ]; do
-        retry=$((retry + 1))
-        log "网络检测 (第 $retry/$PING_RETRY 次)..."
-        
-        for ip in $TEST_IPS; do
-            if ping -c 1 -W 2 "$ip" >/dev/null 2>&1; then
-                log "✓ 网络正常 (通过 $ip)"
-                return 0
-            fi
-        done
-        
-        if [ $retry -lt $PING_RETRY ]; then
-            log "网络不通，等待 ${PING_WAIT} 秒后重试..."
-            sleep $PING_WAIT
-        fi
-    done
-    
-    log "✗ 网络检测失败"
-    return 1
 }
 
 is_package_installed() {
@@ -161,7 +167,7 @@ install_single_package() {
 }
 
 install_packages() {
-    log "步骤3: 安装软件包（优先官方源）"
+    log "步骤1: 安装软件包（优先官方源）"
     
     if [ -z "$PACKAGES_TO_INSTALL" ]; then
         log "软件包列表为空"
@@ -197,30 +203,12 @@ install_packages() {
     return 0
 }
 
-# 获取系统架构
-get_system_arch() {
-    local arch=$(uname -m)
-    case "$arch" in
-        aarch64)   echo "arm64" ;;
-        armv7l)    echo "armv7" ;;
-        armv6l)    echo "armv6" ;;
-        armv5tel)  echo "armv5" ;;
-        x86_64)    echo "x86_64" ;;
-        i686|i386) echo "i386" ;;
-        mips)      echo "mips" ;;
-        mipsel)    echo "mipsle" ;;
-        riscv64)   echo "riscv64" ;;
-        *)         echo "unknown" ;;
-    esac
-}
-
 # 检查文件是否匹配当前架构
 is_arch_match() {
     local filename="$1"
-    local sys_arch="$2"
     
     case "$filename" in
-        *_${sys_arch}.ipk|*_${sys_arch}_*.ipk)
+        *_${SYS_ARCH}.ipk|*_${SYS_ARCH}_*.ipk|*_all.ipk)
             return 0
             ;;
         *)
@@ -266,22 +254,21 @@ is_better_binary() {
 find_gitee_repo() {
     local pkg="$1"
     
-    # 尝试所有配置的 owner
     for owner in $GITEE_OWNERS; do
         local repo="${owner}/${pkg}"
-        local api_url="https://gitee.com/api/v5/repos/${repo}/releases/latest"
+        local api_url=$(printf "$GITEE_API_TEMPLATE" "$repo")
         
         # 检查仓库是否存在
-        local http_code=$(curl -s -o /dev/null -w "%{http_code}" "$api_url")
+        local http_code=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "User-Agent: $USER_AGENT" \
+            "$api_url")
         
         if [ "$http_code" = "200" ]; then
-            # 找到了，直接输出仓库地址
             echo "$repo"
             return 0
         fi
     done
     
-    # 没找到
     return 1
 }
 
@@ -302,13 +289,9 @@ install_from_gitee() {
     log "======================================"
     log "仓库地址: $repo"
     
-    # 获取系统架构
-    local sys_arch=$(get_system_arch)
-    log "系统架构: $sys_arch"
-    
     # 获取最新版本
-    local api_url="https://gitee.com/api/v5/repos/${repo}/releases/latest"
-    local release_json=$(curl -s "$api_url")
+    local api_url=$(printf "$GITEE_API_TEMPLATE" "$repo")
+    local release_json=$(curl -s -H "User-Agent: $USER_AGENT" "$api_url")
     
     # 检查 API 响应
     if [ -z "$release_json" ]; then
@@ -373,7 +356,7 @@ install_from_gitee() {
             luci-*|*-luci-*)
                 ;;
             *${app_name}*.ipk)
-                if is_arch_match "$filename" "$sys_arch"; then
+                if is_arch_match "$filename"; then
                     if is_better_binary "$main_binary" "$filename"; then
                         main_binary="$filename"
                     fi
@@ -416,7 +399,7 @@ install_from_gitee() {
         
         # 下载
         log "下载: $filename"
-        if ! curl -fsSL -o "/tmp/$filename" "$download_url"; then
+        if ! curl -fsSL -o "/tmp/$filename" -H "User-Agent: $USER_AGENT" "$download_url"; then
             log "✗ 下载失败"
             rm -f /tmp/*${app_name}*.ipk 2>/dev/null
             return 1
@@ -449,7 +432,7 @@ install_gitee_fallback() {
     fi
     
     log "======================================"
-    log "步骤4: Gitee 备用安装"
+    log "步骤2: Gitee 备用安装"
     log "======================================"
     
     local gitee_installed=0 gitee_failed=0 processed=""
@@ -512,14 +495,15 @@ install_gitee_fallback() {
     done
     
     log "Gitee 备用安装完成: 成功 $gitee_installed 个，失败 $gitee_failed 个"
+    
     if [ "$gitee_failed" -eq 0 ]; then
-      log "Gitee 备用安装全部成功，准备删除自动配置脚本"
-      remove_self
-      return 0
-   else
-     log "Gitee 备用安装有 $gitee_failed 个失败，保留自动配置脚本重启设备自动重试"
-     return 1
-   fi
+        log "✓ Gitee 备用安装全部成功，准备删除自动配置脚本"
+        remove_self
+        return 0
+    else
+        log "⚠ Gitee 备用安装有 $gitee_failed 个失败，保留自动配置脚本待重启后重试"
+        return 1
+    fi
 }
 
 # 主逻辑
@@ -528,21 +512,26 @@ run_setup() {
     log "开始自动配置 (PID: $$)"
     log "日志文件: $LOG_FILE"
     log "======================================"
-
-    check_network_with_retry || { log "✗ 网络不可用"; return 1; }
+    
+    # 初始化系统架构
+    init_system_arch
+    
+    # 安装软件包
     install_packages
+    
+    # Gitee 备用安装
     install_gitee_fallback
-
+    
     log "======================================"
     log "✓ 所有配置成功完成"
     log "======================================"
-
+    
     cp "$LOG_FILE" "/tmp/auto-setup-success.log" 2>/dev/null
     log "日志已保存到: /tmp/auto-setup-success.log"
 }
 
 boot() {
-    ( run_setup ) &
+    (run_setup) &
 }
 
 start() {
