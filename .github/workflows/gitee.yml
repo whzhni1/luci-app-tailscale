@@ -1,0 +1,27 @@
+name: Sync to Gitee
+
+on:
+  push:
+    branches: [ main, master ]  # 根据你的默认分支名称调整
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Sync to Gitee
+        uses: Yikun/hub-mirror-action@master
+        with:
+          src: github/whzhni1
+          dst: gitee/whzhni
+          static_list: "luci-app-tailscale"
+          force_update: true
+          debug: true
+        env:
+          GITEE_PRIVATE_KEY: ${{ secrets.GITEE_PRIVATE_KEY }}
