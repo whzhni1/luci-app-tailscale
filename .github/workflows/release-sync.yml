@@ -15,7 +15,7 @@ jobs:
           - github_owner: "gdy666"
             github_repo: "luci-app-lucky"
             gitee_owner: "whzhni"
-            gitee_repo: "luci-app-lucky"
+            gitee_repo: "lucky"
           # 第二个仓库：luci-theme-aurora
           - github_owner: "eamonxg"
             github_repo: "luci-theme-aurora"
