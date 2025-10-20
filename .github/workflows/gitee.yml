@@ -1,63 +1,43 @@
-name: Sync to Gitee
+name: 同步到 Gitee
 
 on:
   push:
     branches: [ main, master ]
-  pull_request:
-    branches: [ main, master ]
 
 env:
-  # 定义变量 - 在这里修改仓库信息即可
-  REPO_NAME: "luci-app-tailscale"
-  GITHUB_USER: "whzhni1"
-  GITEE_USER: "whzhni"
+  仓库名称: "luci-app-tailscale"
+  GitHub用户名: "whzhni1"
+  Gitee用户名: "whzhni"
 
 jobs:
-  sync:
+  同步任务:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Code
+      - name: 检出代码
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Display Sync Info
+      - name: 显示同步信息
         run: |
           echo "🚀 开始同步仓库到 Gitee"
-          echo "📦 源仓库: github/${{ env.GITHUB_USER }}/${{ env.REPO_NAME }}"
-          echo "🎯 目标仓库: gitee/${{ env.GITEE_USER }}/${{ env.REPO_NAME }}"
-          echo "🕐 触发时间: $(date)"
-          echo "📝 Commit ID: ${{ github.sha }}"
-          echo "🔗 触发分支: ${{ github.ref }}"
-          echo "👤 触发用户: ${{ github.actor }}"
+          echo "📦 源仓库: github/${{ env.GitHub用户名 }}/${{ env.仓库名称 }}"
+          echo "🎯 目标仓库: gitee/${{ env.Gitee用户名 }}/${{ env.仓库名称 }}"
 
-      - name: Sync to Gitee
+      - name: 执行同步到Gitee
         uses: Yikun/hub-mirror-action@master
         with:
-          src: github/${{ env.GITHUB_USER }}
-          dst: gitee/${{ env.GITEE_USER }}
-          static_list: ${{ env.REPO_NAME }}
+          src: github/${{ env.GitHub用户名 }}
+          dst: gitee/${{ env.Gitee用户名 }}
+          static_list: ${{ env.仓库名称 }}
           force_update: true
           debug: true
         env:
+          # 关键修改：使用 GITEE_TOKEN 而不是 SSH 密钥
           GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
 
-      - name: Sync Success Notification
+      - name: 同步成功通知
         if: success()
         run: |
           echo "✅ 同步成功！Gitee 仓库已更新"
-          echo "📊 查看最新代码: https://gitee.com/${{ env.GITEE_USER }}/${{ env.REPO_NAME }}"
-          echo "🔄 下次推送代码到 GitHub 时会自动同步"
-
-      - name: Sync Failure Notification
-        if: failure()
-        run: |
-          echo "❌ 同步失败: ${{ env.REPO_NAME }}"
-          echo "🔍 可能的原因："
-          echo "   - Gitee Token 无效或过期"
-          echo "   - 仓库权限不足"
-          echo "   - 网络连接问题"
-          echo "💡 解决方案："
-          echo "   1. 检查 GITEE_TOKEN secret 配置"
-          echo "   2. 确认 Gitee 令牌有仓库读写权限"
-          echo "   3. 查看详细错误日志"
+          echo "📊 查看最新代码: https://gitee.com/${{ env.Gitee用户名 }}/${{ env.仓库名称 }}"
