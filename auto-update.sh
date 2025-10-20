@@ -743,6 +743,4 @@ run_update() {
     
     return 0
 }
-
-# 直接执行更新
 run_update
