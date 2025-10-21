@@ -1,7 +1,7 @@
 #!/bin/sh
-export LC_ALL="C.UTF-8"
+
 # ==================== 脚本版本 ====================
-SCRIPT_VERSION="1.0.1"
+SCRIPT_VERSION="1.0.0"
 
 # ==================== 全局变量 ====================
 LOG_FILE="/tmp/auto-update-$(date +%Y%m%d-%H%M%S).log"
@@ -45,8 +45,9 @@ check_script_update() {
     log "======================================"
     log "当前脚本版本: $SCRIPT_VERSION"
     
-    local remote_script=""
+    local temp_script="/tmp/auto-update-new.sh"
     local source_url=""
+    local remote_version=""
     
     # 循环尝试所有镜像地址
     for base_url in $SCRIPT_URLS; do
@@ -57,27 +58,31 @@ check_script_update() {
         
         log "尝试从 $domain 获取脚本..."
         
-        remote_script=$(get_remote_script "$full_url")
-        
-        if [ -n "$remote_script" ]; then
-            source_url="$full_url"
-            log "✓ 从 $domain 获取成功"
-            break
-        else
-            log "✗ $domain 访问失败"
+        # 直接下载到临时文件
+        if curl -fsSL --connect-timeout 10 --max-time 30 "$full_url" -o "$temp_script" 2>/dev/null; then
+            # 验证下载的文件
+            if [ -f "$temp_script" ] && [ -s "$temp_script" ]; then
+                # 检查是否为有效的 shell 脚本
+                if head -n1 "$temp_script" | grep -q "^#!/"; then
+                    # 提取远程版本号
+                    remote_version=$(grep -o 'SCRIPT_VERSION="[^"]*"' "$temp_script" | head -n1 | cut -d'"' -f2)
+                    
+                    if [ -n "$remote_version" ]; then
+                        source_url="$full_url"
+                        log "✓ 从 $domain 获取成功"
+                        break
+                    fi
+                fi
+            fi
         fi
+        
+        log "✗ $domain 访问失败"
+        rm -f "$temp_script" 2>/dev/null
     done
     
-    if [ -z "$remote_script" ]; then
-        log "✗ 无法从任何源获取脚本，跳过更新"
-        log ""
-        return 1
-    fi
-    
-    local remote_version=$(extract_script_version "$remote_script")
-    
     if [ -z "$remote_version" ]; then
-        log "✗ 无法获取远程版本号"
+        log "✗ 无法从任何源获取脚本，跳过更新"
+        rm -f "$temp_script" 2>/dev/null
         log ""
         return 1
     fi
@@ -86,6 +91,7 @@ check_script_update() {
     
     if [ "$SCRIPT_VERSION" = "$remote_version" ]; then
         log "○ 脚本已是最新版本"
+        rm -f "$temp_script" 2>/dev/null
         log ""
         return 0
     fi
@@ -96,18 +102,9 @@ check_script_update() {
     # 获取当前脚本路径
     local script_path=$(readlink -f "$0")
     
-    # 备份当前脚本
-    log "备份当前脚本..."
-    local backup_name="${script_path}.bak.$(date +%Y%m%d%H%M%S)"
-    if cp "$script_path" "$backup_name"; then
-        log "✓ 备份成功: $backup_name"
-    else
-        log "⚠ 备份失败，但继续更新"
-    fi
-    
-    # 写入新脚本
-    log "写入新版本脚本..."
-    if echo "$remote_script" > "$script_path"; then
+    # 替换脚本
+    log "替换脚本文件..."
+    if mv "$temp_script" "$script_path"; then
         chmod +x "$script_path"
         log "✓ 脚本更新成功！"
         log "版本: $SCRIPT_VERSION → $remote_version"
@@ -122,6 +119,7 @@ check_script_update() {
         exec "$script_path"
     else
         log "✗ 脚本更新失败"
+        rm -f "$temp_script" 2>/dev/null
         log ""
         return 1
     fi
