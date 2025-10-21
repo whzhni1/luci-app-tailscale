@@ -1,11 +1,18 @@
 #!/bin/sh
 
+# ==================== 脚本版本 ====================
+SCRIPT_VERSION="1.0.1"
+
 # ==================== 全局变量 ====================
 LOG_FILE="/tmp/auto-update-$(date +%Y%m%d-%H%M%S).log"
 GITEE_OWNERS="whzhni sirpdboy kiddin9"
 DEVICE_MODEL="$(cat /tmp/sysinfo/model 2>/dev/null || echo '未知设备')"
 PUSH_TITLE="$DEVICE_MODEL 插件更新通知"
 CONFIG_BACKUP_DIR="/tmp/config_Backup"
+
+# 脚本更新地址（按优先级排序）
+SCRIPT_URLS="https://raw.gitcode.com https://gitee.com"
+SCRIPT_PATH="/whzhni/luci-app-tailscale/raw/main/auto-update.sh"
 
 # 排除列表：不应该自动更新的包
 EXCLUDE_PACKAGES="kernel kmod- base-files busybox lib opkg uclient-fetch ca-bundle ca-certificates luci-app-lucky"
@@ -19,6 +26,105 @@ log() {
         -*) ;;
         *) logger -t "auto-update" "$1" ;;
     esac
+}
+
+# ==================== 脚本自更新函数 ====================
+get_remote_script() {
+    local url="$1"
+    curl -fsSL --connect-timeout 10 --max-time 30 "$url" 2>/dev/null
+}
+
+extract_script_version() {
+    local content="$1"
+    echo "$content" | grep -o 'SCRIPT_VERSION="[^"]*"' | head -n1 | cut -d'"' -f2
+}
+
+check_script_update() {
+    log "======================================"
+    log "检查脚本更新"
+    log "======================================"
+    log "当前脚本版本: $SCRIPT_VERSION"
+    
+    local remote_script=""
+    local source_url=""
+    
+    # 循环尝试所有镜像地址
+    for base_url in $SCRIPT_URLS; do
+        local full_url="${base_url}${SCRIPT_PATH}"
+        
+        # 提取域名用于日志显示
+        local domain=$(echo "$base_url" | sed 's|https://||' | sed 's|/.*||')
+        
+        log "尝试从 $domain 获取脚本..."
+        
+        remote_script=$(get_remote_script "$full_url")
+        
+        if [ -n "$remote_script" ]; then
+            source_url="$full_url"
+            log "✓ 从 $domain 获取成功"
+            break
+        else
+            log "✗ $domain 访问失败"
+        fi
+    done
+    
+    if [ -z "$remote_script" ]; then
+        log "✗ 无法从任何源获取脚本，跳过更新"
+        log ""
+        return 1
+    fi
+    
+    local remote_version=$(extract_script_version "$remote_script")
+    
+    if [ -z "$remote_version" ]; then
+        log "✗ 无法获取远程版本号"
+        log ""
+        return 1
+    fi
+    
+    log "远程脚本版本: $remote_version"
+    
+    if [ "$SCRIPT_VERSION" = "$remote_version" ]; then
+        log "○ 脚本已是最新版本"
+        log ""
+        return 0
+    fi
+    
+    log "↻ 发现新版本: $SCRIPT_VERSION → $remote_version"
+    log "开始更新脚本..."
+    
+    # 获取当前脚本路径
+    local script_path=$(readlink -f "$0")
+    
+    # 备份当前脚本
+    log "备份当前脚本..."
+    local backup_name="${script_path}.bak.$(date +%Y%m%d%H%M%S)"
+    if cp "$script_path" "$backup_name"; then
+        log "✓ 备份成功: $backup_name"
+    else
+        log "⚠ 备份失败，但继续更新"
+    fi
+    
+    # 写入新脚本
+    log "写入新版本脚本..."
+    if echo "$remote_script" > "$script_path"; then
+        chmod +x "$script_path"
+        log "✓ 脚本更新成功！"
+        log "版本: $SCRIPT_VERSION → $remote_version"
+        log "来源: $source_url"
+        log ""
+        log "======================================"
+        log "脚本已更新，重新启动新版本..."
+        log "======================================"
+        log ""
+        
+        # 重新执行新版本脚本
+        exec "$script_path"
+    else
+        log "✗ 脚本更新失败"
+        log ""
+        return 1
+    fi
 }
 
 # ==================== 版本处理函数 ====================
@@ -618,9 +724,14 @@ generate_report() {
 # ==================== 主函数 ====================
 run_update() {
     log "======================================"
-    log "开始自动更新系统 (PID: $$)"
+    log "OpenWrt 自动更新脚本 v${SCRIPT_VERSION}"
+    log "开始执行 (PID: $$)"
     log "日志文件: $LOG_FILE"
     log "======================================"
+    log ""
+    
+    # 检查脚本更新
+    check_script_update
     
     update_official_packages
     update_gitee_packages
