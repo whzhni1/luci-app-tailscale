@@ -5,7 +5,7 @@ STOP=01
 
 # ==================== 全局变量配置区 ====================
 LOG_FILE="/tmp/auto-setup-$(date +%Y%m%d-%H%M%S).log"
-AUTO_UPDATE_ENABLE=1  # 1=启用自动更新脚本, 0=禁用
+AUTO_UPDATE_ENABLE=0  # 1=启用自动更新脚本, 0=禁用
 SYS_ARCH=""  # 系统架构（启动时自动获取）
 USER_AGENT="Mozilla/5.0 (compatible; OpenWrt-AutoSetup/1.0)"
 
