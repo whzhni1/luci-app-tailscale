@@ -3,26 +3,33 @@
 START=99
 STOP=01
 
-# ==================== 全局变量配置区 ====================
-LOG_FILE="/tmp/auto-setup-$(date +%Y%m%d-%H%M%S).log"
-AUTO_UPDATE_ENABLE=0
-SYS_ARCH=""  # 系统架构（启动时自动获取）
-USER_AGENT="Mozilla/5.0 (compatible; OpenWrt-AutoSetup/1.0)"
-
+# ==================== 用户配置区 ====================
 # 软件包列表
-PACKAGES_TO_INSTALL="luci-app-wechatpush luci-app-passwall luci-app-openlist luci-app-filemanager luci-i18n-package-manager-zh-cn luci-i18n-firewall-zh-cn vsftpd openssh-sftp-server luci-app-ttyd luci-app-lucky luci-app-tailscale luci-theme-aurora"
+PACKAGES="luci-app-wechatpush luci-app-passwall luci-app-openlist luci-app-filemanager luci-i18n-package-manager-zh-cn luci-i18n-firewall-zh-cn vsftpd openssh-sftp-server luci-app-ttyd luci-app-lucky luci-app-tailscale luci-theme-aurora"
 
 # Gitee 仓库所有者列表（按优先级顺序尝试）
 GITEE_OWNERS="whzhni sirpdboy kiddin9"
 
-# 自动更新脚本下载地址
-AUTO_UPDATE_SCRIPT_URL1="https://gitee.com/whzhni/luci-app-tailscale/raw/main/auto-update.sh"
-AUTO_UPDATE_SCRIPT_URL2="https://raw.gitcode.com/whzhni/luci-app-tailscale/raw/main/auto-update.sh"
-AUTO_UPDATE_SCRIPT_PATH="/usr/bin/auto-update.sh"
+# 自动更新脚本配置
+AUTO_UPDATE=1  # 1=启用, 0=禁用
+UPDATE_PATH="/usr/bin/auto-update.sh"
+UPDATE_URL1="https://gitee.com/whzhni/luci-app-tailscale/raw/main/auto-update.sh"
+UPDATE_URL2="https://raw.gitcode.com/whzhni/luci-app-tailscale/raw/main/auto-update.sh"
+CRON_TIME="0 3 * * *"  # 定时任务时间（默认每天凌晨3点）
+# ====================================================
 
-# Gitee API URL 模板
-GITEE_API_TEMPLATE="https://gitee.com/api/v5/repos/%s/releases/latest"
-# ========================================================
+# ==================== 内部变量区 ====================
+LOG_FILE="/tmp/auto-setup-$(date +%Y%m%d-%H%M%S).log"
+SYS_ARCH=""
+USER_AGENT="Mozilla/5.0 (compatible; OpenWrt-AutoSetup/1.0)"
+API_TPL="https://gitee.com/api/v5/repos/%s/releases/latest"
+
+# 统计变量
+UPDATE_DL=0        # 自动更新脚本下载状态
+FAIL_OFFICIAL=0    # 官方源安装失败数
+NOT_IN_REPO=0      # 不在官方源的包数
+FAIL_GITEE=0       # Gitee 安装失败数
+# ====================================================
 
 # 日志函数
 log() {
@@ -32,7 +39,7 @@ log() {
 }
 
 # 初始化系统架构
-init_system_arch() {
+init_arch() {
     if [ -z "$SYS_ARCH" ]; then
         local arch=$(uname -m)
         case "$arch" in
@@ -55,38 +62,40 @@ init_system_arch() {
 remove_self() {
     log "准备清理自动配置脚本..."
     
-    if [ "$AUTO_UPDATE_ENABLE" = "1" ]; then
+    if [ "$AUTO_UPDATE" = "1" ]; then
         log "启用自动更新功能..."
         mkdir -p /usr/bin/
         
         # 尝试下载
-        local downloaded=0
-        for url in "$AUTO_UPDATE_SCRIPT_URL1" "$AUTO_UPDATE_SCRIPT_URL2"; do
+        for url in \
+            "$UPDATE_URL1" \
+            "$UPDATE_URL2"; do
+            
             log "尝试下载: $url"
-            if curl -s -o "$AUTO_UPDATE_SCRIPT_PATH" -H "User-Agent: $USER_AGENT" "$url" && \
-               [ -f "$AUTO_UPDATE_SCRIPT_PATH" ] && [ -s "$AUTO_UPDATE_SCRIPT_PATH" ]; then
+            if curl -fsSL "$url" -o "$UPDATE_PATH" && \
+               [ -f "$UPDATE_PATH" ] && [ -s "$UPDATE_PATH" ]; then
                 log "✓ 下载成功"
-                downloaded=1
+                UPDATE_DL=1
                 break
             else
                 log "✗ 下载失败"
-                rm -f "$AUTO_UPDATE_SCRIPT_PATH"
+                rm -f "$UPDATE_PATH"
             fi
         done
         
         # 处理下载结果
-        if [ "$downloaded" = "1" ]; then
-            chmod +x "$AUTO_UPDATE_SCRIPT_PATH"
+        if [ "$UPDATE_DL" = "1" ]; then
+            chmod +x "$UPDATE_PATH"
             
             # 添加定时任务
-            (crontab -l 2>/dev/null | grep -v "$AUTO_UPDATE_SCRIPT_PATH"; \
-             echo "0 3 * * * $AUTO_UPDATE_SCRIPT_PATH") | crontab -
+            (crontab -l 2>/dev/null | grep -v "$UPDATE_PATH"; \
+             echo "$CRON_TIME $UPDATE_PATH") | crontab -
             
-            log "✓ 自动更新脚本已安装并设置为每天凌晨3点运行"
+            log "✓ 自动更新脚本已安装并设置定时任务: $CRON_TIME"
             log "✓ 定时任务已添加，可使用 'crontab -l' 查看"
             
             log "立即执行一次自动更新..."
-            "$AUTO_UPDATE_SCRIPT_PATH" &
+            "$UPDATE_PATH" &
         else
             log "✗ 自动更新脚本下载失败，所有地址均不可用"
         fi
@@ -94,7 +103,7 @@ remove_self() {
         log "自动更新功能已禁用"
         
         # 清理定时任务
-        crontab -l 2>/dev/null | grep -v "$AUTO_UPDATE_SCRIPT_PATH" | crontab -
+        crontab -l 2>/dev/null | grep -v "$UPDATE_PATH" | crontab -
         
         log "✓ 已清理自动更新定时任务"
     fi
@@ -105,28 +114,28 @@ remove_self() {
     log "✓ 自动配置脚本已删除"
 }
 
-is_package_installed() {
+is_installed() {
     opkg list-installed | grep -q "^$1 "
 }
 
-check_package_exists() {
+is_exists() {
     opkg list | grep -q "^$1 "
 }
 
 # 安装单个包
-install_single_package() {
+install_pkg() {
     local pkg="$1"
-    local lang_pkg=""
+    local lang=""
     
     pkg=$(echo "$pkg" | xargs)
     [ -z "$pkg" ] && return 2
     
-    if is_package_installed "$pkg"; then
+    if is_installed "$pkg"; then
         log "  $pkg 已安装，跳过"
         return 0
     fi
     
-    if ! check_package_exists "$pkg"; then
+    if ! is_exists "$pkg"; then
         log "  ℹ $pkg 不存在于官方源"
         return 1
     fi
@@ -142,39 +151,39 @@ install_single_package() {
     # 智能安装语言包
     case "$pkg" in
         luci-app-*)
-            lang_pkg="luci-i18n-${pkg#luci-app-}-zh-cn"
+            lang="luci-i18n-${pkg#luci-app-}-zh-cn"
             ;;
         luci-theme-*)
-            lang_pkg="luci-i18n-theme-${pkg#luci-theme-}-zh-cn"
+            lang="luci-i18n-theme-${pkg#luci-theme-}-zh-cn"
             ;;
         *)
             return 0
             ;;
     esac
     
-    if is_package_installed "$lang_pkg"; then
-        log "  $lang_pkg 已安装，跳过"
-    elif check_package_exists "$lang_pkg"; then
-        log "  安装语言包 $lang_pkg..."
-        if opkg install "$lang_pkg" >>"$LOG_FILE" 2>&1; then
-            log "  ✓ $lang_pkg 安装成功"
+    if is_installed "$lang"; then
+        log "  $lang 已安装，跳过"
+    elif is_exists "$lang"; then
+        log "  安装语言包 $lang..."
+        if opkg install "$lang" >>"$LOG_FILE" 2>&1; then
+            log "  ✓ $lang 安装成功"
         else
-            log "  ⚠ $lang_pkg 安装失败"
+            log "  ⚠ $lang 安装失败"
         fi
     fi
     
     return 0
 }
 
-install_packages() {
+install_official() {
     log "步骤1: 安装软件包（优先官方源）"
     
-    if [ -z "$PACKAGES_TO_INSTALL" ]; then
+    if [ -z "$PACKAGES" ]; then
         log "软件包列表为空"
         return 1
     fi
     
-    log "需要安装的插件: $PACKAGES_TO_INSTALL"
+    log "需要安装的插件: $PACKAGES"
     
     log "更新软件源..."
     if ! opkg update >>"$LOG_FILE" 2>&1; then
@@ -183,31 +192,42 @@ install_packages() {
     fi
     log "软件源更新成功"
     
-    local failed=0 success=0 skipped=0
-    FAILED_PACKAGES=""
+    local fail=0 ok=0 skip=0 notin=0
+    FAILED=""
     
-    for pkg in $PACKAGES_TO_INSTALL; do
+    for pkg in $PACKAGES; do
         pkg=$(echo "$pkg" | xargs)
         [ -z "$pkg" ] && continue
         
-        install_single_package "$pkg"
+        install_pkg "$pkg"
         case $? in
-            0) success=$((success + 1)) ;;
-            1) FAILED_PACKAGES="$FAILED_PACKAGES $pkg"; failed=$((failed + 1)) ;;
-            2) skipped=$((skipped + 1)) ;;
+            0) ok=$((ok + 1)) ;;
+            1) 
+                if ! is_exists "$pkg"; then
+                    FAILED="$FAILED $pkg"
+                    notin=$((notin + 1))
+                else
+                    fail=$((fail + 1))
+                fi
+                ;;
+            2) skip=$((skip + 1)) ;;
         esac
     done
     
-    log "官方源安装完成: 成功 $success 个，失败 $failed 个，跳过 $skipped 个"
-    [ -n "$FAILED_PACKAGES" ] && log "安装失败的包: $FAILED_PACKAGES"
+    # 更新全局统计
+    FAIL_OFFICIAL=$fail
+    NOT_IN_REPO=$notin
+    
+    log "官方源安装完成: 成功 $ok 个，失败 $fail 个，不在源 $notin 个，跳过 $skip 个"
+    [ -n "$FAILED" ] && log "需要从 Gitee 安装: $FAILED"
     return 0
 }
 
-# 检查文件是否匹配当前架构
-is_arch_match() {
-    local filename="$1"
+# 检查文件是否匹配架构
+is_match() {
+    local file="$1"
     
-    case "$filename" in
+    case "$file" in
         *_${SYS_ARCH}.ipk|*_${SYS_ARCH}_*.ipk|*_all.ipk)
             return 0
             ;;
@@ -218,17 +238,17 @@ is_arch_match() {
 }
 
 # 比较主程序包优先级
-is_better_binary() {
-    local current="$1"
+is_better() {
+    local cur="$1"
     local new="$2"
     
-    [ -z "$current" ] && return 0
+    [ -z "$cur" ] && return 0
     
     case "$new" in
         *_wanji.ipk)
-            case "$current" in
+            case "$cur" in
                 *_wanji.ipk)
-                    [ "$new" \> "$current" ] && return 0
+                    [ "$new" \> "$cur" ] && return 0
                     return 1
                     ;;
                 *)
@@ -237,12 +257,12 @@ is_better_binary() {
             esac
             ;;
         *)
-            case "$current" in
+            case "$cur" in
                 *_wanji.ipk)
                     return 1
                     ;;
                 *)
-                    [ "$new" \> "$current" ] && return 0
+                    [ "$new" \> "$cur" ] && return 0
                     return 1
                     ;;
             esac
@@ -250,20 +270,19 @@ is_better_binary() {
     esac
 }
 
-# 自动查找 Gitee 仓库
-find_gitee_repo() {
+# 查找 Gitee 仓库
+find_repo() {
     local pkg="$1"
     
     for owner in $GITEE_OWNERS; do
         local repo="${owner}/${pkg}"
-        local api_url=$(printf "$GITEE_API_TEMPLATE" "$repo")
+        local url=$(printf "$API_TPL" "$repo")
         
-        # 检查仓库是否存在
-        local http_code=$(curl -s -o /dev/null -w "%{http_code}" \
+        local code=$(curl -s -o /dev/null -w "%{http_code}" \
             -H "User-Agent: $USER_AGENT" \
-            "$api_url")
+            "$url")
         
-        if [ "$http_code" = "200" ]; then
+        if [ "$code" = "200" ]; then
             echo "$repo"
             return 0
         fi
@@ -272,51 +291,51 @@ find_gitee_repo() {
     return 1
 }
 
-# 智能安装 Gitee 包
-install_from_gitee() {
-    local main_pkg="$1"
+# 从 Gitee 安装
+install_gitee() {
+    local pkg="$1"
     local repo="$2"
     
     # 提取应用名称
-    local app_name=""
-    case "$main_pkg" in
-        luci-app-*)   app_name="${main_pkg#luci-app-}" ;;
-        luci-theme-*) app_name="${main_pkg#luci-theme-}" ;;
-        *)            app_name="$main_pkg" ;;
+    local app=""
+    case "$pkg" in
+        luci-app-*)   app="${pkg#luci-app-}" ;;
+        luci-theme-*) app="${pkg#luci-theme-}" ;;
+        *)            app="$pkg" ;;
     esac
     
-    log "从 Gitee 智能安装 $main_pkg"
+    log "从 Gitee 智能安装 $pkg"
     log "======================================"
     log "仓库地址: $repo"
     
     # 获取最新版本
-    local api_url=$(printf "$GITEE_API_TEMPLATE" "$repo")
-    local release_json=$(curl -s -H "User-Agent: $USER_AGENT" "$api_url")
+    local url=$(printf "$API_TPL" "$repo")
+    local json=$(curl -s -H "User-Agent: $USER_AGENT" "$url")
     
-    # 检查 API 响应
-    if [ -z "$release_json" ]; then
+    # 检查响应
+    if [ -z "$json" ]; then
         log "✗ API 请求失败"
         return 1
     fi
     
-    if echo "$release_json" | grep -q '"message"'; then
-        local error_msg=$(echo "$release_json" | grep -o '"message":"[^"]*"' | cut -d'"' -f4)
-        log "✗ API 错误: $error_msg"
+    if echo "$json" | grep -q '"message"'; then
+        local err=$(echo "$json" | grep -o '"message":"[^"]*"' | cut -d'"' -f4)
+        log "✗ API 错误: $err"
         return 1
     fi
     
-    local latest_version=$(echo "$release_json" | grep -o '"tag_name":"[^"]*"' | cut -d'"' -f4)
+    local ver=$(echo "$json" | grep -o '"tag_name":"[^"]*"' | cut -d'"' -f4)
     
-    if [ -z "$latest_version" ]; then
+    if [ -z "$ver" ]; then
         log "✗ 未能获取最新版本"
         return 1
     fi
-    log "最新版本: $latest_version"
+    log "最新版本: $ver"
     
     # 提取所有 ipk 文件
-    local all_files=$(echo "$release_json" | grep -o '"browser_download_url":"[^"]*\.ipk"' | cut -d'"' -f4 | xargs -n1 basename)
+    local files=$(echo "$json" | grep -o '"browser_download_url":"[^"]*\.ipk"' | cut -d'"' -f4 | xargs -n1 basename)
     
-    if [ -z "$all_files" ]; then
+    if [ -z "$files" ]; then
         log "✗ 未找到任何 ipk 文件"
         return 1
     fi
@@ -324,41 +343,35 @@ install_from_gitee() {
     log "分析可用文件..."
     
     # 智能分类
-    local main_binary=""
-    local luci_pkg=""
-    local i18n_pkg=""
+    local bin="" luci="" i18n=""
     
-    for filename in $all_files; do
-        [ -z "$filename" ] && continue
+    for f in $files; do
+        [ -z "$f" ] && continue
         
         # 1. 语言包
-        case "$filename" in
-            *luci-i18n-*${app_name}*zh-cn*.ipk)
-                if [ -z "$i18n_pkg" ]; then
-                    i18n_pkg="$filename"
-                fi
+        case "$f" in
+            *luci-i18n-*${app}*zh-cn*.ipk)
+                [ -z "$i18n" ] && i18n="$f"
                 continue
                 ;;
         esac
         
         # 2. LuCI 包
-        case "$filename" in
-            luci-app-${app_name}_*.ipk|luci-theme-${app_name}_*.ipk)
-                if [ -z "$luci_pkg" ]; then
-                    luci_pkg="$filename"
-                fi
+        case "$f" in
+            luci-app-${app}_*.ipk|luci-theme-${app}_*.ipk)
+                [ -z "$luci" ] && luci="$f"
                 continue
                 ;;
         esac
         
         # 3. 主程序包
-        case "$filename" in
+        case "$f" in
             luci-*|*-luci-*)
                 ;;
-            *${app_name}*.ipk)
-                if is_arch_match "$filename"; then
-                    if is_better_binary "$main_binary" "$filename"; then
-                        main_binary="$filename"
+            *${app}*.ipk)
+                if is_match "$f"; then
+                    if is_better "$bin" "$f"; then
+                        bin="$f"
                     fi
                 fi
                 ;;
@@ -366,67 +379,67 @@ install_from_gitee() {
     done
     
     # 输出识别结果
-    [ -n "$main_binary" ] && log "  [主程序] $main_binary"
-    [ -n "$luci_pkg" ] && log "  [LuCI包] $luci_pkg"
-    [ -n "$i18n_pkg" ] && log "  [语言包] $i18n_pkg"
+    [ -n "$bin" ] && log "  [主程序] $bin"
+    [ -n "$luci" ] && log "  [LuCI包] $luci"
+    [ -n "$i18n" ] && log "  [语言包] $i18n"
     
     # 构建安装顺序
-    local install_order=""
-    [ -n "$main_binary" ] && install_order="$main_binary"
-    [ -n "$luci_pkg" ] && install_order="$install_order $luci_pkg"
-    [ -n "$i18n_pkg" ] && install_order="$install_order $i18n_pkg"
+    local order=""
+    [ -n "$bin" ] && order="$bin"
+    [ -n "$luci" ] && order="$order $luci"
+    [ -n "$i18n" ] && order="$order $i18n"
     
-    if [ -z "$install_order" ]; then
+    if [ -z "$order" ]; then
         log "✗ 未找到任何匹配的包"
         return 1
     fi
     
-    log "安装计划: $install_order"
+    log "安装计划: $order"
     
     # 下载并安装
-    local success_count=0
-    for filename in $install_order; do
-        filename=$(echo "$filename" | xargs)
-        [ -z "$filename" ] && continue
+    local count=0
+    for f in $order; do
+        f=$(echo "$f" | xargs)
+        [ -z "$f" ] && continue
         
         # 提取下载链接
-        local download_url=$(echo "$release_json" | grep -o "\"browser_download_url\":\"[^\"]*${filename}\"" | cut -d'"' -f4)
+        local dl=$(echo "$json" | grep -o "\"browser_download_url\":\"[^\"]*${f}\"" | cut -d'"' -f4)
         
-        if [ -z "$download_url" ]; then
-            log "⚠ 未找到 $filename 的下载链接"
+        if [ -z "$dl" ]; then
+            log "⚠ 未找到 $f 的下载链接"
             continue
         fi
         
         # 下载
-        log "下载: $filename"
-        if ! curl -fsSL -o "/tmp/$filename" -H "User-Agent: $USER_AGENT" "$download_url"; then
+        log "下载: $f"
+        if ! curl -fsSL -o "/tmp/$f" -H "User-Agent: $USER_AGENT" "$dl"; then
             log "✗ 下载失败"
-            rm -f /tmp/*${app_name}*.ipk 2>/dev/null
+            rm -f /tmp/*${app}*.ipk 2>/dev/null
             return 1
         fi
         
         # 安装
-        log "  安装 $filename..."
-        if ! opkg install "/tmp/$filename" >>"$LOG_FILE" 2>&1; then
+        log "  安装 $f..."
+        if ! opkg install "/tmp/$f" >>"$LOG_FILE" 2>&1; then
             log "  ✗ 安装失败"
-            rm -f /tmp/*${app_name}*.ipk 2>/dev/null
+            rm -f /tmp/*${app}*.ipk 2>/dev/null
             return 1
         fi
         
         log "  ✓ 安装成功"
-        success_count=$((success_count + 1))
+        count=$((count + 1))
     done
     
     # 清理
-    rm -f /tmp/*${app_name}*.ipk 2>/dev/null
+    rm -f /tmp/*${app}*.ipk 2>/dev/null
     
-    log "✓ $main_pkg 安装完成（共 $success_count 个包）"
+    log "✓ $pkg 安装完成（共 $count 个包）"
     return 0
 }
 
 # Gitee 备用安装
-install_gitee_fallback() {
-    if [ -z "$FAILED_PACKAGES" ]; then
+install_fallback() {
+    if [ -z "$FAILED" ]; then
         log "没有需要备用安装的包"
         return 0
     fi
@@ -435,75 +448,94 @@ install_gitee_fallback() {
     log "步骤2: Gitee 备用安装"
     log "======================================"
     
-    local gitee_installed=0 gitee_failed=0 processed=""
+    local ok=0 fail=0 done=""
     
-    for pkg in $FAILED_PACKAGES; do
+    for pkg in $FAILED; do
         # 提取主包名
-        local main_pkg=""
+        local main=""
         case "$pkg" in
             luci-i18n-*-zh-cn)
-                local temp="${pkg#luci-i18n-}"
-                temp="${temp%-zh-cn}"
-                if echo " $FAILED_PACKAGES " | grep -q " luci-theme-${temp} "; then
-                    main_pkg="luci-theme-${temp}"
+                local tmp="${pkg#luci-i18n-}"
+                tmp="${tmp%-zh-cn}"
+                if echo " $FAILED " | grep -q " luci-theme-${tmp} "; then
+                    main="luci-theme-${tmp}"
                 else
-                    main_pkg="luci-app-${temp}"
+                    main="luci-app-${tmp}"
                 fi
                 ;;
             luci-i18n-theme-*-zh-cn)
-                local temp="${pkg#luci-i18n-theme-}"
-                main_pkg="luci-theme-${temp%-zh-cn}"
+                local tmp="${pkg#luci-i18n-theme-}"
+                main="luci-theme-${tmp%-zh-cn}"
                 ;;
             *)
-                main_pkg="$pkg"
+                main="$pkg"
                 ;;
         esac
         
         # 避免重复
-        case " $processed " in
-            *" $main_pkg "*) continue ;;
+        case " $done " in
+            *" $main "*) continue ;;
         esac
-        processed="$processed $main_pkg "
+        done="$done $main "
         
         # 检查是否已安装
-        if is_package_installed "$main_pkg"; then
-            log "✓ $main_pkg 已安装，跳过"
+        if is_installed "$main"; then
+            log "✓ $main 已安装，跳过"
             continue
         fi
         
-        # 自动查找 Gitee 仓库
-        log "尝试从 Gitee 安装 $main_pkg..."
+        # 查找仓库
+        log "尝试从 Gitee 安装 $main..."
         log "  查找 Gitee 仓库..."
         
-        local repo=$(find_gitee_repo "$main_pkg")
+        local repo=$(find_repo "$main")
         
         if [ $? -ne 0 ] || [ -z "$repo" ]; then
             log "  ✗ 未找到 Gitee 仓库 (已尝试: $GITEE_OWNERS)"
-            log "✗ $main_pkg 不存在于 Gitee"
-            gitee_failed=$((gitee_failed + 1))
+            log "✗ $main 不存在于 Gitee"
+            fail=$((fail + 1))
             continue
         fi
         
         log "  ✓ 找到仓库: $repo"
         
         # 从 Gitee 安装
-        if install_from_gitee "$main_pkg" "$repo"; then
-            gitee_installed=$((gitee_installed + 1))
+        if install_gitee "$main" "$repo"; then
+            ok=$((ok + 1))
         else
-            gitee_failed=$((gitee_failed + 1))
+            fail=$((fail + 1))
         fi
     done
     
-    log "Gitee 备用安装完成: 成功 $gitee_installed 个，失败 $gitee_failed 个"
+    # 更新全局统计
+    FAIL_GITEE=$fail
     
-    if [ "$gitee_failed" -eq 0 ]; then
+    log "Gitee 备用安装完成: 成功 $ok 个，失败 $fail 个"
+    
+    # 判断是否删除脚本
+    # 条件1: 所有包在官方源且成功
+    if [ "$FAIL_OFFICIAL" -eq 0 ] && [ "$NOT_IN_REPO" -eq 0 ]; then
+        log "✓ 所有包均在官方源且安装成功，准备删除自动配置脚本"
+        remove_self
+        return 0
+    fi
+    
+    # 条件2: Gitee 安装全部成功
+    if [ "$FAIL_GITEE" -eq 0 ] && [ "$NOT_IN_REPO" -gt 0 ]; then
         log "✓ Gitee 备用安装全部成功，准备删除自动配置脚本"
         remove_self
         return 0
-    else
-        log "⚠ Gitee 备用安装有 $gitee_failed 个失败，保留自动配置脚本待重启后重试"
+    fi
+    
+    # 条件3: 自动更新已启用但脚本下载失败
+    if [ "$AUTO_UPDATE" = "1" ] && [ "$UPDATE_DL" != "1" ]; then
+        log "⚠ 自动更新已启用但脚本下载失败，保留自动配置脚本待重启后重试"
         return 1
     fi
+    
+    # 其他情况：仍有失败
+    log "⚠ 仍有失败项 (官方源失败: $FAIL_OFFICIAL, Gitee失败: $FAIL_GITEE)，保留自动配置脚本待重启后重试"
+    return 1
 }
 
 # 主逻辑
@@ -513,17 +545,17 @@ run_setup() {
     log "日志文件: $LOG_FILE"
     log "======================================"
     
-    # 初始化系统架构
-    init_system_arch
+    # 初始化架构
+    init_arch
     
     # 安装软件包
-    install_packages
+    install_official
     
     # Gitee 备用安装
-    install_gitee_fallback
+    install_fallback
     
     log "======================================"
-    log "✓ 所有配置成功完成"
+    log "✓ 配置流程完成"
     log "======================================"
     
     cp "$LOG_FILE" "/tmp/auto-setup-success.log" 2>/dev/null
