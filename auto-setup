@@ -13,8 +13,8 @@ GITEE_OWNERS="whzhni sirpdboy kiddin9"
 # 自动更新脚本配置
 AUTO_UPDATE=1  # 1=启用, 0=禁用
 UPDATE_PATH="/usr/bin/auto-update.sh"
-UPDATE_MIRRORS="https://gitee.com https://raw.gitcode.com"
-UPDATE_SCRIPT="/whzhni/luci-app-tailscale/raw/main/auto-update.sh"
+UPDATE_MIRRORS="https://gitee.com https://raw.gitcode.com"  # 镜像地址（按优先级）
+UPDATE_SCRIPT="/whzhni/luci-app-tailscale/raw/main/auto-update.sh"  # 脚本路径
 CRON_TIME="0 3 * * *"  # 定时任务时间（默认每天凌晨3点）
 # ====================================================
 
@@ -135,7 +135,7 @@ install_pkg() {
     fi
     
     if ! is_exists "$pkg"; then
-        log "  ℹ $pkg 不存在于官方源"
+        log "  ⊗ $pkg 不存在于官方源"
         return 1
     fi
     
@@ -217,7 +217,12 @@ install_official() {
     FAIL_OFFICIAL=$fail
     NOT_IN_REPO=$notin
     
-    log "官方源安装完成: 成功 $ok 个，失败 $fail 个，不在源 $notin 个，跳过 $skip 个"
+    log "--------------------------------------"
+    log "官方源检查完成:"
+    log "  ✓ 安装成功: ${ok} 个"
+    log "  ⊗ 不在官方源: ${notin} 个"
+    log "  ⊝ 跳过: ${skip} 个"
+    log "  ✗ 失败: ${fail} 个"
     [ -n "$FAILED" ] && log "需要从 Gitee 安装: $FAILED"
     return 0
 }
@@ -447,7 +452,7 @@ install_fallback() {
     log "步骤2: Gitee 备用安装"
     log "======================================"
     
-    local ok=0 fail=0 done=""
+    local ok=0 fail=0 skip=0 done=""
     
     for pkg in $FAILED; do
         # 提取主包名
@@ -480,6 +485,7 @@ install_fallback() {
         # 检查是否已安装
         if is_installed "$main"; then
             log "✓ $main 已安装，跳过"
+            skip=$((skip + 1))
             continue
         fi
         
@@ -491,7 +497,6 @@ install_fallback() {
         
         if [ $? -ne 0 ] || [ -z "$repo" ]; then
             log "  ✗ 未找到 Gitee 仓库 (已尝试: $GITEE_OWNERS)"
-            log "✗ $main 不存在于 Gitee"
             fail=$((fail + 1))
             continue
         fi
@@ -509,7 +514,11 @@ install_fallback() {
     # 更新全局统计
     FAIL_GITEE=$fail
     
-    log "Gitee 备用安装完成: 成功 $ok 个，失败 $fail 个"
+    log "--------------------------------------"
+    log "Gitee 检查完成:"
+    log "  ✓ 安装成功: ${ok} 个"
+    log "  ⊗ 未找到仓库: ${fail} 个"
+    log "  ⊝ 跳过: ${skip} 个"
     
     # 判断是否删除脚本
     # 条件1: 所有包在官方源且成功
