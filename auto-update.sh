@@ -1,573 +1,307 @@
 #!/bin/sh
+# -*- coding: utf-8 -*-
 
-# ==================== 脚本版本 ====================
-SCRIPT_VERSION="1.0.0"
-
-# ==================== 全局变量 ====================
+# ==================== 全局配置 ====================
+SCRIPT_VERSION="1.0.2"
 LOG_FILE="/tmp/auto-update-$(date +%Y%m%d-%H%M%S).log"
-GITEE_OWNERS="whzhni sirpdboy kiddin9"
+CONFIG_BACKUP_DIR="/tmp/config_Backup"
 DEVICE_MODEL="$(cat /tmp/sysinfo/model 2>/dev/null || echo '未知设备')"
 PUSH_TITLE="$DEVICE_MODEL 插件更新通知"
-CONFIG_BACKUP_DIR="/tmp/config_Backup"
 
-# 脚本更新地址（按优先级排序）
+# 安装优先级：1=官方优先，其他=Gitee优先
+INSTALL_PRIORITY=1
+
+# Gitee 配置
+GITEE_OWNERS="whzhni sirpdboy kiddin9"
+
+# 脚本更新源（按优先级排序）
 SCRIPT_URLS="https://raw.gitcode.com https://gitee.com"
 SCRIPT_PATH="/whzhni/luci-app-tailscale/raw/main/auto-update.sh"
 
-# 排除列表：不应该自动更新的包
+# 排除列表
 EXCLUDE_PACKAGES="kernel kmod- base-files busybox lib opkg uclient-fetch ca-bundle ca-certificates luci-app-lucky"
 
-# ==================== 日志函数 ====================
+# ==================== 工具函数 ====================
 log() {
     local msg="[$(date '+%Y-%m-%d %H:%M:%S')] $1"
     echo "$msg" | tee -a "$LOG_FILE"
-    
-    case "$1" in
-        -*) ;;
-        *) logger -t "auto-update" "$1" ;;
-    esac
+    case "$1" in -*) ;; *) logger -t "auto-update" "$1" 2>/dev/null ;; esac
 }
 
-# ==================== 脚本自更新函数 ====================
-get_remote_script() {
-    local url="$1"
-    curl -fsSL --connect-timeout 10 --max-time 30 "$url" 2>/dev/null
-}
-
-extract_script_version() {
-    local content="$1"
-    echo "$content" | grep -o 'SCRIPT_VERSION="[^"]*"' | head -n1 | cut -d'"' -f2
-}
-
-check_script_update() {
-    log "======================================"
-    log "检查脚本更新"
-    log "======================================"
-    log "当前脚本版本: $SCRIPT_VERSION"
-    
-    local temp_script="/tmp/auto-update-new.sh"
-    local source_url=""
-    local remote_version=""
-    
-    # 循环尝试所有镜像地址
-    for base_url in $SCRIPT_URLS; do
-        local full_url="${base_url}${SCRIPT_PATH}"
-        
-        # 提取域名用于日志显示
-        local domain=$(echo "$base_url" | sed 's|https://||' | sed 's|/.*||')
-        
-        log "尝试从 $domain 获取脚本..."
-        
-        # 直接下载到临时文件
-        if curl -fsSL --connect-timeout 10 --max-time 30 "$full_url" -o "$temp_script" 2>/dev/null; then
-            # 验证下载的文件
-            if [ -f "$temp_script" ] && [ -s "$temp_script" ]; then
-                # 检查是否为有效的 shell 脚本
-                if head -n1 "$temp_script" | grep -q "^#!/"; then
-                    # 提取远程版本号
-                    remote_version=$(grep -o 'SCRIPT_VERSION="[^"]*"' "$temp_script" | head -n1 | cut -d'"' -f2)
-                    
-                    if [ -n "$remote_version" ]; then
-                        source_url="$full_url"
-                        log "✓ 从 $domain 获取成功"
-                        break
-                    fi
-                fi
-            fi
-        fi
-        
-        log "✗ $domain 访问失败"
-        rm -f "$temp_script" 2>/dev/null
-    done
-    
-    if [ -z "$remote_version" ]; then
-        log "✗ 无法从任何源获取脚本，跳过更新"
-        rm -f "$temp_script" 2>/dev/null
-        log ""
-        return 1
-    fi
-    
-    log "远程脚本版本: $remote_version"
-    
-    if [ "$SCRIPT_VERSION" = "$remote_version" ]; then
-        log "○ 脚本已是最新版本"
-        rm -f "$temp_script" 2>/dev/null
-        log ""
-        return 0
-    fi
-    
-    log "↻ 发现新版本: $SCRIPT_VERSION → $remote_version"
-    log "开始更新脚本..."
-    
-    # 获取当前脚本路径
-    local script_path=$(readlink -f "$0")
-    
-    # 替换脚本
-    log "替换脚本文件..."
-    if mv "$temp_script" "$script_path"; then
-        chmod +x "$script_path"
-        log "✓ 脚本更新成功！"
-        log "版本: $SCRIPT_VERSION → $remote_version"
-        log "来源: $source_url"
-        log ""
-        log "======================================"
-        log "脚本已更新，重新启动新版本..."
-        log "======================================"
-        log ""
-        
-        # 重新执行新版本脚本
-        exec "$script_path"
-    else
-        log "✗ 脚本更新失败"
-        rm -f "$temp_script" 2>/dev/null
-        log ""
-        return 1
-    fi
-}
-
-# ==================== 版本处理函数 ====================
 normalize_version() {
-    local ver="$1"
-    ver=$(echo "$ver" | sed 's/^[vV]//')
-    ver=$(echo "$ver" | sed 's/-r\?[0-9]\+$//')
-    echo "$ver"
+    echo "$1" | sed 's/^[vV]//' | sed 's/-r\?[0-9]\+$//'
 }
 
 compare_versions() {
-    local current="$1"
-    local gitee="$2"
-    local norm_current=$(normalize_version "$current")
-    local norm_gitee=$(normalize_version "$gitee")
-    
-    log "  [版本对比] $current → $norm_current  vs  $gitee → $norm_gitee"
-    
-    [ "$norm_current" = "$norm_gitee" ] && return 0 || return 1
+    local v1=$(normalize_version "$1")
+    local v2=$(normalize_version "$2")
+    log "  [版本对比] $1 → $v1  vs  $2 → $v2"
+    [ "$v1" = "$v2" ]
 }
 
-# ==================== 推送函数 ====================
-send_push() {
-    local title="$1"
-    local content="$2"
-    
-    [ ! -f "/etc/config/wechatpush" ] && { log "⚠ wechatpush 未安装，跳过推送"; return 1; }
-    
-    local enabled=$(uci get wechatpush.config.enable 2>/dev/null)
-    [ "$enabled" != "1" ] && { log "⚠ wechatpush 未启用，跳过推送"; return 1; }
-    
-    local pushplus_token=$(uci get wechatpush.config.pushplus_token 2>/dev/null)
-    local serverchan_key=$(uci get wechatpush.config.serverchan_key 2>/dev/null)
-    local serverchan_3_key=$(uci get wechatpush.config.serverchan_3_key 2>/dev/null)
-    
-    local push_method="" token_value="" api_type="" response=""
-    
-    if [ -n "$pushplus_token" ]; then
-        push_method="PushPlus"
-        token_value="$pushplus_token"
-        api_type="pushplus"
-    elif [ -n "$serverchan_3_key" ]; then
-        push_method="Server酱3"
-        token_value="$serverchan_3_key"
-        api_type="serverchan3"
-    elif [ -n "$serverchan_key" ]; then
-        push_method="Server酱"
-        token_value="$serverchan_key"
-        api_type="serverchan"
-    else
-        log "⚠ 未配置任何推送方式，跳过推送"
-        return 1
-    fi
-    
-    log "发送推送通知 (方式: $push_method)..."
-    
-    case "$api_type" in
-        pushplus)
-            local content_escaped=$(echo "$content" | sed 's/"/\\"/g' | sed ':a;N;$!ba;s/\n/\\n/g')
-            response=$(curl -s -X POST "http://www.pushplus.plus/send" \
-                -H "Content-Type: application/json" \
-                -d "{\"token\":\"$token_value\",\"title\":\"$title\",\"content\":\"$content_escaped\",\"template\":\"txt\"}")
-            echo "$response" | grep -q '"code":200' && { log "✓ 推送发送成功"; return 0; }
-            ;;
-        serverchan)
-            response=$(curl -s -X POST "https://sc.ftqq.com/${token_value}.send" \
-                -d "text=$title" -d "desp=$content")
-            echo "$response" | grep -q '"errno":0\|"code":0' && { log "✓ 推送发送成功"; return 0; }
-            ;;
-        serverchan3)
-            response=$(curl -s -X POST "https://sctapi.ftqq.com/${token_value}.send" \
-                -d "text=$title" -d "desp=$content")
-            echo "$response" | grep -q '"errno":0\|"code":0' && { log "✓ 推送发送成功"; return 0; }
-            ;;
+get_system_arch() {
+    case "$(uname -m)" in
+        aarch64) echo "arm64" ;;
+        armv7l)  echo "armv7" ;;
+        armv6l)  echo "armv6" ;;
+        x86_64)  echo "x86_64" ;;
+        i686|i386) echo "i386" ;;
+        *) echo "unknown" ;;
     esac
-    
-    log "✗ 推送发送失败: $response"
-    return 1
 }
 
-# ==================== 包检查函数 ====================
+# ==================== 包管理函数 ====================
 is_package_excluded() {
-    local pkg="$1"
-    case "$pkg" in
-        luci-i18n-*) return 0 ;;
-    esac
-    
+    case "$1" in luci-i18n-*) return 0 ;; esac
     for pattern in $EXCLUDE_PACKAGES; do
-        case "$pkg" in
-            $pattern*) return 0 ;;
-        esac
+        case "$1" in $pattern*) return 0 ;; esac
     done
     return 1
 }
 
-is_package_installed() {
-    opkg list-installed | grep -q "^$1 "
+opkg_check() {
+    opkg "$@" 2>/dev/null | grep -q "^$2 "
 }
 
-check_package_exists() {
-    opkg list | grep -q "^$1 "
+get_package_version() {
+    opkg "$1" | grep "^$2 " | awk '{print $3}'
 }
 
-check_package_in_repo() {
-    opkg info "$1" 2>/dev/null | grep -q "^Description:"
-}
-
-get_installed_packages() {
-    opkg list-installed | awk '{print $1}' | grep -v "^luci-i18n-"
-}
-
-get_installed_version() {
-    opkg list-installed | grep "^$1 " | awk '{print $3}'
-}
-
-get_repo_version() {
-    opkg list | grep "^$1 " | awk '{print $3}'
-}
-
-get_system_arch() {
-    local arch=$(uname -m)
-    case "$arch" in
-        aarch64)   echo "arm64" ;;
-        armv7l)    echo "armv7" ;;
-        armv6l)    echo "armv6" ;;
-        x86_64)    echo "x86_64" ;;
-        i686|i386) echo "i386" ;;
-        *)         echo "unknown" ;;
-    esac
-}
-
-# ==================== 语言包处理 ====================
 install_language_package() {
-    local pkg="$1"
-    local lang_pkg=""
-    
+    local pkg="$1" lang_pkg=""
     case "$pkg" in
         luci-app-*)   lang_pkg="luci-i18n-${pkg#luci-app-}-zh-cn" ;;
         luci-theme-*) lang_pkg="luci-i18n-theme-${pkg#luci-theme-}-zh-cn" ;;
         *) return 0 ;;
     esac
     
-    check_package_exists "$lang_pkg" || return 0
+    opkg_check list "$lang_pkg" || return 0
     
-    if is_package_installed "$lang_pkg"; then
-        log "    升级语言包 $lang_pkg..."
-        opkg upgrade "$lang_pkg" >>"$LOG_FILE" 2>&1 && \
-            log "    ✓ $lang_pkg 升级成功" || \
-            log "    ⚠ $lang_pkg 升级失败（不影响主程序）"
+    local action="安装"
+    opkg_check list-installed "$lang_pkg" && action="升级"
+    
+    log "    ${action}语言包 $lang_pkg..."
+    if opkg ${action} "$lang_pkg" >>"$LOG_FILE" 2>&1; then
+        log "    ✓ $lang_pkg ${action}成功"
     else
-        log "    安装语言包 $lang_pkg..."
-        opkg install "$lang_pkg" >>"$LOG_FILE" 2>&1 && \
-            log "    ✓ $lang_pkg 安装成功" || \
-            log "    ⚠ $lang_pkg 安装失败（不影响主程序）"
+        log "    ⚠ $lang_pkg ${action}失败（不影响主程序）"
     fi
 }
 
-# ==================== 配置备份恢复 ====================
+# ==================== 配置备份 ====================
 backup_config() {
-    log "  备份配置文件到 $CONFIG_BACKUP_DIR ..."
+    log "  备份配置到 $CONFIG_BACKUP_DIR ..."
     rm -rf "$CONFIG_BACKUP_DIR" 2>/dev/null
     mkdir -p "$CONFIG_BACKUP_DIR"
-    
-    if cp -r /etc/config/* "$CONFIG_BACKUP_DIR/" 2>/dev/null; then
-        log "  ✓ 配置文件备份成功"
-        return 0
-    else
-        log "  ⚠ 配置文件备份失败"
-        return 1
-    fi
+    cp -r /etc/config/* "$CONFIG_BACKUP_DIR/" 2>/dev/null && \
+        log "  ✓ 配置备份成功" || log "  ⚠ 配置备份失败"
 }
 
 restore_config() {
-    [ ! -d "$CONFIG_BACKUP_DIR" ] && { log "  ⚠ 备份目录不存在，跳过恢复"; return 1; }
-    
-    log "  恢复配置文件..."
+    [ ! -d "$CONFIG_BACKUP_DIR" ] && return 1
+    log "  恢复配置..."
     if cp -r "$CONFIG_BACKUP_DIR"/* /etc/config/ 2>/dev/null; then
-        log "  ✓ 配置文件恢复成功"
-        rm -rf "$CONFIG_BACKUP_DIR" 2>/dev/null
-        return 0
+        log "  ✓ 配置恢复成功"
+        rm -rf "$CONFIG_BACKUP_DIR"
     else
-        log "  ✗ 配置文件恢复失败"
+        log "  ✗ 配置恢复失败"
         return 1
     fi
 }
 
 cleanup_backup() {
-    [ -d "$CONFIG_BACKUP_DIR" ] && rm -rf "$CONFIG_BACKUP_DIR" 2>/dev/null
+    rm -rf "$CONFIG_BACKUP_DIR" 2>/dev/null
 }
 
-# ==================== Gitee 相关函数 ====================
+# ==================== 推送函数 ====================
+send_push() {
+    [ ! -f "/etc/config/wechatpush" ] && { log "⚠ wechatpush 未安装"; return 1; }
+    [ "$(uci get wechatpush.config.enable 2>/dev/null)" != "1" ] && { log "⚠ wechatpush 未启用"; return 1; }
+    
+    local token=$(uci get wechatpush.config.pushplus_token 2>/dev/null)
+    local api="pushplus" url="http://www.pushplus.plus/send"
+    
+    if [ -z "$token" ]; then
+        token=$(uci get wechatpush.config.serverchan_3_key 2>/dev/null)
+        api="serverchan3" url="https://sctapi.ftqq.com/${token}.send"
+    fi
+    
+    if [ -z "$token" ]; then
+        token=$(uci get wechatpush.config.serverchan_key 2>/dev/null)
+        api="serverchan" url="https://sc.ftqq.com/${token}.send"
+    fi
+    
+    [ -z "$token" ] && { log "⚠ 未配置推送"; return 1; }
+    
+    log "发送推送 ($api)..."
+    
+    local response=""
+    if [ "$api" = "pushplus" ]; then
+        local content=$(echo "$2" | sed 's/"/\\"/g' | sed ':a;N;$!ba;s/\n/\\n/g')
+        response=$(curl -s -X POST "$url" -H "Content-Type: application/json" \
+            -d "{\"token\":\"$token\",\"title\":\"$1\",\"content\":\"$content\",\"template\":\"txt\"}")
+        echo "$response" | grep -q '"code":200' && { log "✓ 推送成功"; return 0; }
+    else
+        response=$(curl -s -X POST "$url" -d "text=$1" -d "desp=$2")
+        echo "$response" | grep -q '"errno":0\|"code":0' && { log "✓ 推送成功"; return 0; }
+    fi
+    
+    log "✗ 推送失败: $response"
+    return 1
+}
+
+# ==================== Gitee 函数 ====================
 find_gitee_repo() {
-    local pkg="$1"
-    
     for owner in $GITEE_OWNERS; do
-        local repo="${owner}/${pkg}"
-        local api_url="https://gitee.com/api/v5/repos/${repo}/releases/latest"
-        local http_code=$(curl -s -o /dev/null -w "%{http_code}" "$api_url")
-        
-        [ "$http_code" = "200" ] && { echo "$repo"; return 0; }
+        local repo="${owner}/$1"
+        [ "$(curl -s -o /dev/null -w "%{http_code}" "https://gitee.com/api/v5/repos/${repo}/releases/latest")" = "200" ] && \
+            { echo "$repo"; return 0; }
     done
-    
     return 1
 }
 
 get_gitee_version() {
-    local repo="$1"
-    local api_url="https://gitee.com/api/v5/repos/${repo}/releases/latest"
-    local release_json=$(curl -s "$api_url")
-    
-    [ -z "$release_json" ] && return 1
-    
-    local latest_version=$(echo "$release_json" | grep -o '"tag_name":"[^"]*"' | cut -d'"' -f4)
-    [ -n "$latest_version" ] && { echo "$latest_version"; return 0; }
-    
-    return 1
+    local json=$(curl -s "https://gitee.com/api/v5/repos/$1/releases/latest")
+    [ -z "$json" ] && return 1
+    echo "$json" | grep -o '"tag_name":"[^"]*"' | head -n1 | cut -d'"' -f4
 }
 
 is_arch_match() {
-    local filename="$1"
-    local sys_arch="$2"
-    case "$filename" in
-        *_${sys_arch}.ipk|*_${sys_arch}_*.ipk|*_all.ipk) return 0 ;;
+    case "$1" in
+        *_$2.ipk|*_$2_*.ipk|*_all.ipk) return 0 ;;
         *) return 1 ;;
     esac
 }
 
 is_better_binary() {
-    local current="$1"
-    local new="$2"
-    
-    [ -z "$current" ] && return 0
-    
-    case "$new" in
+    [ -z "$1" ] && return 0
+    case "$2" in
         *_wanji.ipk)
-            case "$current" in
-                *_wanji.ipk) [ "$new" \> "$current" ] && return 0 || return 1 ;;
+            case "$1" in
+                *_wanji.ipk) [ "$2" \> "$1" ] ;;
                 *) return 0 ;;
-            esac
-            ;;
+            esac ;;
         *)
-            case "$current" in
+            case "$1" in
                 *_wanji.ipk) return 1 ;;
-                *) [ "$new" \> "$current" ] && return 0 || return 1 ;;
-            esac
-            ;;
+                *) [ "$2" \> "$1" ] ;;
+            esac ;;
     esac
 }
 
-# ==================== Gitee 更新主函数 ====================
 update_from_gitee() {
-    local main_pkg="$1"
-    local repo="$2"
-    local app_name=""
+    local pkg="$1" repo="$2"
+    local app_name="${pkg#luci-app-}" app_name="${app_name#luci-theme-}"
     
-    case "$main_pkg" in
-        luci-app-*)   app_name="${main_pkg#luci-app-}" ;;
-        luci-theme-*) app_name="${main_pkg#luci-theme-}" ;;
-        *)            app_name="$main_pkg" ;;
-    esac
-    
-    log "  从 Gitee 更新 $main_pkg (仓库: $repo)"
+    log "  从 Gitee 更新 $pkg (仓库: $repo)"
     backup_config
     
-    local sys_arch=$(get_system_arch)
-    local api_url="https://gitee.com/api/v5/repos/${repo}/releases/latest"
-    local release_json=$(curl -s "$api_url")
+    local arch=$(get_system_arch)
+    local json=$(curl -s "https://gitee.com/api/v5/repos/${repo}/releases/latest")
     
-    if [ -z "$release_json" ]; then
-        log "  ✗ API 请求失败"
-        cleanup_backup
-        return 1
-    fi
+    [ -z "$json" ] && { log "  ✗ API 请求失败"; cleanup_backup; return 1; }
     
-    local latest_version=$(echo "$release_json" | grep -o '"tag_name":"[^"]*"' | cut -d'"' -f4)
+    local version=$(echo "$json" | grep -o '"tag_name":"[^"]*"' | head -n1 | cut -d'"' -f4)
+    [ -z "$version" ] && { log "  ✗ 无法获取版本"; cleanup_backup; return 1; }
     
-    if [ -z "$latest_version" ]; then
-        log "  ✗ 未能获取最新版本"
-        cleanup_backup
-        return 1
-    fi
+    log "  Gitee 最新版本: $version"
     
-    log "  Gitee 最新版本: $latest_version"
+    local files=$(echo "$json" | grep -o '"browser_download_url":"[^"]*\.ipk"' | cut -d'"' -f4 | xargs -n1 basename)
+    [ -z "$files" ] && { log "  ✗ 未找到 ipk 文件"; cleanup_backup; return 1; }
     
-    local all_files=$(echo "$release_json" | grep -o '"browser_download_url":"[^"]*\.ipk"' | cut -d'"' -f4 | xargs -n1 basename)
-    
-    if [ -z "$all_files" ]; then
-        log "  ✗ 未找到任何 ipk 文件"
-        cleanup_backup
-        return 1
-    fi
-    
-    # 智能分类
-    local main_binary="" luci_pkg="" i18n_pkg=""
-    
-    while IFS= read -r filename; do
-        [ -z "$filename" ] && continue
-        
-        case "$filename" in
-            *luci-i18n-*${app_name}*zh-cn*.ipk)
-                [ -z "$i18n_pkg" ] && i18n_pkg="$filename"
-                ;;
-            luci-app-${app_name}_*.ipk|luci-theme-${app_name}_*.ipk)
-                [ -z "$luci_pkg" ] && luci_pkg="$filename"
-                ;;
+    # 智能分类 ipk 文件
+    local main="" luci="" i18n=""
+    while IFS= read -r f; do
+        [ -z "$f" ] && continue
+        case "$f" in
+            *luci-i18n-*${app_name}*zh-cn*.ipk) [ -z "$i18n" ] && i18n="$f" ;;
+            luci-app-${app_name}_*.ipk|luci-theme-${app_name}_*.ipk) [ -z "$luci" ] && luci="$f" ;;
             *${app_name}*.ipk)
-                case "$filename" in
+                case "$f" in
                     luci-*|*-luci-*) ;;
-                    *)
-                        is_arch_match "$filename" "$sys_arch" && \
-                        is_better_binary "$main_binary" "$filename" && \
-                        main_binary="$filename"
-                        ;;
-                esac
-                ;;
+                    *) is_arch_match "$f" "$arch" && is_better_binary "$main" "$f" && main="$f" ;;
+                esac ;;
         esac
     done <<EOF
-$all_files
+$files
 EOF
     
-    # 构建安装顺序
-    local install_order=""
-    [ -n "$main_binary" ] && install_order="$main_binary"
-    [ -n "$luci_pkg" ] && install_order="$install_order $luci_pkg"
-    [ -n "$i18n_pkg" ] && install_order="$install_order $i18n_pkg"
+    local order="$main $luci $i18n"
+    [ -z "$(echo $order | tr -d ' ')" ] && { log "  ✗ 未找到匹配包"; cleanup_backup; return 1; }
     
-    if [ -z "$install_order" ]; then
-        log "  ✗ 未找到匹配的包"
-        cleanup_backup
-        return 1
-    fi
+    log "  安装计划: $order"
     
-    log "  安装计划: $install_order"
-    
-    # 下载并安装
-    local success_count=0
-    
-    for filename in $install_order; do
-        filename=$(echo "$filename" | xargs)
-        [ -z "$filename" ] && continue
+    local count=0
+    for file in $order; do
+        [ -z "$file" ] && continue
+        local url=$(echo "$json" | grep -o "\"browser_download_url\":\"[^\"]*${file}\"" | cut -d'"' -f4)
+        [ -z "$url" ] && { log "  ⚠ 未找到 $file 下载链接"; continue; }
         
-        local download_url=$(echo "$release_json" | grep -o "\"browser_download_url\":\"[^\"]*${filename}\"" | cut -d'"' -f4)
+        log "  下载: $file"
+        curl -fsSL -o "/tmp/$file" "$url" || { log "  ✗ 下载失败"; rm -f /tmp/*${app_name}*.ipk; restore_config; return 1; }
         
-        if [ -z "$download_url" ]; then
-            log "  ⚠ 未找到 $filename 的下载链接"
-            continue
+        log "  安装 $file..."
+        if ! opkg install --force-reinstall "/tmp/$file" >>"$LOG_FILE" 2>&1; then
+            log "  ✗ 首次安装失败，尝试卸载重装..."
+            local name=$(echo "$file" | sed 's/_.*\.ipk$//')
+            opkg remove "$name" >>"$LOG_FILE" 2>&1
+            opkg install "/tmp/$file" >>"$LOG_FILE" 2>&1 || \
+                { log "  ✗ 重装失败"; rm -f /tmp/*${app_name}*.ipk; restore_config; return 1; }
         fi
-        
-        log "  下载: $filename"
-        if ! curl -fsSL -o "/tmp/$filename" "$download_url"; then
-            log "  ✗ 下载失败"
-            rm -f /tmp/*${app_name}*.ipk 2>/dev/null
-            restore_config
-            return 1
-        fi
-        
-        log "  安装 $filename..."
-        if ! opkg install --force-reinstall "/tmp/$filename" >>"$LOG_FILE" 2>&1; then
-            log "  ✗ 首次安装失败，尝试卸载后重新安装..."
-            
-            local pkg_name=$(echo "$filename" | sed 's/_.*\.ipk$//')
-            log "  卸载 $pkg_name..."
-            opkg remove "$pkg_name" >>"$LOG_FILE" 2>&1
-            
-            log "  重新安装 $filename..."
-            if opkg install "/tmp/$filename" >>"$LOG_FILE" 2>&1; then
-                log "  ✓ $filename 重新安装成功"
-                success_count=$((success_count + 1))
-            else
-                log "  ✗ $filename 重新安装失败"
-                rm -f /tmp/*${app_name}*.ipk 2>/dev/null
-                restore_config
-                return 1
-            fi
-        else
-            log "  ✓ $filename 安装成功"
-            success_count=$((success_count + 1))
-        fi
+        log "  ✓ $file 安装成功"
+        count=$((count + 1))
     done
     
     rm -f /tmp/*${app_name}*.ipk 2>/dev/null
     restore_config
-    
-    log "  ✓ $main_pkg 更新完成 (版本: $latest_version, 共安装 $success_count 个包)"
+    log "  ✓ $pkg 更新完成 (版本: $version, 共 $count 个包)"
     return 0
 }
 
 # ==================== 官方源更新 ====================
 update_official_packages() {
     log "======================================"
-    log "步骤1: 更新官方源中的包"
+    log "步骤: 更新官方源中的包"
     log "======================================"
     
     log "更新软件源..."
-    if ! opkg update >>"$LOG_FILE" 2>&1; then
-        log "✗ 软件源更新失败"
-        return 1
-    fi
+    opkg update >>"$LOG_FILE" 2>&1 || { log "✗ 软件源更新失败"; return 1; }
     log "✓ 软件源更新成功"
     
-    OFFICIAL_UPDATED=0
-    OFFICIAL_SKIPPED=0
-    OFFICIAL_EXCLUDED=0
-    OFFICIAL_FAILED=0
-    OFFICIAL_NOT_IN_REPO=0
-    
-    OFFICIAL_PACKAGES=""
+    OFFICIAL_UPDATED=0 OFFICIAL_SKIPPED=0 OFFICIAL_EXCLUDED=0 
+    OFFICIAL_FAILED=0 OFFICIAL_NOT_IN_REPO=0
+    UPDATED_PACKAGES="" FAILED_PACKAGES=""
     NON_OFFICIAL_PACKAGES=""
-    UPDATED_PACKAGES=""
-    FAILED_PACKAGES=""
     
-    local installed_pkgs=$(get_installed_packages)
-    local total=$(echo "$installed_pkgs" | wc -l)
-    
-    log "检测到 $total 个已安装的软件包（已排除语言包）"
+    local pkgs=$(opkg list-installed | awk '{print $1}' | grep -v "^luci-i18n-")
+    log "检测到 $(echo "$pkgs" | wc -l) 个已安装包（已排除语言包）"
     log "--------------------------------------"
     
-    for pkg in $installed_pkgs; do
+    for pkg in $pkgs; do
         if is_package_excluded "$pkg"; then
             OFFICIAL_EXCLUDED=$((OFFICIAL_EXCLUDED + 1))
             continue
         fi
         
-        if check_package_in_repo "$pkg"; then
-            OFFICIAL_PACKAGES="$OFFICIAL_PACKAGES $pkg"
+        if opkg info "$pkg" 2>/dev/null | grep -q "^Description:"; then
+            local cur=$(get_package_version list-installed "$pkg")
+            local new=$(get_package_version list "$pkg")
             
-            local current_ver=$(get_installed_version "$pkg")
-            local repo_ver=$(get_repo_version "$pkg")
-            
-            if [ "$current_ver" != "$repo_ver" ]; then
-                log "↻ $pkg: 当前 $current_ver → 仓库 $repo_ver"
+            if [ "$cur" != "$new" ]; then
+                log "↻ $pkg: $cur → $new"
                 log "  正在升级..."
-                
                 if opkg upgrade "$pkg" >>"$LOG_FILE" 2>&1; then
                     log "  ✓ 升级成功"
-                    UPDATED_PACKAGES="$UPDATED_PACKAGES\n    - $pkg: $current_ver → $repo_ver"
+                    UPDATED_PACKAGES="${UPDATED_PACKAGES}\n    - $pkg: $cur → $new"
                     OFFICIAL_UPDATED=$((OFFICIAL_UPDATED + 1))
                     install_language_package "$pkg"
                 else
                     log "  ✗ 升级失败"
-                    FAILED_PACKAGES="$FAILED_PACKAGES\n    - $pkg"
+                    FAILED_PACKAGES="${FAILED_PACKAGES}\n    - $pkg"
                     OFFICIAL_FAILED=$((OFFICIAL_FAILED + 1))
                 fi
             else
-                log "○ $pkg: $current_ver (已是最新)"
+                log "○ $pkg: $cur (已是最新)"
                 OFFICIAL_SKIPPED=$((OFFICIAL_SKIPPED + 1))
             fi
         else
@@ -584,54 +318,38 @@ update_official_packages() {
     log "  ⊗ 不在官方源: $OFFICIAL_NOT_IN_REPO 个"
     log "  ⊝ 排除: $OFFICIAL_EXCLUDED 个"
     log "  ✗ 失败: $OFFICIAL_FAILED 个"
-    
     return 0
 }
 
 # ==================== Gitee 源更新 ====================
 update_gitee_packages() {
     log "======================================"
-    log "步骤2: 检查并更新 Gitee 源的包"
+    log "步骤: 检查并更新 Gitee 源的包"
     log "======================================"
     
-    GITEE_UPDATED=0
-    GITEE_SAME=0
-    GITEE_NOTFOUND=0
-    GITEE_FAILED=0
+    GITEE_UPDATED=0 GITEE_SAME=0 GITEE_NOTFOUND=0 GITEE_FAILED=0
+    GITEE_UPDATED_LIST="" GITEE_NOTFOUND_LIST="" GITEE_FAILED_LIST=""
     
-    GITEE_UPDATED_LIST=""
-    GITEE_NOTFOUND_LIST=""
-    GITEE_FAILED_LIST=""
-    
-    # 获取检查列表：luci-app-*、luci-theme-* 和 lucky
     local check_list=""
     for pkg in $NON_OFFICIAL_PACKAGES; do
         case "$pkg" in
-            luci-app-*|luci-theme-*|lucky)
-                check_list="$check_list $pkg"
-                ;;
+            luci-app-*|luci-theme-*|lucky) check_list="$check_list $pkg" ;;
         esac
     done
     
-    if [ -z "$check_list" ]; then
-        log "没有需要从 Gitee 检查的插件"
-        return 0
-    fi
+    [ -z "$check_list" ] && { log "没有需要从 Gitee 检查的插件"; return 0; }
     
-    local total=$(echo "$check_list" | wc -w)
-    log "需要从 Gitee 检查的插件: $total 个"
+    log "需要从 Gitee 检查的插件: $(echo $check_list | wc -w) 个"
     log "--------------------------------------"
     
     for pkg in $check_list; do
-        local current_ver=$(get_installed_version "$pkg")
-        
-        log "🔍 检查 $pkg (当前版本: $current_ver)"
+        local cur=$(get_package_version list-installed "$pkg")
+        log "🔍 检查 $pkg (当前版本: $cur)"
         
         local repo=$(find_gitee_repo "$pkg")
-        
-        if [ $? -ne 0 ] || [ -z "$repo" ]; then
+        if [ $? -ne 0 ]; then
             log "  ⊗ 未找到 Gitee 仓库 (已尝试: $GITEE_OWNERS)"
-            GITEE_NOTFOUND_LIST="$GITEE_NOTFOUND_LIST\n    - $pkg"
+            GITEE_NOTFOUND_LIST="${GITEE_NOTFOUND_LIST}\n    - $pkg"
             GITEE_NOTFOUND=$((GITEE_NOTFOUND + 1))
             log ""
             continue
@@ -639,34 +357,31 @@ update_gitee_packages() {
         
         log "  ✓ 找到仓库: $repo"
         
-        local gitee_ver=$(get_gitee_version "$repo")
-        
-        if [ -z "$gitee_ver" ]; then
-            log "  ✗ 无法获取 Gitee 版本信息"
-            GITEE_FAILED_LIST="$GITEE_FAILED_LIST\n    - $pkg (无法获取版本)"
+        local ver=$(get_gitee_version "$repo")
+        if [ -z "$ver" ]; then
+            log "  ✗ 无法获取版本信息"
+            GITEE_FAILED_LIST="${GITEE_FAILED_LIST}\n    - $pkg (无法获取版本)"
             GITEE_FAILED=$((GITEE_FAILED + 1))
             log ""
             continue
         fi
         
-        log "  当前版本: $current_ver"
-        log "  Gitee 版本: $gitee_ver"
+        log "  当前版本: $cur"
+        log "  Gitee 版本: $ver"
         
-        if compare_versions "$current_ver" "$gitee_ver"; then
-            log "  ○ 版本相同（标准化后），无需更新"
+        if compare_versions "$cur" "$ver"; then
+            log "  ○ 版本相同，无需更新"
             GITEE_SAME=$((GITEE_SAME + 1))
         else
             log "  ↻ 版本不同，开始更新..."
-            
             if update_from_gitee "$pkg" "$repo"; then
-                GITEE_UPDATED_LIST="$GITEE_UPDATED_LIST\n    - $pkg: $current_ver → $gitee_ver"
+                GITEE_UPDATED_LIST="${GITEE_UPDATED_LIST}\n    - $pkg: $cur → $ver"
                 GITEE_UPDATED=$((GITEE_UPDATED + 1))
             else
-                GITEE_FAILED_LIST="$GITEE_FAILED_LIST\n    - $pkg (更新失败)"
+                GITEE_FAILED_LIST="${GITEE_FAILED_LIST}\n    - $pkg (更新失败)"
                 GITEE_FAILED=$((GITEE_FAILED + 1))
             fi
         fi
-        
         log ""
     done
     
@@ -676,17 +391,73 @@ update_gitee_packages() {
     log "  ○ 已是最新: $GITEE_SAME 个"
     log "  ⊗ 未找到仓库: $GITEE_NOTFOUND 个"
     log "  ✗ 失败: $GITEE_FAILED 个"
-    
     return 0
+}
+
+# ==================== 脚本自更新 ====================
+check_script_update() {
+    log "======================================"
+    log "检查脚本更新"
+    log "======================================"
+    log "当前脚本版本: $SCRIPT_VERSION"
+    
+    local temp="/tmp/auto-update-new.sh"
+    local url="" ver=""
+    
+    for base in $SCRIPT_URLS; do
+        local full="${base}${SCRIPT_PATH}"
+        local domain=$(echo "$base" | sed 's|https://||' | sed 's|/.*||')
+        
+        log "尝试从 $domain 获取脚本..."
+        
+        if curl -fsSL --connect-timeout 10 --max-time 30 "$full" -o "$temp" 2>/dev/null; then
+            if [ -f "$temp" ] && [ -s "$temp" ] && head -n1 "$temp" | grep -q "^#!/"; then
+                ver=$(grep -o 'SCRIPT_VERSION="[^"]*"' "$temp" | head -n1 | cut -d'"' -f2)
+                [ -n "$ver" ] && { url="$full"; log "✓ 从 $domain 获取成功"; break; }
+            fi
+        fi
+        log "✗ $domain 访问失败"
+        rm -f "$temp"
+    done
+    
+    [ -z "$ver" ] && { log "✗ 无法获取脚本"; rm -f "$temp"; log ""; return 1; }
+    
+    log "远程脚本版本: $ver"
+    
+    if [ "$SCRIPT_VERSION" = "$ver" ]; then
+        log "○ 脚本已是最新版本"
+        rm -f "$temp"
+        log ""
+        return 0
+    fi
+    
+    log "↻ 发现新版本: $SCRIPT_VERSION → $ver"
+    log "开始更新脚本..."
+    
+    local path=$(readlink -f "$0")
+    if mv "$temp" "$path"; then
+        chmod +x "$path"
+        log "✓ 脚本更新成功！"
+        log "版本: $SCRIPT_VERSION → $ver"
+        log "来源: $url"
+        log ""
+        log "======================================"
+        log "脚本已更新，重新启动新版本..."
+        log "======================================"
+        log ""
+        exec "$path"
+    else
+        log "✗ 脚本更新失败"
+        rm -f "$temp"
+        log ""
+        return 1
+    fi
 }
 
 # ==================== 报告生成 ====================
 generate_report() {
-    local has_updates=0
-    [ $OFFICIAL_UPDATED -gt 0 ] || [ $GITEE_UPDATED -gt 0 ] && has_updates=1
-    
-    local report=""
-    report="${report}OpenWrt 系统更新报告\n"
+    local updates=$((OFFICIAL_UPDATED + GITEE_UPDATED))
+    local report="插件更新报告 版本$SCRIPT_VERSION \n"
     report="${report}======================================\n"
     report="${report}时间: $(date '+%Y-%m-%d %H:%M:%S')\n"
     report="${report}设备: $DEVICE_MODEL\n\n"
@@ -711,7 +482,7 @@ generate_report() {
     [ -n "$GITEE_FAILED_LIST" ] && report="${report}$GITEE_FAILED_LIST\n"
     report="${report}\n"
     
-    [ $has_updates -eq 0 ] && report="${report}[提示] 所有软件包均为最新版本，无需更新\n\n"
+    [ $updates -eq 0 ] && report="${report}[提示] 所有软件包均为最新版本\n\n"
     
     report="${report}======================================\n"
     report="${report}详细日志: /tmp/auto-update-latest.log"
@@ -725,14 +496,24 @@ run_update() {
     log "OpenWrt 自动更新脚本 v${SCRIPT_VERSION}"
     log "开始执行 (PID: $$)"
     log "日志文件: $LOG_FILE"
+    log "安装优先级: $([ "$INSTALL_PRIORITY" = "1" ] && echo "官方源优先" || echo "Gitee 优先")"
     log "======================================"
     log ""
     
-    # 检查脚本更新
     check_script_update
     
-    update_official_packages
-    update_gitee_packages
+    # 根据优先级决定执行顺序
+    if [ "$INSTALL_PRIORITY" = "1" ]; then
+        log "[策略] 官方源优先，Gitee 补充"
+        log ""
+        update_official_packages
+        update_gitee_packages
+    else
+        log "[策略] Gitee 优先，官方源补充"
+        log ""
+        update_gitee_packages
+        update_official_packages
+    fi
     
     log "======================================"
     log "✓ 更新流程完成"
@@ -745,8 +526,6 @@ run_update() {
     
     cp "$LOG_FILE" "/tmp/auto-update-latest.log" 2>/dev/null
     log "日志已保存到: /tmp/auto-update-latest.log"
-    
-    return 0
 }
 
 # 执行更新
