@@ -1,15 +1,14 @@
 #!/bin/sh
-# -*- coding: utf-8 -*-
 
 # ==================== 全局配置 ====================
-SCRIPT_VERSION="1.0.2"
+SCRIPT_VERSION="1.0.3"
 LOG_FILE="/tmp/auto-update-$(date +%Y%m%d-%H%M%S).log"
 CONFIG_BACKUP_DIR="/tmp/config_Backup"
 DEVICE_MODEL="$(cat /tmp/sysinfo/model 2>/dev/null || echo '未知设备')"
 PUSH_TITLE="$DEVICE_MODEL 插件更新通知"
 
 # 安装优先级：1=官方优先，其他=Gitee优先
-INSTALL_PRIORITY=1
+INSTALL_PRIORITY=0
 
 # Gitee 配置
 GITEE_OWNERS="whzhni sirpdboy kiddin9"
@@ -81,7 +80,7 @@ install_language_package() {
     opkg_check list-installed "$lang_pkg" && action="升级"
     
     log "    ${action}语言包 $lang_pkg..."
-    if opkg ${action} "$lang_pkg" >>"$LOG_FILE" 2>&1; then
+    if opkg $action "$lang_pkg" >>"$LOG_FILE" 2>&1; then
         log "    ✓ $lang_pkg ${action}成功"
     else
         log "    ⚠ $lang_pkg ${action}失败（不影响主程序）"
@@ -148,6 +147,50 @@ send_push() {
     
     log "✗ 推送失败: $response"
     return 1
+}
+
+# ==================== 包分类函数 ====================
+classify_packages() {
+    log "======================================"
+    log "步骤: 分类已安装的包"
+    log "======================================"
+    
+    log "更新软件源..."
+    opkg update >>"$LOG_FILE" 2>&1 || { log "✗ 软件源更新失败"; return 1; }
+    log "✓ 软件源更新成功"
+    
+    # 初始化全局变量
+    OFFICIAL_PACKAGES=""
+    NON_OFFICIAL_PACKAGES=""
+    EXCLUDED_COUNT=0
+    
+    local pkgs=$(opkg list-installed | awk '{print $1}' | grep -v "^luci-i18n-")
+    local total=$(echo "$pkgs" | wc -l)
+    
+    log "检测到 $total 个已安装包（已排除语言包）"
+    log "分类中..."
+    
+    for pkg in $pkgs; do
+        if is_package_excluded "$pkg"; then
+            EXCLUDED_COUNT=$((EXCLUDED_COUNT + 1))
+        elif opkg info "$pkg" 2>/dev/null | grep -q "^Description:"; then
+            OFFICIAL_PACKAGES="$OFFICIAL_PACKAGES $pkg"
+        else
+            NON_OFFICIAL_PACKAGES="$NON_OFFICIAL_PACKAGES $pkg"
+        fi
+    done
+    
+    local official_count=$(echo $OFFICIAL_PACKAGES | wc -w)
+    local non_official_count=$(echo $NON_OFFICIAL_PACKAGES | wc -w)
+    
+    log "--------------------------------------"
+    log "包分类完成:"
+    log "  ✓ 官方源: $official_count 个"
+    log "  ⊗ 非官方源: $non_official_count 个"
+    log "  ⊝ 排除: $EXCLUDED_COUNT 个"
+    log ""
+    
+    return 0
 }
 
 # ==================== Gitee 函数 ====================
@@ -264,50 +307,33 @@ update_official_packages() {
     log "步骤: 更新官方源中的包"
     log "======================================"
     
-    log "更新软件源..."
-    opkg update >>"$LOG_FILE" 2>&1 || { log "✗ 软件源更新失败"; return 1; }
-    log "✓ 软件源更新成功"
-    
-    OFFICIAL_UPDATED=0 OFFICIAL_SKIPPED=0 OFFICIAL_EXCLUDED=0 
-    OFFICIAL_FAILED=0 OFFICIAL_NOT_IN_REPO=0
+    OFFICIAL_UPDATED=0 OFFICIAL_SKIPPED=0 OFFICIAL_FAILED=0
     UPDATED_PACKAGES="" FAILED_PACKAGES=""
-    NON_OFFICIAL_PACKAGES=""
     
-    local pkgs=$(opkg list-installed | awk '{print $1}' | grep -v "^luci-i18n-")
-    log "检测到 $(echo "$pkgs" | wc -l) 个已安装包（已排除语言包）"
+    local count=$(echo $OFFICIAL_PACKAGES | wc -w)
+    log "需要检查的官方源包: $count 个"
     log "--------------------------------------"
     
-    for pkg in $pkgs; do
-        if is_package_excluded "$pkg"; then
-            OFFICIAL_EXCLUDED=$((OFFICIAL_EXCLUDED + 1))
-            continue
-        fi
+    for pkg in $OFFICIAL_PACKAGES; do
+        local cur=$(get_package_version list-installed "$pkg")
+        local new=$(get_package_version list "$pkg")
         
-        if opkg info "$pkg" 2>/dev/null | grep -q "^Description:"; then
-            local cur=$(get_package_version list-installed "$pkg")
-            local new=$(get_package_version list "$pkg")
-            
-            if [ "$cur" != "$new" ]; then
-                log "↻ $pkg: $cur → $new"
-                log "  正在升级..."
-                if opkg upgrade "$pkg" >>"$LOG_FILE" 2>&1; then
-                    log "  ✓ 升级成功"
-                    UPDATED_PACKAGES="${UPDATED_PACKAGES}\n    - $pkg: $cur → $new"
-                    OFFICIAL_UPDATED=$((OFFICIAL_UPDATED + 1))
-                    install_language_package "$pkg"
-                else
-                    log "  ✗ 升级失败"
-                    FAILED_PACKAGES="${FAILED_PACKAGES}\n    - $pkg"
-                    OFFICIAL_FAILED=$((OFFICIAL_FAILED + 1))
-                fi
+        if [ "$cur" != "$new" ]; then
+            log "↻ $pkg: $cur → $new"
+            log "  正在升级..."
+            if opkg upgrade "$pkg" >>"$LOG_FILE" 2>&1; then
+                log "  ✓ 升级成功"
+                UPDATED_PACKAGES="${UPDATED_PACKAGES}\n    - $pkg: $cur → $new"
+                OFFICIAL_UPDATED=$((OFFICIAL_UPDATED + 1))
+                install_language_package "$pkg"
             else
-                log "○ $pkg: $cur (已是最新)"
-                OFFICIAL_SKIPPED=$((OFFICIAL_SKIPPED + 1))
+                log "  ✗ 升级失败"
+                FAILED_PACKAGES="${FAILED_PACKAGES}\n    - $pkg"
+                OFFICIAL_FAILED=$((OFFICIAL_FAILED + 1))
             fi
         else
-            NON_OFFICIAL_PACKAGES="$NON_OFFICIAL_PACKAGES $pkg"
-            log "⊗ $pkg: 不在官方源"
-            OFFICIAL_NOT_IN_REPO=$((OFFICIAL_NOT_IN_REPO + 1))
+            log "○ $pkg: $cur (已是最新)"
+            OFFICIAL_SKIPPED=$((OFFICIAL_SKIPPED + 1))
         fi
     done
     
@@ -315,9 +341,9 @@ update_official_packages() {
     log "官方源检查完成:"
     log "  ✓ 升级: $OFFICIAL_UPDATED 个"
     log "  ○ 已是最新: $OFFICIAL_SKIPPED 个"
-    log "  ⊗ 不在官方源: $OFFICIAL_NOT_IN_REPO 个"
-    log "  ⊝ 排除: $OFFICIAL_EXCLUDED 个"
     log "  ✗ 失败: $OFFICIAL_FAILED 个"
+    log ""
+    
     return 0
 }
 
@@ -330,6 +356,7 @@ update_gitee_packages() {
     GITEE_UPDATED=0 GITEE_SAME=0 GITEE_NOTFOUND=0 GITEE_FAILED=0
     GITEE_UPDATED_LIST="" GITEE_NOTFOUND_LIST="" GITEE_FAILED_LIST=""
     
+    # 筛选需要检查的包
     local check_list=""
     for pkg in $NON_OFFICIAL_PACKAGES; do
         case "$pkg" in
@@ -337,9 +364,10 @@ update_gitee_packages() {
         esac
     done
     
-    [ -z "$check_list" ] && { log "没有需要从 Gitee 检查的插件"; return 0; }
+    local count=$(echo $check_list | wc -w)
+    [ $count -eq 0 ] && { log "没有需要从 Gitee 检查的插件"; log ""; return 0; }
     
-    log "需要从 Gitee 检查的插件: $(echo $check_list | wc -w) 个"
+    log "需要从 Gitee 检查的插件: $count 个"
     log "--------------------------------------"
     
     for pkg in $check_list; do
@@ -391,6 +419,8 @@ update_gitee_packages() {
     log "  ○ 已是最新: $GITEE_SAME 个"
     log "  ⊗ 未找到仓库: $GITEE_NOTFOUND 个"
     log "  ✗ 失败: $GITEE_FAILED 个"
+    log ""
+    
     return 0
 }
 
@@ -435,6 +465,14 @@ check_script_update() {
     log "开始更新脚本..."
     
     local path=$(readlink -f "$0")
+    
+    # 保留用户配置
+    local current_priority=$(grep "^INSTALL_PRIORITY=" "$path" | head -n1 | cut -d'=' -f2)
+    if [ -n "$current_priority" ]; then
+        log "保留用户配置: INSTALL_PRIORITY=$current_priority"
+        sed -i "s/^INSTALL_PRIORITY=[0-9]\+$/INSTALL_PRIORITY=$current_priority/" "$temp"
+    fi
+    
     if mv "$temp" "$path"; then
         chmod +x "$path"
         log "✓ 脚本更新成功！"
@@ -457,17 +495,23 @@ check_script_update() {
 # ==================== 报告生成 ====================
 generate_report() {
     local updates=$((OFFICIAL_UPDATED + GITEE_UPDATED))
-    local report="插件更新报告 版本$SCRIPT_VERSION \n"
+    local strategy="官方源优先"
+    [ "$INSTALL_PRIORITY" != "1" ] && strategy="Gitee 优先"
+    
+    local non_official_count=$(echo $NON_OFFICIAL_PACKAGES | wc -w)
+    
+    local report="脚本版本: $SCRIPT_VERSION\n"
     report="${report}======================================\n"
     report="${report}时间: $(date '+%Y-%m-%d %H:%M:%S')\n"
-    report="${report}设备: $DEVICE_MODEL\n\n"
+    report="${report}设备: $DEVICE_MODEL\n"
+    report="${report}策略: $strategy\n\n"
     
     report="${report}官方源检查完成:\n"
     report="${report}  ✓ 升级: $OFFICIAL_UPDATED 个\n"
     [ -n "$UPDATED_PACKAGES" ] && report="${report}$UPDATED_PACKAGES\n"
     report="${report}  ○ 已是最新: $OFFICIAL_SKIPPED 个\n"
-    report="${report}  ⊗ 不在官方源: $OFFICIAL_NOT_IN_REPO 个\n"
-    report="${report}  ⊝ 排除: $OFFICIAL_EXCLUDED 个\n"
+    report="${report}  ⊗ 不在官方源: $non_official_count 个\n"
+    report="${report}  ⊝ 排除: $EXCLUDED_COUNT 个\n"
     report="${report}  ✗ 失败: $OFFICIAL_FAILED 个\n"
     [ -n "$FAILED_PACKAGES" ] && report="${report}$FAILED_PACKAGES\n"
     report="${report}\n"
@@ -485,7 +529,7 @@ generate_report() {
     [ $updates -eq 0 ] && report="${report}[提示] 所有软件包均为最新版本\n\n"
     
     report="${report}======================================\n"
-    report="${report}详细日志: /tmp/auto-update-latest.log"
+    report="${report}详细日志: $LOG_FILE"
     
     echo "$report"
 }
@@ -502,7 +546,10 @@ run_update() {
     
     check_script_update
     
-    # 根据优先级决定执行顺序
+    # 先分类所有包
+    classify_packages || return 1
+    
+    # 根据优先级决定更新顺序
     if [ "$INSTALL_PRIORITY" = "1" ]; then
         log "[策略] 官方源优先，Gitee 补充"
         log ""
@@ -523,9 +570,6 @@ run_update() {
     log "$report"
     
     send_push "$PUSH_TITLE" "$report"
-    
-    cp "$LOG_FILE" "/tmp/auto-update-latest.log" 2>/dev/null
-    log "日志已保存到: /tmp/auto-update-latest.log"
 }
 
 # 执行更新
