@@ -127,11 +127,11 @@ install_pkg() {
     local lang=""
     
     pkg=$(echo "$pkg" | xargs)
-    [ -z "$pkg" ] && return 2
+    [ -z "$pkg" ] && return 3
     
     if is_installed "$pkg"; then
         log "  $pkg 已安装，跳过"
-        return 0
+        return 2
     fi
     
     if ! is_exists "$pkg"; then
@@ -171,7 +171,7 @@ install_pkg() {
         fi
     fi
     
-    return 0
+    return 0  
 }
 
 install_official() {
@@ -200,8 +200,8 @@ install_official() {
         
         install_pkg "$pkg"
         case $? in
-            0) ok=$((ok + 1)) ;;
-            1) 
+            0) ok=$((ok + 1)) ;;                    
+            1)                                       
                 if ! is_exists "$pkg"; then
                     FAILED="$FAILED $pkg"
                     notin=$((notin + 1))
@@ -209,7 +209,8 @@ install_official() {
                     fail=$((fail + 1))
                 fi
                 ;;
-            2) skip=$((skip + 1)) ;;
+            2) skip=$((skip + 1)) ;;                
+            3) ;;                                   
         esac
     done
     
