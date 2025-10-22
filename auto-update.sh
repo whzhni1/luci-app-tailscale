@@ -372,7 +372,7 @@ update_gitee_packages() {
     
     for pkg in $check_list; do
         local cur=$(get_package_version list-installed "$pkg")
-        log "🔍 检查 $pkg (当前版本: $cur)"
+        log " 检查 $pkg (当前版本: $cur)"
         
         local repo=$(find_gitee_repo "$pkg")
         if [ $? -ne 0 ]; then
