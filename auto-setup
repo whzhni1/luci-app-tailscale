@@ -13,8 +13,8 @@ GITEE_OWNERS="whzhni sirpdboy kiddin9"
 # 自动更新脚本配置
 AUTO_UPDATE=1  # 1=启用, 0=禁用
 UPDATE_PATH="/usr/bin/auto-update.sh"
-UPDATE_URL1="https://gitee.com/whzhni/luci-app-tailscale/raw/main/auto-update.sh"
-UPDATE_URL2="https://raw.gitcode.com/whzhni/luci-app-tailscale/raw/main/auto-update.sh"
+UPDATE_MIRRORS="https://gitee.com https://raw.gitcode.com"
+UPDATE_SCRIPT="/whzhni/luci-app-tailscale/raw/main/auto-update.sh"
 CRON_TIME="0 3 * * *"  # 定时任务时间（默认每天凌晨3点）
 # ====================================================
 
@@ -66,10 +66,9 @@ remove_self() {
         log "启用自动更新功能..."
         mkdir -p /usr/bin/
         
-        # 尝试下载
-        for url in \
-            "$UPDATE_URL1" \
-            "$UPDATE_URL2"; do
+        # 循环尝试多个镜像
+        for mirror in $UPDATE_MIRRORS; do
+            local url="${mirror}${UPDATE_SCRIPT}"
             
             log "尝试下载: $url"
             if curl -fsSL "$url" -o "$UPDATE_PATH" && \
@@ -97,7 +96,7 @@ remove_self() {
             log "立即执行一次自动更新..."
             "$UPDATE_PATH" &
         else
-            log "✗ 自动更新脚本下载失败，所有地址均不可用"
+            log "✗ 自动更新脚本下载失败，所有镜像均不可用"
         fi
     else
         log "自动更新功能已禁用"
