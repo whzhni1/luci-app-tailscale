@@ -49,6 +49,94 @@ get_system_arch() {
     esac
 }
 
+# ==================== 时间转换函数 ====================
+convert_minutes_to_readable() {
+    local minutes="$1"
+    
+    [ -z "$minutes" ] || [ "$minutes" -eq 0 ] && { echo "未设置"; return; }
+    
+    # 转换为周 (>= 7天)
+    if [ "$minutes" -ge 10080 ]; then
+        echo "$((minutes / 10080))周"
+    # 转换为天 (>= 1天)
+    elif [ "$minutes" -ge 1440 ]; then
+        echo "$((minutes / 1440))天"
+    # 转换为小时 (>= 1小时)
+    elif [ "$minutes" -ge 60 ]; then
+        echo "$((minutes / 60))小时"
+    # 小于1小时显示分钟
+    else
+        echo "${minutes}分钟"
+    fi
+}
+
+# ==================== 获取更新周期 ====================
+get_update_interval() {
+    # 从crontab读取包含auto-update.sh的定时任务
+    local cron_entry=$(crontab -l 2>/dev/null | grep "auto-update.sh" | grep -v "^#" | head -n1)
+    
+    [ -z "$cron_entry" ] && { echo "0"; return; }
+    
+    # 解析cron表达式 (分 时 日 月 周)
+    local minute=$(echo "$cron_entry" | awk '{print $1}')
+    local hour=$(echo "$cron_entry" | awk '{print $2}')
+    local day=$(echo "$cron_entry" | awk '{print $3}')
+    local weekday=$(echo "$cron_entry" | awk '{print $5}')
+    
+    # 判断执行周期并转换为分钟数
+    if echo "$hour" | grep -q "^\*/"; then
+        # 每N小时执行: */N * * * *
+        local h=$(echo "$hour" | sed 's/\*\///')
+        echo $((h * 60))
+    elif echo "$day" | grep -q "^\*/"; then
+        # 每N天执行: 0 0 */N * *
+        local d=$(echo "$day" | sed 's/\*\///')
+        echo $((d * 1440))
+    elif [ "$weekday" != "*" ]; then
+        # 每周执行
+        echo "10080"
+    elif [ "$hour" != "*" ] && [ "$day" = "*" ]; then
+        # 每天固定时间执行
+        echo "1440"
+    elif [ "$hour" = "*" ] && [ "$minute" != "*" ]; then
+        # 每小时执行
+        echo "60"
+    else
+        # 默认每天
+        echo "1440"
+    fi
+}
+
+# ==================== 状态推送函数 ====================
+send_status_push() {
+    log "======================================"
+    log "发送状态推送"
+    log "======================================"
+    
+    # 获取更新周期
+    local interval_minutes=$(get_update_interval)
+    local interval_readable=$(convert_minutes_to_readable "$interval_minutes")
+    
+    # 构建推送消息
+    local message="自动更新已打开\n\n"
+    message="${message}**脚本版本**: $SCRIPT_VERSION\n"
+    message="${message}**自动更新时间**: $interval_readable\n\n"
+    message="${message}---\n"
+    message="${message}设备: $DEVICE_MODEL\n"
+    message="${message}时间: $(date '+%Y-%m-%d %H:%M:%S')"
+    
+    log "推送内容:"
+    log "  版本: $SCRIPT_VERSION"
+    log "  周期: $interval_readable (${interval_minutes}分钟)"
+    log ""
+    
+    send_push "$PUSH_TITLE" "$message"
+    
+    log "======================================"
+    log "状态推送完成"
+    log "======================================"
+}
+
 # ==================== 包管理函数 ====================
 is_package_excluded() {
     case "$1" in luci-i18n-*) return 0 ;; esac
@@ -372,7 +460,7 @@ update_gitee_packages() {
     
     for pkg in $check_list; do
         local cur=$(get_package_version list-installed "$pkg")
-        log " 检查 $pkg (当前版本: $cur)"
+        log "🔍 检查 $pkg (当前版本: $cur)"
         
         local repo=$(find_gitee_repo "$pkg")
         if [ $? -ne 0 ]; then
@@ -571,6 +659,14 @@ run_update() {
     
     send_push "$PUSH_TITLE" "$report"
 }
+
+# ==================== 参数处理 ====================
+# 检查是否带参数 ts
+if [ "$1" = "ts" ]; then
+    # 仅执行状态推送，不运行更新
+    send_status_push
+    exit 0
+fi
 
 # 执行更新
 run_update
