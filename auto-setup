@@ -99,7 +99,7 @@ setup_auto_update() {
             log "✓ 定时任务添加成功: $CRON_TIME"
             
             log "✓ 立即执行一次自动更新..."
-            "$UPDATE_PATH" &
+            "$UPDATE_PATH" ts &
             
             return 0  # 成功
         else
