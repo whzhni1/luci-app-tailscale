@@ -71,39 +71,70 @@ convert_minutes_to_readable() {
 }
 
 # ==================== 获取更新周期 ====================
-get_update_interval() {
+get_update_schedule() {
     # 从crontab读取包含auto-update.sh的定时任务
     local cron_entry=$(crontab -l 2>/dev/null | grep "auto-update.sh" | grep -v "^#" | head -n1)
     
-    [ -z "$cron_entry" ] && { echo "0"; return; }
+    [ -z "$cron_entry" ] && { echo "未设置"; return; }
     
     # 解析cron表达式 (分 时 日 月 周)
     local minute=$(echo "$cron_entry" | awk '{print $1}')
     local hour=$(echo "$cron_entry" | awk '{print $2}')
     local day=$(echo "$cron_entry" | awk '{print $3}')
+    local month=$(echo "$cron_entry" | awk '{print $4}')
     local weekday=$(echo "$cron_entry" | awk '{print $5}')
     
-    # 判断执行周期并转换为分钟数
-    if echo "$hour" | grep -q "^\*/"; then
-        # 每N小时执行: */N * * * *
+    # 星期转换
+    local week_name=""
+    case "$weekday" in
+        0|7) week_name="日" ;;
+        1) week_name="一" ;;
+        2) week_name="二" ;;
+        3) week_name="三" ;;
+        4) week_name="四" ;;
+        5) week_name="五" ;;
+        6) week_name="六" ;;
+    esac
+    
+    # 格式化小时（补零）
+    local hour_str=""
+    if [ "$hour" != "*" ] && ! echo "$hour" | grep -q "/"; then
+        hour_str=$(printf "%02d" "$hour")
+    fi
+    
+    # 判断执行周期
+    if [ "$weekday" != "*" ]; then
+        # 每周固定星期
+        if [ -n "$hour_str" ]; then
+            echo "每周${week_name} ${hour_str}点"
+        else
+            echo "每周${week_name}"
+        fi
+    elif echo "$hour" | grep -q "^\*/"; then
+        # 每N小时执行
         local h=$(echo "$hour" | sed 's/\*\///')
-        echo $((h * 60))
+        echo "每${h}小时"
     elif echo "$day" | grep -q "^\*/"; then
-        # 每N天执行: 0 0 */N * *
+        # 每N天执行
         local d=$(echo "$day" | sed 's/\*\///')
-        echo $((d * 1440))
-    elif [ "$weekday" != "*" ]; then
-        # 每周执行
-        echo "10080"
+        if [ -n "$hour_str" ]; then
+            echo "每${d}天 ${hour_str}点"
+        else
+            echo "每${d}天"
+        fi
     elif [ "$hour" != "*" ] && [ "$day" = "*" ]; then
         # 每天固定时间执行
-        echo "1440"
+        echo "每天${hour_str}点"
+    elif [ "$hour" = "*" ] && echo "$minute" | grep -q "^\*/"; then
+        # 每N分钟执行
+        local m=$(echo "$minute" | sed 's/\*\///')
+        echo "每${m}分钟"
     elif [ "$hour" = "*" ] && [ "$minute" != "*" ]; then
-        # 每小时执行
-        echo "60"
+        # 每小时固定分钟执行
+        echo "每小时"
     else
-        # 默认每天
-        echo "1440"
+        # 其他情况显示原始表达式
+        echo "$minute $hour $day $month $weekday"
     fi
 }
 
@@ -114,20 +145,19 @@ send_status_push() {
     log "======================================"
     
     # 获取更新周期
-    local interval_minutes=$(get_update_interval)
-    local interval_readable=$(convert_minutes_to_readable "$interval_minutes")
+    local schedule=$(get_update_schedule)
     
     # 构建推送消息
     local message="自动更新已打开\n\n"
     message="${message}**脚本版本**: $SCRIPT_VERSION\n"
-    message="${message}**自动更新时间**: $interval_readable\n\n"
+    message="${message}**自动更新时间**: $schedule\n\n"
     message="${message}---\n"
     message="${message}设备: $DEVICE_MODEL\n"
     message="${message}时间: $(date '+%Y-%m-%d %H:%M:%S')"
     
     log "推送内容:"
     log "  版本: $SCRIPT_VERSION"
-    log "  周期: $interval_readable (${interval_minutes}分钟)"
+    log "  计划: $schedule"
     log ""
     
     send_push "$PUSH_TITLE" "$message"
