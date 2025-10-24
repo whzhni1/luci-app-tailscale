@@ -5,7 +5,7 @@ STOP=01
 
 # ==================== 用户配置区 ====================
 # 安装优先级：1=优先官方源 其他=优先Gitee
-INSTALL_PRIORITY=0
+INSTALL_PRIORITY=1
 
 # 软件包列表
 PACKAGES="luci-app-wechatpush ddns-scripts-cloudflare luci-app-ddns luci-app-passwall luci-app-openlist luci-app-filemanager luci-i18n-package-manager-zh-cn luci-i18n-firewall-zh-cn vsftpd openssh-sftp-server luci-app-ttyd luci-app-tailscale luci-theme-aurora"
