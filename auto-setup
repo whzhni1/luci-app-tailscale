@@ -8,7 +8,7 @@ STOP=01
 INSTALL_PRIORITY=1
 
 # 软件包列表
-PACKAGES="luci-app-wechatpush luci-app-ddns ddns-scripts-cloudflare luci-app-passwall luci-app-openlist luci-app-filemanager luci-i18n-package-manager-zh-cn luci-i18n-firewall-zh-cn vsftpd openssh-sftp-server luci-app-ttyd luci-app-tailscale luci-theme-aurora"
+PACKAGES="luci-app-wechatpush ddns-scripts-cloudflare luci-app-ddns luci-app-passwall luci-app-openlist luci-app-filemanager luci-i18n-package-manager-zh-cn luci-i18n-firewall-zh-cn vsftpd openssh-sftp-server luci-app-ttyd luci-app-tailscale luci-theme-aurora"
 
 # Gitee 仓库所有者列表（按优先级顺序尝试）
 GITEE_OWNERS="whzhni sirpdboy kiddin9"
@@ -27,10 +27,9 @@ SYS_ARCH=""
 USER_AGENT="Mozilla/5.0 (compatible; OpenWrt-AutoSetup/1.0)"
 API_TPL="https://gitee.com/api/v5/repos/%s/releases/latest"
 
-# 分类后的包列表
-OFFICIAL_PACKAGES=""  # 在官方源中的包
-GITEE_PACKAGES=""     # 不在官方源的包
-FAILED_PACKAGES=""    # 最终失败的包
+# 待安装包列表
+PENDING_PACKAGES=""
+FAILED_PACKAGES=""
 # ====================================================
 
 # 日志函数
@@ -47,6 +46,7 @@ init_arch() {
         case "$arch" in
             aarch64)   SYS_ARCH="arm64" ;;
             armv7l)    SYS_ARCH="armv7" ;;
+            armv6l)    SYS_ARCH="armv7" ;;
             armv6l)    SYS_ARCH="armv6" ;;
             armv5tel)  SYS_ARCH="armv5" ;;
             x86_64)    SYS_ARCH="x86_64" ;;
@@ -101,14 +101,14 @@ setup_auto_update() {
             log "✓ 立即执行一次自动更新..."
             "$UPDATE_PATH" ts &
             
-            return 0  # 成功
+            return 0
         else
             log "✗ 定时任务添加失败"
-            return 1  # 失败
+            return 1
         fi
     else
         log "✗ 自动更新脚本下载失败，所有镜像均不可用"
-        return 1  # 失败
+        return 1
     fi
 }
 
@@ -129,93 +129,12 @@ is_installed() {
     opkg list-installed | grep -q "^$1 "
 }
 
-# 检查包是否存在于官方源（使用 opkg info 判断）
-is_exists() {
-    local pkg="$1"
-    local info=$(opkg info "$pkg" 2>/dev/null)
-    
-    # 检查是否有 Description 字段
-    if echo "$info" | grep -q "^Description:"; then
-        return 0  # 存在
-    else
-        return 1  # 不存在
-    fi
-}
-
-# 分类软件包（根据是否在官方源）
-classify_packages() {
-    log "======================================"
-    log "检查软件包来源..."
-    log "======================================"
-    
-    if [ -z "$PACKAGES" ]; then
-        log "软件包列表为空"
-        return 1
-    fi
-    
-    # 更新软件源
-    log "更新软件源..."
-    if ! opkg update >>"$LOG_FILE" 2>&1; then
-        log "✗ 软件源更新失败"
-        return 1
-    fi
-    log "✓ 软件源更新成功"
-    
-    local official_list="" gitee_list=""
-    local official_count=0 gitee_count=0 installed_count=0
-    
-    for pkg in $PACKAGES; do
-        pkg=$(echo "$pkg" | xargs)
-        [ -z "$pkg" ] && continue
-        
-        # 检查是否已安装
-        if is_installed "$pkg"; then
-            log "⊝ $pkg (已安装)"
-            installed_count=$((installed_count + 1))
-            continue
-        fi
-        
-        # 检查是否在官方源
-        if is_exists "$pkg"; then
-            log "✓ $pkg (官方源)"
-            official_list="$official_list $pkg"
-            official_count=$((official_count + 1))
-        else
-            log "⊗ $pkg (需从Gitee安装)"
-            gitee_list="$gitee_list $pkg"
-            gitee_count=$((gitee_count + 1))
-        fi
-    done
-    
-    # 保存分类结果
-    OFFICIAL_PACKAGES="$official_list"
-    GITEE_PACKAGES="$gitee_list"
-    
-    log "--------------------------------------"
-    log "来源检查完成:"
-    log "  ✓ 官方源可用: $official_count 个"
-    log "  ⊗ 不在官方源: $gitee_count 个"
-    log "  ⊝ 已安装: $installed_count 个"
-    
-    # 显示不在官方源的包列表
-    if [ "$gitee_count" -gt 0 ]; then
-        log "不在官方源的包列表:"
-        for pkg in $gitee_list; do
-            pkg=$(echo "$pkg" | xargs)
-            [ -z "$pkg" ] && continue
-            log "  - $pkg"
-        done
-    fi
-    
-    return 0
-}
-
 # 安装单个包（官方源）
 install_pkg_official() {
     local pkg="$1"
     
     pkg=$(echo "$pkg" | xargs)
-    [ -z "$pkg" ] && return 3
+    [ -z "$pkg" ] && return 1
     
     log "  安装 $pkg..."
     if opkg install "$pkg" >>"$LOG_FILE" 2>&1; then
@@ -232,12 +151,10 @@ install_pkg_official() {
                 ;;
         esac
         
-        if [ -n "$lang" ] && ! is_installed "$lang" && is_exists "$lang"; then
-            log "  安装语言包 $lang..."
+        if [ -n "$lang" ] && ! is_installed "$lang"; then
+            log "  尝试安装语言包 $lang..."
             if opkg install "$lang" >>"$LOG_FILE" 2>&1; then
                 log "  ✓ $lang 安装成功"
-            else
-                log "  ⚠ $lang 安装失败"
             fi
         fi
         
@@ -261,17 +178,38 @@ install_official() {
         return 0
     fi
     
-    log "需要安装的包: $pkg_list"
+    log "需要安装的包:"
+    for pkg in $pkg_list; do
+        pkg=$(echo "$pkg" | xargs)
+        [ -z "$pkg" ] && continue
+        log "  - $pkg"
+    done
     
-    local ok=0 fail=0
+    # 更新软件源
+    log "更新软件源..."
+    if ! opkg update >>"$LOG_FILE" 2>&1; then
+        log "✗ 软件源更新失败"
+        PENDING_PACKAGES="$pkg_list"
+        return 1
+    fi
+    log "✓ 软件源更新成功"
+    
+    local ok=0 fail=0 skip=0
     local failed_list=""
     
     for pkg in $pkg_list; do
         pkg=$(echo "$pkg" | xargs)
         [ -z "$pkg" ] && continue
         
-        install_pkg_official "$pkg"
-        if [ $? -eq 0 ]; then
+        # 检查是否已安装
+        if is_installed "$pkg"; then
+            log "⊝ $pkg 已安装，跳过"
+            skip=$((skip + 1))
+            continue
+        fi
+        
+        # 尝试安装
+        if install_pkg_official "$pkg"; then
             ok=$((ok + 1))
         else
             failed_list="$failed_list $pkg"
@@ -279,10 +217,13 @@ install_official() {
         fi
     done
     
+    PENDING_PACKAGES="$failed_list"
+    
     log "--------------------------------------"
     log "官方源安装完成:"
     log "  ✓ 成功: $ok 个"
     log "  ✗ 失败: $fail 个"
+    log "  ⊝ 跳过: $skip 个"
     
     if [ -n "$failed_list" ]; then
         log "失败列表:"
@@ -291,9 +232,6 @@ install_official() {
             [ -z "$pkg" ] && continue
             log "  - $pkg"
         done
-        
-        # 将失败的包加入到 GITEE_PACKAGES 中
-        GITEE_PACKAGES="$GITEE_PACKAGES $failed_list"
     fi
     
     return 0
@@ -363,7 +301,7 @@ install_pkg_gitee() {
         *)            app="$pkg" ;;
     esac
     
-    log "从 Gitee 安装 $pkg (仓库: $repo)"
+    log "  从 Gitee 安装 $pkg (仓库: $repo)"
     
     # 获取最新版本信息
     local url=$(printf "$API_TPL" "$repo")
@@ -456,7 +394,7 @@ install_pkg_gitee() {
     # 清理临时文件
     rm -f /tmp/*${app}*.ipk 2>/dev/null
     
-    log "✓ $pkg 安装完成"
+    log "  ✓ $pkg 安装完成"
     return 0
 }
 
@@ -473,7 +411,12 @@ install_gitee() {
         return 0
     fi
     
-    log "需要安装的包: $pkg_list"
+    log "需要安装的包:"
+    for pkg in $pkg_list; do
+        pkg=$(echo "$pkg" | xargs)
+        [ -z "$pkg" ] && continue
+        log "  - $pkg"
+    done
     
     local ok=0 fail=0 skip=0
     local done_list="" failed_list=""
@@ -510,7 +453,7 @@ install_gitee() {
         esac
         done_list="$done_list $main "
         
-        # 提前检查是否已安装
+        # 检查是否已安装
         if is_installed "$main"; then
             log "⊝ $main 已安装，跳过"
             skip=$((skip + 1))
@@ -539,7 +482,7 @@ install_gitee() {
         fi
     done
     
-    FAILED_PACKAGES="$failed_list"
+    PENDING_PACKAGES="$failed_list"
     
     log "--------------------------------------"
     log "Gitee 安装完成:"
@@ -561,29 +504,38 @@ install_gitee() {
 
 # 主安装流程
 run_install() {
-    # 先分类所有包
-    if ! classify_packages; then
-        log "✗ 包分类失败"
-        return 1
-    fi
-    
     if [ "$INSTALL_PRIORITY" = "1" ]; then
         # 优先官方源
         log "======================================"
         log "安装策略: 优先官方源 -> Gitee备用"
         log "======================================"
         
-        install_official "$OFFICIAL_PACKAGES"
-        install_gitee "$GITEE_PACKAGES"
+        # 第一轮：从官方源安装所有包
+        PENDING_PACKAGES="$PACKAGES"
+        install_official "$PENDING_PACKAGES"
+        
+        # 第二轮：失败的包从Gitee安装
+        if [ -n "$PENDING_PACKAGES" ]; then
+            install_gitee "$PENDING_PACKAGES"
+        fi
     else
         # 优先Gitee
         log "======================================"
         log "安装策略: 优先Gitee -> 官方源备用"
         log "======================================"
         
-        install_gitee "$GITEE_PACKAGES"
-        install_official "$OFFICIAL_PACKAGES"
+        # 第一轮：从Gitee安装所有包
+        PENDING_PACKAGES="$PACKAGES"
+        install_gitee "$PENDING_PACKAGES"
+        
+        # 第二轮：失败的包从官方源安装
+        if [ -n "$PENDING_PACKAGES" ]; then
+            install_official "$PENDING_PACKAGES"
+        fi
     fi
+    
+    # 记录最终失败的包
+    FAILED_PACKAGES="$PENDING_PACKAGES"
 }
 
 # 主逻辑
@@ -607,7 +559,7 @@ run_setup() {
     if [ -z "$FAILED_PACKAGES" ]; then
         log "✓ 所有软件包安装成功"
     else
-        log "⚠ 以下软件包安装失败"
+        log "⚠ 以下软件包安装失败:"
         for pkg in $FAILED_PACKAGES; do
             pkg=$(echo "$pkg" | xargs)
             [ -z "$pkg" ] && continue
