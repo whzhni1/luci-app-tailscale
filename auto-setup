@@ -5,7 +5,7 @@ STOP=01
 
 # ==================== 用户配置区 ====================
 # 安装优先级：1=优先官方源 其他=优先Gitee
-INSTALL_PRIORITY=0
+INSTALL_PRIORITY=1
 
 # 软件包列表
 PACKAGES="luci-app-wechatpush ddns-scripts-cloudflare luci-app-ddns luci-app-passwall luci-app-openlist luci-app-filemanager luci-i18n-package-manager-zh-cn luci-i18n-firewall-zh-cn vsftpd openssh-sftp-server luci-app-ttyd luci-app-tailscale luci-theme-aurora"
@@ -46,7 +46,6 @@ init_arch() {
         case "$arch" in
             aarch64)   SYS_ARCH="arm64" ;;
             armv7l)    SYS_ARCH="armv7" ;;
-            armv6l)    SYS_ARCH="armv7" ;;
             armv6l)    SYS_ARCH="armv6" ;;
             armv5tel)  SYS_ARCH="armv5" ;;
             x86_64)    SYS_ARCH="x86_64" ;;
@@ -101,14 +100,14 @@ setup_auto_update() {
             log "✓ 立即执行一次自动更新..."
             "$UPDATE_PATH" ts &
             
-            return 0
+            return 0  # 成功
         else
             log "✗ 定时任务添加失败"
-            return 1
+            return 1  # 失败
         fi
     else
         log "✗ 自动更新脚本下载失败，所有镜像均不可用"
-        return 1
+        return 1  # 失败
     fi
 }
 
@@ -569,39 +568,40 @@ run_setup() {
     
     log "完整日志: $LOG_FILE"
     
-    # ========== 核心判断逻辑 ==========
+    # ========== 删除脚本判断逻辑 ==========
     log "======================================"
     log "判断后续操作"
     log "======================================"
     
+    # 判断条件：所有包必须安装成功
     if [ -z "$FAILED_PACKAGES" ]; then
-        # 所有包安装成功
-        log "✓ 所有包安装成功，开始后续处理"
+        log "✓ 所有包安装成功"
         
+        # 判断是否需要配置自动更新
         if [ "$AUTO_UPDATE" = "1" ]; then
-            # 需要配置自动更新
             log "自动更新: 启用"
             
+            # 尝试配置自动更新
             if setup_auto_update; then
                 log "✓ 自动更新配置成功"
                 log "✓ 满足删除条件: 安装成功 + 自动更新已配置"
                 remove_self
             else
                 log "✗ 自动更新配置失败"
-                log "⚠ 保留脚本，等待下次重启重试"
+                log "⚠ 保留脚本等待下次重启重试"
+                log "原因: 自动更新脚本下载失败或定时任务添加失败"
             fi
         else
-            # 不需要自动更新
             log "自动更新: 禁用"
             log "✓ 满足删除条件: 安装成功 + 无需自动更新"
             remove_self
         fi
     else
-        # 有包安装失败
         log "⚠ 有包安装失败，保留脚本"
         log "原因: 需要在下次重启时重试安装失败的包"
-        log "======================================"
     fi
+    
+    log "======================================"
 }
 
 boot() {
