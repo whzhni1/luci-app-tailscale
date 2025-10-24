@@ -2,7 +2,7 @@
 
 # ==================== 全局配置 ====================
 SCRIPT_VERSION="1.0.3"
-LOG_FILE="/tmp/auto-update-$(date +%Y%m%d-%H%M%S).log"
+LOG_FILE="/tmp/auto-update.log"
 CONFIG_BACKUP_DIR="/tmp/config_Backup"
 DEVICE_MODEL="$(cat /tmp/sysinfo/model 2>/dev/null || echo '未知设备')"
 PUSH_TITLE="$DEVICE_MODEL 插件更新通知"
