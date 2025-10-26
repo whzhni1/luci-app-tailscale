@@ -82,13 +82,13 @@ jobs:
           
           echo "🔧 开始修改..."
           
-          # 1. 修改 Makefile - 保护配置文件和数据目录
+          # 1. 修改 Makefile - 添加配置保护
           if ! grep -q "define Package/luci-app-tailscale/conffiles" Makefile; then
             sed -i '/^PKG_VERSION:=/a\\ndefine Package/luci-app-tailscale/conffiles\n/etc/config/tailscale\n/etc/config/tailscale_data/\nendef' Makefile
             echo "✅ Makefile: 已添加配置保护"
           fi
           
-          # 2. 修改默认配置路径
+          # 2. 修改默认配置路径（唯一需要改的）
           sed -i "s|option config_path '/etc/tailscale'|option config_path '/etc/config/tailscale_data'|g" root/etc/config/tailscale
           echo "✅ 默认配置: config_path -> /etc/config/tailscale_data"
           
@@ -101,32 +101,18 @@ jobs:
           sed -i "s|o.default = '/etc/tailscale';|o.default = '/etc/config/tailscale_data';|g" htdocs/luci-static/resources/view/tailscale/setting.js
           echo "✅ LuCI 界面: 默认路径 -> /etc/config/tailscale_data"
           
-          # 5. 重写 uci-defaults 脚本 - 只在首次安装时创建配置
+          # 5. 生成极简 uci-defaults 脚本
           mkdir -p root/etc/uci-defaults
           
           cat > root/etc/uci-defaults/40_luci-tailscale <<'SCRIPT_EOF'
           #!/bin/sh
-          
-          # 只在配置不存在时创建默认配置
-          if [ ! -f /etc/config/tailscale ]; then
-          	cat > /etc/config/tailscale <<'CONFIG_EOF'
-          SCRIPT_EOF
-          
-          # 追加配置文件内容
-          cat root/etc/config/tailscale >> root/etc/uci-defaults/40_luci-tailscale
-          
-          # 追加脚本后半部分
-          cat >> root/etc/uci-defaults/40_luci-tailscale <<'SCRIPT_EOF'
-          CONFIG_EOF
-          	echo "✅ 已创建默认配置"
-          fi
           
           # 确保数据目录存在
           mkdir -p /etc/config/tailscale_data
           
           # 清理缓存
           uci -q delete ucitrack.@tailscale[-1] 2>/dev/null
-          uci -q commit ucitrack
+          uci -q commit ucitrack 2>/dev/null
           rm -f /tmp/luci-indexcache
           
           exit 0
@@ -135,17 +121,13 @@ jobs:
           chmod +x root/etc/uci-defaults/40_luci-tailscale
           echo "✅ UCI-defaults: 已生成"
           
-          # 6. 删除原始配置文件（不打包进 ipk）
-          rm -f root/etc/config/tailscale
-          echo "✅ 已删除原始配置（由 uci-defaults 创建）"
-          
           # 验证
           echo ""
           echo "🔍 验证:"
-          grep -q "/etc/config/tailscale" Makefile && echo "  ✓ 配置文件保护"
-          grep -q "tailscale_data" Makefile && echo "  ✓ 数据目录保护"
-          [ -x root/etc/uci-defaults/40_luci-tailscale ] && echo "  ✓ uci-defaults 脚本"
-          [ ! -f root/etc/config/tailscale ] && echo "  ✓ 配置文件未打包"
+          grep -q "conffiles" Makefile && echo "  ✓ Makefile conffiles"
+          grep -q "/etc/config/tailscale_data" root/etc/config/tailscale && echo "  ✓ 配置路径正确"
+          [ -x root/etc/uci-defaults/40_luci-tailscale ] && echo "  ✓ uci-defaults 可执行"
+          grep -q "/var/run/tailscale" root/etc/init.d/tailscale && echo "  ✓ init.d 正确"
           
           echo ""
           echo "🎉 修改完成！"
