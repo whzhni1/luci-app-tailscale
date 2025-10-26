@@ -88,7 +88,6 @@ jobs:
           echo ""
           echo "1️⃣ 修改 Makefile - 添加配置文件保护"
           if ! grep -q "define Package/luci-app-tailscale/conffiles" Makefile; then
-            # 在 PKG_VERSION 后面添加 conffiles 定义
             sed -i '/^PKG_VERSION:=/a\\n# 保护配置文件和数据目录不被覆盖\ndefine Package/luci-app-tailscale/conffiles\n/etc/config/tailscale\n/etc/config/tailscale_data/\nendef' Makefile
             echo "✅ 已添加 conffiles 定义"
           else
@@ -113,11 +112,9 @@ jobs:
           echo ""
           echo "3️⃣ 修改 root/etc/init.d/tailscale - 分离临时目录和数据目录"
           
-          # 修改 CONFIG_PATH
           sed -i 's|^CONFIG_PATH=/var/lib/tailscale|CONFIG_PATH=/var/run/tailscale|g' root/etc/init.d/tailscale
           echo "✅ 已将 CONFIG_PATH 改为 /var/run/tailscale（临时运行目录）"
           
-          # 修改 stop_instance 中的清理逻辑（添加注释说明不删除数据目录）
           sed -i '/rm -rf "$CONFIG_PATH"/i\	# 只删除临时运行目录，不删除包含授权信息的数据目录 (/etc/config/tailscale_data)' root/etc/init.d/tailscale
           echo "✅ 已添加数据目录保护注释"
           
@@ -138,55 +135,103 @@ jobs:
           
           # ===== 5. 重写 uci-defaults 脚本 =====
           echo ""
-          echo "5️⃣ 重写 root/etc/uci-defaults/40_luci-tailscale - 实现配置保护逻辑"
-
+          echo "5️⃣ 重写 root/etc/uci-defaults/40_luci-tailscale - 添加配置迁移逻辑"
+          
           mkdir -p root/etc/uci-defaults
-          cat > root/etc/uci-defaults/40_luci-tailscale << 'EOF'
+          
+          cat > root/etc/uci-defaults/40_luci-tailscale <<'HEREDOC_EOF'
           #!/bin/sh
-
-          # 检查 tailscale 配置是否已存在
+          
+          OLD_DATA_DIR="/etc/tailscale"
+          NEW_DATA_DIR="/etc/config/tailscale_data"
+          
+          # 检查配置是否已存在
           if ! uci -q get tailscale.settings > /dev/null 2>&1; then
-              echo "📝 首次安装，导入默认配置..."
-
-              # 如果系统里还没有 /etc/config/tailscale，就从固件内置文件复制一份
-              if [ ! -f /etc/config/tailscale ]; then
-                  cp /rom/etc/config/tailscale /etc/config/tailscale 2>/dev/null || true
-                  uci -q commit tailscale
-                  echo "✅ 已导入默认配置文件 /etc/config/tailscale"
-              else
-                  echo "⚠️ 系统已有 /etc/config/tailscale，保留现有配置"
-              fi
+          	echo "📝 首次安装，初始化默认配置..."
+          	uci -q batch <<-EOC
+          		set tailscale.settings='tailscale'
+          		set tailscale.settings.enabled='0'
+          		set tailscale.settings.port='41641'
+          		set tailscale.settings.config_path='$NEW_DATA_DIR'
+          		set tailscale.settings.fw_mode='nftables'
+          		set tailscale.settings.log_stdout='1'
+          		set tailscale.settings.log_stderr='1'
+          		set tailscale.settings.accept_dns='1'
+          		commit tailscale
+          	EOC
+          	echo "✅ 默认配置已创建"
           else
-              echo "⚠️ 检测到已有 tailscale 配置，保留现有设置"
+          	echo "⚠️  检测到已有配置"
+          	
+          	# 检查并迁移旧路径配置
+          	current_path=$(uci -q get tailscale.settings.config_path)
+          	if [ "$current_path" = "$OLD_DATA_DIR" ]; then
+          		echo "🔄 检测到旧路径配置，开始迁移..."
+          		
+          		# 更新配置路径
+          		uci set tailscale.settings.config_path="$NEW_DATA_DIR"
+          		uci commit tailscale
+          		echo "✅ 已更新 config_path: $OLD_DATA_DIR -> $NEW_DATA_DIR"
+          		
+          		# 迁移数据文件
+          		if [ -d "$OLD_DATA_DIR" ] && [ ! -d "$NEW_DATA_DIR" ]; then
+          			mkdir -p "$NEW_DATA_DIR"
+          			echo "📁 已创建新数据目录 $NEW_DATA_DIR"
+          			
+          			# 迁移状态文件
+          			if [ -f "$OLD_DATA_DIR/tailscaled.state" ]; then
+          				cp -a "$OLD_DATA_DIR/tailscaled.state" "$NEW_DATA_DIR/"
+          				echo "✅ 已迁移授权状态文件"
+          			fi
+          			
+          			# 迁移其他可能的文件
+          			if [ -n "$(ls -A $OLD_DATA_DIR 2>/dev/null)" ]; then
+          				cp -a "$OLD_DATA_DIR"/* "$NEW_DATA_DIR/" 2>/dev/null || true
+          				echo "✅ 已迁移所有数据文件"
+          			fi
+          		fi
+          	else
+          		echo "✅ 配置路径已是新版本: $current_path"
+          	fi
           fi
-
-          # 确保数据目录存在（放在 /etc/config/ 下，固件升级时会自动保留）
-          if [ ! -d /etc/config/tailscale_data ]; then
-              mkdir -p /etc/config/tailscale_data
-              echo "📁 已创建数据目录 /etc/config/tailscale_data"
+          
+          # 确保新数据目录存在
+          if [ ! -d "$NEW_DATA_DIR" ]; then
+          	mkdir -p "$NEW_DATA_DIR"
+          	echo "📁 已创建数据目录 $NEW_DATA_DIR"
           else
-              echo "📁 数据目录 /etc/config/tailscale_data 已存在"
+          	echo "📁 数据目录 $NEW_DATA_DIR 已存在"
           fi
-
+          
           # 清理 ucitrack 配置
           uci -q batch <<-EOT >/dev/null
-              delete ucitrack.@tailscale[-1]
-              commit ucitrack
+          	delete ucitrack.@tailscale[-1]
+          	commit ucitrack
           EOT
-
+          
           # 清理 LuCI 缓存
           rm -f /tmp/luci-indexcache
           echo "🗑️  已清理 LuCI 缓存"
-
+          
+          # 如果 Tailscale 正在运行，提示需要重启
+          if /etc/init.d/tailscale status >/dev/null 2>&1; then
+          	echo "⚠️  检测到 Tailscale 正在运行，请重启服务以应用新配置："
+          	echo "    /etc/init.d/tailscale restart"
+          fi
+          
           exit 0
-          EOF
-
+          HEREDOC_EOF
+          
           chmod +x root/etc/uci-defaults/40_luci-tailscale
           echo "✅ uci-defaults 脚本已重写并设置为可执行"
-
+          
+          echo ""
+          echo "📄 生成的 40_luci-tailscale 脚本完整内容："
+          echo "========================================"
+          cat root/etc/uci-defaults/40_luci-tailscale
           echo "========================================"
           
-          # ===== 6. 删除原始配置文件（避免打包到 ipk 中）=====
+          # ===== 6. 删除原始配置文件 =====
           echo ""
           echo "6️⃣ 删除原始配置文件（避免覆盖用户配置）"
           if [ -f root/etc/config/tailscale ]; then
@@ -212,13 +257,12 @@ jobs:
           ls -lh root/etc/uci-defaults/40_luci-tailscale
           
           echo ""
-          echo "✅ 检查点 3: init.d 脚本使用正确的 CONFIG_PATH"
-          grep "^CONFIG_PATH=" root/etc/init.d/tailscale
+          echo "✅ 检查点 3: uci-defaults 包含迁移逻辑"
+          grep -c "迁移" root/etc/uci-defaults/40_luci-tailscale || echo "0"
           
           echo ""
-          echo "✅ 检查点 4: 搜索所有包含路径的文件"
-          echo "包含 /etc/config/tailscale_data 的文件："
-          grep -r "config/tailscale_data" --include="*.js" --include="*.sh" --include="tailscale" . || echo "无"
+          echo "✅ 检查点 4: init.d 脚本使用正确的 CONFIG_PATH"
+          grep "^CONFIG_PATH=" root/etc/init.d/tailscale
           
           echo ""
           echo "✅ 检查点 5: 确认原始配置文件已删除"
@@ -237,14 +281,14 @@ jobs:
           echo "  2. ✅ 默认配置: config_path = /etc/config/tailscale_data"
           echo "  3. ✅ Init脚本: CONFIG_PATH = /var/run/tailscale"
           echo "  4. ✅ LuCI界面: 默认工作目录 = /etc/config/tailscale_data"
-          echo "  5. ✅ UCI-defaults: 智能配置初始化逻辑"
+          echo "  5. ✅ UCI-defaults: 智能配置初始化 + 旧配置迁移"
           echo "  6. ✅ 删除原始配置文件避免覆盖"
           echo ""
           echo "🎯 实现效果："
-          echo "  • 重新安装时保留用户配置"
-          echo "  • 授权信息存储在 /etc/config/tailscale_data/"
-          echo "  • 软件包升级时配置和数据均不丢失"
-          echo "  • 固件升级时配置和数据均不丢失（位于 /etc/config/ 下）"
+          echo "  • 首次安装：创建新配置，使用新路径"
+          echo "  • 重新安装：自动检测并迁移旧路径到新路径"
+          echo "  • 迁移数据：自动复制授权状态文件"
+          echo "  • 升级保护：配置和数据均不丢失"
           echo "========================================"
           
           echo "SRC_DIR=$SRC_DIR" >> $GITHUB_ENV
