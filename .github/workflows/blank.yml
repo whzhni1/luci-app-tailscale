@@ -94,9 +94,6 @@ jobs:
             echo "✅ 默认配置: config_path -> /etc/config/tailscale_data"
           fi
           
-          # 读取修改后的完整配置内容
-          CONFIG_CONTENT=$(cat root/etc/config/tailscale)
-          
           # 3. 修改 init.d 脚本
           sed -i 's|^CONFIG_PATH=/var/lib/tailscale|CONFIG_PATH=/var/run/tailscale|g' root/etc/init.d/tailscale
           sed -i '/rm -rf "$CONFIG_PATH"/i\	# 只删除临时运行目录，不删除数据目录' root/etc/init.d/tailscale
@@ -106,8 +103,9 @@ jobs:
           sed -i "s|o.default = '/etc/tailscale';|o.default = '/etc/config/tailscale_data';|g" htdocs/luci-static/resources/view/tailscale/setting.js
           echo "✅ LuCI 界面: 默认路径 -> /etc/config/tailscale_data"
           
-          # 5. 生成 uci-defaults 脚本（使用原始配置内容）
+          # 5. 生成 uci-defaults 脚本（直接嵌入配置内容）
           mkdir -p root/etc/uci-defaults
+          
           cat > root/etc/uci-defaults/40_luci-tailscale <<'SCRIPT_EOF'
           #!/bin/sh
           
@@ -118,7 +116,13 @@ jobs:
           if ! uci -q get tailscale.settings >/dev/null 2>&1; then
           	# 首次安装，写入默认配置
           	cat > /etc/config/tailscale <<'CONFIG_EOF'
-          PLACEHOLDER_CONFIG_CONTENT
+          SCRIPT_EOF
+          
+          # 直接追加配置文件内容
+          cat root/etc/config/tailscale >> root/etc/uci-defaults/40_luci-tailscale
+          
+          # 继续追加脚本的后半部分
+          cat >> root/etc/uci-defaults/40_luci-tailscale <<'SCRIPT_EOF'
           CONFIG_EOF
           	echo "✅ 已创建默认配置"
           else
@@ -149,9 +153,6 @@ jobs:
           exit 0
           SCRIPT_EOF
           
-          # 将实际配置内容替换到脚本中
-          sed -i "s|PLACEHOLDER_CONFIG_CONTENT|$(echo "$CONFIG_CONTENT" | sed 's/|/\\|/g')|" root/etc/uci-defaults/40_luci-tailscale
-          
           chmod +x root/etc/uci-defaults/40_luci-tailscale
           echo "✅ UCI-defaults: 已生成（包含完整默认配置）"
           
@@ -170,7 +171,8 @@ jobs:
           echo ""
           echo "🎉 修改完成！"
           echo "SRC_DIR=$SRC_DIR" >> $GITHUB_ENV
-          # =========================
+
+          
       # ImmortalWrt 主线 SDK (apk)
       # =========================
       - name: "4️⃣ 下载 ImmortalWrt 主线 SDK (apk)"
