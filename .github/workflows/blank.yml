@@ -82,20 +82,15 @@ jobs:
           
           echo "🔧 开始修改..."
           
-          # 1. 修改 Makefile
+          # 1. 修改 Makefile - 保护配置和数据
           if ! grep -q "define Package/luci-app-tailscale/conffiles" Makefile; then
             sed -i '/^PKG_VERSION:=/a\\ndefine Package/luci-app-tailscale/conffiles\n/etc/config/tailscale\n/etc/config/tailscale_data/\nendef' Makefile
-            echo "✅ Makefile: 已添加配置保护"
+            echo "✅ Makefile: 保护配置和数据目录"
           fi
           
-          # 2. 修改默认配置文件
-          # 修复配置段类型（如果是错的）
-          sed -i "s|^config settings 'settings'|config tailscale 'settings'|g" root/etc/config/tailscale
-          # 删除 state_file 选项（不需要这个，由 init.d 自动计算）
-          sed -i "/^\s*option state_file/d" root/etc/config/tailscale
-          # 修改 config_path
+          # 2. 修改默认配置
           sed -i "s|option config_path '/etc/tailscale'|option config_path '/etc/config/tailscale_data'|g" root/etc/config/tailscale
-          echo "✅ 默认配置: 已修复类型、删除 state_file、更新 config_path"
+          echo "✅ 默认配置: config_path -> /etc/config/tailscale_data"
           
           # 3. 修改 init.d 脚本
           sed -i 's|^CONFIG_PATH=/var/lib/tailscale|CONFIG_PATH=/var/run/tailscale|g' root/etc/init.d/tailscale
@@ -106,38 +101,107 @@ jobs:
           sed -i "s|o.default = '/etc/tailscale';|o.default = '/etc/config/tailscale_data';|g" htdocs/luci-static/resources/view/tailscale/setting.js
           echo "✅ LuCI 界面: 默认路径 -> /etc/config/tailscale_data"
           
-          # 5. 生成 uci-defaults 脚本
+          # 5. 生成智能 uci-defaults 脚本
           mkdir -p root/etc/uci-defaults
           
           cat > root/etc/uci-defaults/40_luci-tailscale <<'SCRIPT_EOF'
           #!/bin/sh
           
+          DATA_DIR="/etc/config/tailscale_data"
+          INIT_FLAG="$DATA_DIR/.initialized"
+          
+          # 如果已经初始化过，且配置看起来正确，则跳过
+          if [ -f "$INIT_FLAG" ] && [ -f /etc/config/tailscale ]; then
+          	if grep -q "^config tailscale 'settings'" /etc/config/tailscale && \
+          	   grep -q "option config_path '$DATA_DIR'" /etc/config/tailscale; then
+          		echo "⚠️  检测到已正确初始化，保留现有配置"
+          		rm -f /tmp/luci-indexcache
+          		exit 0
+          	fi
+          fi
+          
+          echo "🔧 修复 Tailscale 配置..."
+          
+          # 清理 opkg 备份
+          rm -f /etc/config/tailscale-opkg
+          
+          # 修复配置（仅修复明显错误，保留用户设置）
+          if [ -f /etc/config/tailscale ]; then
+          	NEED_FIX=0
+          	
+          	# 检查配置段类型
+          	if grep -q "^config settings 'settings'" /etc/config/tailscale; then
+          		echo "  - 修复配置段类型"
+          		sed -i "s|^config settings 'settings'|config tailscale 'settings'|g" /etc/config/tailscale
+          		NEED_FIX=1
+          	fi
+          	
+          	# 删除 state_file（不应该手动指定）
+          	if grep -q "option state_file" /etc/config/tailscale; then
+          		echo "  - 删除 state_file 选项"
+          		sed -i "/^\s*option state_file/d" /etc/config/tailscale
+          		NEED_FIX=1
+          	fi
+          	
+          	# 检查 config_path
+          	if grep -q "option config_path '/etc/tailscale'" /etc/config/tailscale; then
+          		echo "  - 更新 config_path"
+          		sed -i "s|option config_path '/etc/tailscale'|option config_path '$DATA_DIR'|g" /etc/config/tailscale
+          		NEED_FIX=1
+          		
+          		# 迁移旧授权文件
+          		if [ -d /etc/tailscale ] && [ -f /etc/tailscale/tailscaled.state ]; then
+          			mkdir -p "$DATA_DIR"
+          			cp -a /etc/tailscale/tailscaled.state "$DATA_DIR/" 2>/dev/null
+          			echo "  - 已迁移授权文件"
+          		fi
+          	fi
+          	
+          	# 如果没有 config_path，添加它
+          	if ! grep -q "option config_path" /etc/config/tailscale; then
+          		echo "  - 添加 config_path"
+          		sed -i "/option port/a\\	option config_path '$DATA_DIR'" /etc/config/tailscale
+          		NEED_FIX=1
+          	fi
+          	
+          	# 确保有 accept_dns（仅在没有时添加）
+          	if ! grep -q "option accept_dns" /etc/config/tailscale; then
+          		echo "  - 添加 accept_dns"
+          		sed -i "/option fw_mode/a\\	option accept_dns '1'" /etc/config/tailscale
+          	fi
+          	
+          	if [ "$NEED_FIX" = "1" ]; then
+          		echo "  - 配置已修复，用户设置已保留"
+          	else
+          		echo "  - 配置正确，无需修改"
+          	fi
+          fi
+          
           # 确保数据目录存在
-          mkdir -p /etc/config/tailscale_data
+          mkdir -p "$DATA_DIR"
+          
+          # 创建初始化标记
+          touch "$INIT_FLAG"
           
           # 清理缓存
           uci -q delete ucitrack.@tailscale[-1] 2>/dev/null
           uci -q commit ucitrack 2>/dev/null
           rm -f /tmp/luci-indexcache
           
+          echo "✅ 配置检查完成"
+          
           exit 0
           SCRIPT_EOF
           
           chmod +x root/etc/uci-defaults/40_luci-tailscale
-          echo "✅ UCI-defaults: 已生成"
+          echo "✅ UCI-defaults: 智能配置修复脚本已生成"
           
           # 验证
           echo ""
           echo "🔍 验证:"
           grep -q "conffiles" Makefile && echo "  ✓ Makefile conffiles"
-          grep -q "^config tailscale 'settings'" root/etc/config/tailscale && echo "  ✓ 配置段类型正确"
-          ! grep -q "option state_file" root/etc/config/tailscale && echo "  ✓ state_file 已删除"
           grep -q "/etc/config/tailscale_data" root/etc/config/tailscale && echo "  ✓ config_path 正确"
           [ -x root/etc/uci-defaults/40_luci-tailscale ] && echo "  ✓ uci-defaults 可执行"
-          
-          echo ""
-          echo "📄 修改后的配置文件："
-          cat root/etc/config/tailscale
           
           echo ""
           echo "🎉 修改完成！"
