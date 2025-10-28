@@ -1,0 +1,439 @@
+name: "构建 Tailscale_apk_ipk"
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 23 * * *'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: "1️⃣ 检出代码"
+        uses: actions/checkout@v4
+
+      - name: "2️⃣ 检查上游版本更新"
+        id: version
+        run: |
+          set -e
+          
+          echo "::group::📥 获取上游最新版本"
+          upstream_latest=$(curl -s "https://api.github.com/repos/asvow/luci-app-tailscale/tags" | jq -r '.[0].name // "none"')
+          
+          if [ "$upstream_latest" = "none" ] || [ "$upstream_latest" = "null" ]; then
+            echo "::error::❌ 无法获取上游版本"
+            exit 1
+          fi
+          
+          echo "  上游最新: $upstream_latest"
+          echo "::endgroup::"
+          
+          echo "::group::📦 获取当前仓库版本"
+          my_latest=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/tags" | jq -r '.[0].name // "none"')
+          
+          if [ "$my_latest" != "none" ] && [ "$my_latest" != "null" ]; then
+            echo "  当前版本: $my_latest"
+          else
+            my_latest="none"
+            echo "  ⚠️  无版本（首次构建）"
+          fi
+          echo "::endgroup::"
+          
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "📊 版本对比"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  上游版本: $upstream_latest"
+          echo "  当前版本: $my_latest"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo ""
+          
+          if [ "$upstream_latest" = "$my_latest" ]; then
+            echo "::notice::✅ 版本一致 ($upstream_latest)，跳过构建"
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "::notice::🆕 发现新版本 $upstream_latest（当前 $my_latest），开始构建"
+            echo "skip=false" >> $GITHUB_OUTPUT
+            version_number=$(echo "$upstream_latest" | sed 's/^v//')
+            echo "version=$version_number" >> $GITHUB_OUTPUT
+            echo "tag=$upstream_latest" >> $GITHUB_OUTPUT
+          fi
+
+      - name: "✅ 版本无更新，结束工作流"
+        if: steps.version.outputs.skip == 'true'
+        run: |
+          echo "::notice::✅ 当前已是最新版本，无需重复构建"
+          exit 0
+          
+      - name: "3️⃣ 拉取 luci-app-tailscale 源码并做持久化修改"
+        if: steps.version.outputs.skip != 'true'
+        run: |
+          set -e
+          SRC_DIR=$PWD/src/luci-app-tailscale
+          mkdir -p src
+          
+          echo "📥 克隆源码..."
+          git clone https://github.com/asvow/luci-app-tailscale "$SRC_DIR"
+          cd "$SRC_DIR"
+          
+          echo "🔧 开始修改..."
+          
+          # 1. 修改 Makefile - 保护配置和数据
+          if ! grep -q "define Package/luci-app-tailscale/conffiles" Makefile; then
+            sed -i '/^PKG_VERSION:=/a\\ndefine Package/luci-app-tailscale/conffiles\n/etc/config/tailscale\n/etc/config/tailscale_data/\nendef' Makefile
+            echo "✅ Makefile: 保护配置和数据目录"
+          fi
+          
+          # 2. 修改默认配置
+          sed -i "s|option config_path '/etc/tailscale'|option config_path '/etc/config/tailscale_data'|g" root/etc/config/tailscale
+          echo "✅ 默认配置: config_path -> /etc/config/tailscale_data"
+          
+          # 3. 修改 init.d 脚本
+          sed -i 's|^CONFIG_PATH=/var/lib/tailscale|CONFIG_PATH=/var/run/tailscale|g' root/etc/init.d/tailscale
+          sed -i '/rm -rf "$CONFIG_PATH"/i\	# 只删除临时目录，保护数据目录' root/etc/init.d/tailscale
+          echo "✅ Init 脚本: CONFIG_PATH -> /var/run/tailscale"
+          
+          # 4. 修改 LuCI 界面 JS
+          sed -i "s|o.default = '/etc/tailscale';|o.default = '/etc/config/tailscale_data';|g" htdocs/luci-static/resources/view/tailscale/setting.js
+          echo "✅ LuCI 界面: 默认路径 -> /etc/config/tailscale_data"
+          
+          # 5. 生成智能 uci-defaults 脚本
+          mkdir -p root/etc/uci-defaults
+          
+          cat > root/etc/uci-defaults/40_luci-tailscale <<'SCRIPT_EOF'
+          #!/bin/sh
+          
+          DATA_DIR="/etc/config/tailscale_data"
+          INIT_FLAG="$DATA_DIR/.initialized"
+          
+          # 如果已经初始化过，且配置看起来正确，则跳过
+          if [ -f "$INIT_FLAG" ] && [ -f /etc/config/tailscale ]; then
+          	if grep -q "^config tailscale 'settings'" /etc/config/tailscale && \
+          	   grep -q "option config_path '$DATA_DIR'" /etc/config/tailscale; then
+          		echo "⚠️  检测到已正确初始化，保留现有配置"
+          		rm -f /tmp/luci-indexcache
+          		exit 0
+          	fi
+          fi
+          
+          echo "🔧 修复 Tailscale 配置..."
+          
+          # 清理 opkg 备份
+          rm -f /etc/config/tailscale-opkg
+          
+          # 修复配置（仅修复明显错误，保留用户设置）
+          if [ -f /etc/config/tailscale ]; then
+          	NEED_FIX=0
+          	
+          	# 检查配置段类型
+          	if grep -q "^config settings 'settings'" /etc/config/tailscale; then
+          		echo "  - 修复配置段类型"
+          		sed -i "s|^config settings 'settings'|config tailscale 'settings'|g" /etc/config/tailscale
+          		NEED_FIX=1
+          	fi
+          	
+          	# 删除 state_file（不应该手动指定）
+          	if grep -q "option state_file" /etc/config/tailscale; then
+          		echo "  - 删除 state_file 选项"
+          		sed -i "/^\s*option state_file/d" /etc/config/tailscale
+          		NEED_FIX=1
+          	fi
+          	
+          	# 检查 config_path
+          	if grep -q "option config_path '/etc/tailscale'" /etc/config/tailscale; then
+          		echo "  - 更新 config_path"
+          		sed -i "s|option config_path '/etc/tailscale'|option config_path '$DATA_DIR'|g" /etc/config/tailscale
+          		NEED_FIX=1
+          		
+          		# 迁移旧授权文件
+          		if [ -d /etc/tailscale ] && [ -f /etc/tailscale/tailscaled.state ]; then
+          			mkdir -p "$DATA_DIR"
+          			cp -a /etc/tailscale/tailscaled.state "$DATA_DIR/" 2>/dev/null
+          			echo "  - 已迁移授权文件"
+          		fi
+          	fi
+          	
+          	# 如果没有 config_path，添加它
+          	if ! grep -q "option config_path" /etc/config/tailscale; then
+          		echo "  - 添加 config_path"
+          		sed -i "/option port/a\\	option config_path '$DATA_DIR'" /etc/config/tailscale
+          		NEED_FIX=1
+          	fi
+          	
+          	# 确保有 accept_dns（仅在没有时添加）
+          	if ! grep -q "option accept_dns" /etc/config/tailscale; then
+          		echo "  - 添加 accept_dns"
+          		sed -i "/option fw_mode/a\\	option accept_dns '1'" /etc/config/tailscale
+          	fi
+          	
+          	if [ "$NEED_FIX" = "1" ]; then
+          		echo "  - 配置已修复，用户设置已保留"
+          	else
+          		echo "  - 配置正确，无需修改"
+          	fi
+          fi
+          
+          # 确保数据目录存在
+          mkdir -p "$DATA_DIR"
+          
+          # 创建初始化标记
+          touch "$INIT_FLAG"
+          
+          # 清理缓存
+          uci -q delete ucitrack.@tailscale[-1] 2>/dev/null
+          uci -q commit ucitrack 2>/dev/null
+          rm -f /tmp/luci-indexcache
+          
+          echo "✅ 配置检查完成"
+          
+          exit 0
+          SCRIPT_EOF
+          
+          chmod +x root/etc/uci-defaults/40_luci-tailscale
+          echo "✅ UCI-defaults: 智能配置修复脚本已生成"
+          
+          # 验证
+          echo ""
+          echo "🔍 验证:"
+          grep -q "conffiles" Makefile && echo "  ✓ Makefile conffiles"
+          grep -q "/etc/config/tailscale_data" root/etc/config/tailscale && echo "  ✓ config_path 正确"
+          [ -x root/etc/uci-defaults/40_luci-tailscale ] && echo "  ✓ uci-defaults 可执行"
+          
+          echo ""
+          echo "🎉 修改完成！"
+          echo "SRC_DIR=$SRC_DIR" >> $GITHUB_ENV
+          
+      # ========================================
+      # ImmortalWrt 主线 SDK (APK)
+      # ========================================
+      - name: "4️⃣ 下载 ImmortalWrt 主线 SDK (APK)"
+        if: steps.version.outputs.skip != 'true'
+        run: |
+          set -e
+          echo "📥 下载 ImmortalWrt 主线 SDK..."
+          SDK_URL="https://downloads.immortalwrt.org/snapshots/targets/x86/generic/immortalwrt-sdk-x86-generic_gcc-14.3.0_musl.Linux-x86_64.tar.zst"
+          curl -LO "$SDK_URL"
+          tar --use-compress-program=unzstd -xf "$(basename "$SDK_URL")"
+          SDK_DIR=$(find . -maxdepth 1 -type d -name "immortalwrt-sdk-*" -print -quit)
+          mv "$SDK_DIR" immortalwrt-sdk-apk
+          echo "SDK_DIR_APK=$PWD/immortalwrt-sdk-apk" >> $GITHUB_ENV
+          echo "✅ SDK 已解压到: immortalwrt-sdk-apk"
+          
+      - name: "5️⃣ 配置并编译 APK 包"
+        if: steps.version.outputs.skip != 'true'
+        run: |
+          set -e
+          cd "$SDK_DIR_APK"
+          
+          echo "📝 配置 feeds..."
+          echo "src-git packages https://github.com/immortalwrt/packages.git" > feeds.conf
+          echo "src-git luci https://github.com/immortalwrt/luci.git" >> feeds.conf
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          
+          echo "📦 复制源码到 SDK..."
+          cp -r "$SRC_DIR" package/luci-app-tailscale
+          
+          echo "⚙️  生成配置..."
+          cat > .config <<EOF
+          CONFIG_TARGET_PACKAGING_APK=y
+          CONFIG_PACKAGE_luci-app-tailscale=m
+          CONFIG_PACKAGE_luci-i18n-tailscale-zh-cn=m
+          CONFIG_PACKAGE_luci-i18n-tailscale-zh-tw=m
+          # CONFIG_ALL_KMODS is not set
+          EOF
+          
+          make defconfig
+          
+          echo "🔨 开始编译 APK..."
+          make package/luci-app-tailscale/{clean,compile} V=s -j$(nproc) IGNORE_ERRORS=m
+          make package/feeds/luci/luci-i18n-tailscale-zh-cn/{clean,compile} V=s -j$(nproc) IGNORE_ERRORS=m || true
+          make package/feeds/luci/luci-i18n-tailscale-zh-tw/{clean,compile} V=s -j$(nproc) IGNORE_ERRORS=m || true
+          
+          echo "📦 收集 APK 产物..."
+          mkdir -p ../out-apk
+          find bin/packages -type f -name "luci-app-tailscale*.apk" -exec cp -v {} ../out-apk/ \;
+          find bin/packages -type f -name "luci-i18n-tailscale*.apk" -exec cp -v {} ../out-apk/ \;
+          
+          echo "✅ APK 编译完成"
+          
+      - name: "6️⃣ 验证 APK 产物"
+        if: steps.version.outputs.skip != 'true'
+        run: |
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "📦 APK 产物列表"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          ls -lh out-apk/ || echo "⚠️  未找到 APK 文件"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          
+      # ========================================
+      # ImmortalWrt 24.10 SDK (IPK)
+      # ========================================
+      - name: "7️⃣ 下载 ImmortalWrt 24.10 SDK (IPK)"
+        if: steps.version.outputs.skip != 'true'
+        run: |
+          set -e
+          echo "📥 下载 ImmortalWrt 24.10 SDK..."
+          SDK_URL="https://downloads.immortalwrt.org/releases/24.10.0/targets/x86/64/immortalwrt-sdk-24.10.0-x86-64_gcc-13.3.0_musl.Linux-x86_64.tar.zst"
+          curl -LO "$SDK_URL"
+          tar --use-compress-program=unzstd -xf "$(basename "$SDK_URL")"
+          SDK_DIR_RAW=$(find . -maxdepth 1 -type d -name "immortalwrt-sdk-*" ! -name "*-apk" -print -quit)
+          mv "$SDK_DIR_RAW" immortalwrt-sdk-ipk
+          echo "SDK_DIR_IPK=$PWD/immortalwrt-sdk-ipk" >> $GITHUB_ENV
+          echo "✅ SDK 已解压到: immortalwrt-sdk-ipk"
+          
+      - name: "8️⃣ 配置并编译 IPK 包"
+        if: steps.version.outputs.skip != 'true'
+        run: |
+          set -e
+          cd "$SDK_DIR_IPK"
+          
+          echo "📝 配置 feeds..."
+          echo "src-git packages https://github.com/immortalwrt/packages.git" > feeds.conf
+          echo "src-git luci https://github.com/immortalwrt/luci.git" >> feeds.conf
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          
+          echo "📦 复制源码到 SDK..."
+          cp -r "$SRC_DIR" package/luci-app-tailscale
+          
+          echo "⚙️  生成配置..."
+          cat > .config <<EOF
+          CONFIG_PACKAGE_luci-app-tailscale=m
+          CONFIG_PACKAGE_luci-i18n-tailscale-zh-cn=m
+          CONFIG_PACKAGE_luci-i18n-tailscale-zh-tw=m
+          # CONFIG_ALL_KMODS is not set
+          EOF
+          
+          make defconfig
+          
+          echo "🔨 开始编译 IPK..."
+          make package/luci-app-tailscale/{clean,compile} V=s -j$(nproc) IGNORE_ERRORS=m
+          make package/feeds/luci/luci-i18n-tailscale-zh-cn/{clean,compile} V=s -j$(nproc) IGNORE_ERRORS=m || true
+          make package/feeds/luci/luci-i18n-tailscale-zh-tw/{clean,compile} V=s -j$(nproc) IGNORE_ERRORS=m || true
+          
+          echo "📦 收集 IPK 产物..."
+          mkdir -p ../out-ipk
+          find bin/packages -type f -name "luci-app-tailscale*.ipk" -exec cp -v {} ../out-ipk/ \;
+          find bin/packages -type f -name "luci-i18n-tailscale*.ipk" -exec cp -v {} ../out-ipk/ \;
+          
+          echo "✅ IPK 编译完成"
+          
+      - name: "9️⃣ 验证 IPK 产物"
+        if: steps.version.outputs.skip != 'true'
+        run: |
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "📦 IPK 产物列表"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          ls -lh out-ipk/ || echo "⚠️  未找到 IPK 文件"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          
+      # ========================================
+      # 汇总 & 发布
+      # ========================================
+      - name: "🔟 汇总产物"
+        if: steps.version.outputs.skip != 'true'
+        run: |
+          set -e
+          mkdir -p out
+          
+          echo "📦 汇总 APK 文件..."
+          for file in out-apk/*; do
+            [ -f "$file" ] || continue
+            filename=$(basename "$file")
+            if [[ "$filename" == luci-app-tailscale* ]] || [[ "$filename" == luci-i18n-tailscale* ]]; then
+              cp -v "$file" out/
+            fi
+          done
+          
+          echo "📦 汇总 IPK 文件..."
+          for file in out-ipk/*; do
+            [ -f "$file" ] || continue
+            filename=$(basename "$file")
+            if [[ "$filename" == luci-app-tailscale* ]] || [[ "$filename" == luci-i18n-tailscale* ]]; then
+              cp -v "$file" out/
+            fi
+          done
+          
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "📦 最终产物（已过滤依赖包）"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          ls -lh out/
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+      - name: "1️⃣1️⃣ 生成构建时间"
+        if: steps.version.outputs.skip != 'true'
+        id: build_time
+        run: |
+          BUILD_TIME=$(TZ=Asia/Shanghai date +"%Y-%m-%d %H:%M:%S")
+          echo "time=$BUILD_TIME" >> $GITHUB_OUTPUT
+          echo "📅 构建时间: $BUILD_TIME CST"
+
+      - name: "1️⃣2️⃣ 发布到 GitHub Release"
+        if: steps.version.outputs.skip != 'true'
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: "${{ steps.version.outputs.tag }}"
+          name: "luci-app-tailscale ${{ steps.version.outputs.version }}"
+          files: "out/*"
+          body: |
+            ## 📦 包含文件
+            - **APK 格式**：适用于 ImmortalWrt 主线（新版 apk 包管理器）
+            - **IPK 格式**：适用于 ImmortalWrt 24.10 及以下（传统 opkg 包管理器）
+
+            ## 🔧 持久化配置说明
+            - **配置文件**：`/etc/config/tailscale`
+            - **数据目录**：`/etc/config/tailscale_data/`
+            - **授权文件**：`/etc/config/tailscale_data/tailscaled.state`
+            
+            ✅ 重新安装、升级固件时配置和授权信息均不丢失
+
+            ## 📥 安装方法
+            
+            ### APK 方式（ImmortalWrt 主线）
+            ```bash
+            apk add --allow-untrusted luci-app-tailscale*.apk
+            apk add --allow-untrusted luci-i18n-tailscale-zh-cn*.apk  # 可选：中文语言包
+            ```
+
+            ### IPK 方式（ImmortalWrt 24.10 及以下）
+            ```bash
+            opkg install luci-app-tailscale*.ipk
+            opkg install luci-i18n-tailscale-zh-cn*.ipk  # 可选：中文语言包
+            ```
+
+            ## 📌 版本信息
+            - **上游版本**: ${{ steps.version.outputs.tag }}
+            - **构建时间**: ${{ steps.build_time.outputs.time }} CST
+            - **包含语言**: English, 简体中文, 繁體中文
+
+            ## ⚠️ 注意事项
+            1. 仅包含 LuCI 界面插件和语言包
+            2. Tailscale 主程序和依赖库请从系统源自动安装
+            3. 首次安装会自动从官方源拉取 `tailscale` 依赖包
+
+            ## 🔄 更新说明
+            - 自动保护配置文件和授权信息
+            - 支持固件升级时保留配置（勾选保留配置）
+            - 修复官方 tailscale 包生成的配置问题
+
+      - name: "1️⃣3️⃣ 同步到 Gitee Release"
+        if: steps.version.outputs.skip != 'true'
+        continue-on-error: true
+        run: |
+          chmod +x .github/scripts/release-gitee.sh
+          .github/scripts/release-gitee.sh \
+            "whzhni/luci-app-tailscale" \
+            "${{ secrets.GITEE_TOKEN }}" \
+            "${{ steps.version.outputs.tag }}" \
+            "${{ steps.version.outputs.version }}" \
+            "${{ steps.build_time.outputs.time }}" \
+            "${{ github.repository }}" \
+            "luci-app-tailscale"
