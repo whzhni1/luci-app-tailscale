@@ -382,4 +382,4 @@ jobs:
             "${{ steps.version.outputs.version }}" \
             "${{ steps.build_time.outputs.time }}" \
             "${{ github.repository }}" \
-            "luci-app-lucky"
+            "luci-app-tailscale"
