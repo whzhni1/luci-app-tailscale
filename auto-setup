@@ -8,7 +8,7 @@ STOP=01
 INSTALL_PRIORITY=1
 
 # 软件包列表
-PACKAGES="luci-app-wechatpush luci-app-passwall luci-app-openlist luci-app-filemanager luci-i18n-package-manager-zh-cn luci-i18n-firewall-zh-cn vsftpd openssh-sftp-server luci-app-ttyd luci-app-tailscale luci-app-lucky luci-theme-aurora"
+PACKAGES="luci-app-wechatpush luci-app-passwall luci-app-openlist luci-app-filemanager luci-proto-wireguard luci-i18n-package-manager-zh-cn luci-i18n-firewall-zh-cn vsftpd openssh-sftp-server luci-app-ttyd luci-app-tailscale luci-app-lucky luci-theme-aurora"
 
 # Gitee 仓库所有者列表（按优先级顺序尝试）
 GITEE_OWNERS="whzhni sirpdboy kiddin9"
