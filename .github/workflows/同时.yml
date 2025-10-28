@@ -1,4 +1,4 @@
-name: "构建 Tailscale_apk_ipk"
+name: "Tailscale_APK_IPK）"
 
 on:
   workflow_dispatch:
@@ -9,8 +9,15 @@ permissions:
   contents: write
 
 jobs:
-  build:
+  # ========================================
+  # Job 1: 检查版本
+  # ========================================
+  check-version:
     runs-on: ubuntu-latest
+    outputs:
+      skip: ${{ steps.version.outputs.skip }}
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
     steps:
       - name: "1️⃣ 检出代码"
         uses: actions/checkout@v4
@@ -63,14 +70,36 @@ jobs:
             echo "tag=$upstream_latest" >> $GITHUB_OUTPUT
           fi
 
-      - name: "✅ 版本无更新，结束工作流"
-        if: steps.version.outputs.skip == 'true'
-        run: |
-          echo "::notice::✅ 当前已是最新版本，无需重复构建"
-          exit 0
-          
-      - name: "3️⃣ 拉取 luci-app-tailscale 源码并做持久化修改"
-        if: steps.version.outputs.skip != 'true'
+  # ========================================
+  # Job 2: 并行编译 APK 和 IPK
+  # ========================================
+  build:
+    needs: check-version
+    if: needs.check-version.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: "ImmortalWrt 主线"
+            sdk_url: "https://downloads.immortalwrt.org/snapshots/targets/x86/generic/immortalwrt-sdk-x86-generic_gcc-14.3.0_musl.Linux-x86_64.tar.zst"
+            pkg_type: "apk"
+            pkg_ext: "apk"
+            config_extra: "CONFIG_TARGET_PACKAGING_APK=y"
+            
+          - name: "ImmortalWrt 24.10"
+            sdk_url: "https://downloads.immortalwrt.org/releases/24.10.0/targets/x86/64/immortalwrt-sdk-24.10.0-x86-64_gcc-13.3.0_musl.Linux-x86_64.tar.zst"
+            pkg_type: "ipk"
+            pkg_ext: "ipk"
+            config_extra: ""
+            
+    name: "构建 ${{ matrix.name }} (${{ matrix.pkg_type }})"
+    
+    steps:
+      - name: "1️⃣ 检出代码"
+        uses: actions/checkout@v4
+        
+      - name: "2️⃣ 拉取并修改源码"
         run: |
           set -e
           SRC_DIR=$PWD/src/luci-app-tailscale
@@ -82,7 +111,7 @@ jobs:
           
           echo "🔧 开始修改..."
           
-          # 1. 修改 Makefile - 保护配置和数据
+          # 1. 修改 Makefile
           if ! grep -q "define Package/luci-app-tailscale/conffiles" Makefile; then
             sed -i '/^PKG_VERSION:=/a\\ndefine Package/luci-app-tailscale/conffiles\n/etc/config/tailscale\n/etc/config/tailscale_data/\nendef' Makefile
             echo "✅ Makefile: 保护配置和数据目录"
@@ -101,7 +130,7 @@ jobs:
           sed -i "s|o.default = '/etc/tailscale';|o.default = '/etc/config/tailscale_data';|g" htdocs/luci-static/resources/view/tailscale/setting.js
           echo "✅ LuCI 界面: 默认路径 -> /etc/config/tailscale_data"
           
-          # 5. 生成智能 uci-defaults 脚本
+          # 5. 生成 uci-defaults 脚本
           mkdir -p root/etc/uci-defaults
           
           cat > root/etc/uci-defaults/40_luci-tailscale <<'SCRIPT_EOF'
@@ -125,31 +154,27 @@ jobs:
           # 清理 opkg 备份
           rm -f /etc/config/tailscale-opkg
           
-          # 修复配置（仅修复明显错误，保留用户设置）
+          # 修复配置
           if [ -f /etc/config/tailscale ]; then
           	NEED_FIX=0
           	
-          	# 检查配置段类型
           	if grep -q "^config settings 'settings'" /etc/config/tailscale; then
           		echo "  - 修复配置段类型"
           		sed -i "s|^config settings 'settings'|config tailscale 'settings'|g" /etc/config/tailscale
           		NEED_FIX=1
           	fi
           	
-          	# 删除 state_file（不应该手动指定）
           	if grep -q "option state_file" /etc/config/tailscale; then
           		echo "  - 删除 state_file 选项"
           		sed -i "/^\s*option state_file/d" /etc/config/tailscale
           		NEED_FIX=1
           	fi
           	
-          	# 检查 config_path
           	if grep -q "option config_path '/etc/tailscale'" /etc/config/tailscale; then
           		echo "  - 更新 config_path"
           		sed -i "s|option config_path '/etc/tailscale'|option config_path '$DATA_DIR'|g" /etc/config/tailscale
           		NEED_FIX=1
           		
-          		# 迁移旧授权文件
           		if [ -d /etc/tailscale ] && [ -f /etc/tailscale/tailscaled.state ]; then
           			mkdir -p "$DATA_DIR"
           			cp -a /etc/tailscale/tailscaled.state "$DATA_DIR/" 2>/dev/null
@@ -157,14 +182,12 @@ jobs:
           		fi
           	fi
           	
-          	# 如果没有 config_path，添加它
           	if ! grep -q "option config_path" /etc/config/tailscale; then
           		echo "  - 添加 config_path"
           		sed -i "/option port/a\\	option config_path '$DATA_DIR'" /etc/config/tailscale
           		NEED_FIX=1
           	fi
           	
-          	# 确保有 accept_dns（仅在没有时添加）
           	if ! grep -q "option accept_dns" /etc/config/tailscale; then
           		echo "  - 添加 accept_dns"
           		sed -i "/option fw_mode/a\\	option accept_dns '1'" /etc/config/tailscale
@@ -177,70 +200,53 @@ jobs:
           	fi
           fi
           
-          # 确保数据目录存在
           mkdir -p "$DATA_DIR"
-          
-          # 创建初始化标记
           touch "$INIT_FLAG"
           
-          # 清理缓存
           uci -q delete ucitrack.@tailscale[-1] 2>/dev/null
           uci -q commit ucitrack 2>/dev/null
           rm -f /tmp/luci-indexcache
           
           echo "✅ 配置检查完成"
-          
           exit 0
           SCRIPT_EOF
           
           chmod +x root/etc/uci-defaults/40_luci-tailscale
-          echo "✅ UCI-defaults: 智能配置修复脚本已生成"
+          echo "✅ UCI-defaults 已生成"
           
-          # 验证
-          echo ""
-          echo "🔍 验证:"
-          grep -q "conffiles" Makefile && echo "  ✓ Makefile conffiles"
-          grep -q "/etc/config/tailscale_data" root/etc/config/tailscale && echo "  ✓ config_path 正确"
-          [ -x root/etc/uci-defaults/40_luci-tailscale ] && echo "  ✓ uci-defaults 可执行"
-          
-          echo ""
-          echo "🎉 修改完成！"
           echo "SRC_DIR=$SRC_DIR" >> $GITHUB_ENV
           
-      # ========================================
-      # ImmortalWrt 主线 SDK (APK)
-      # ========================================
-      - name: "4️⃣ 下载 ImmortalWrt 主线 SDK (APK)"
-        if: steps.version.outputs.skip != 'true'
+      - name: "3️⃣ 下载 SDK"
         run: |
           set -e
-          echo "📥 下载 ImmortalWrt 主线 SDK..."
-          SDK_URL="https://downloads.immortalwrt.org/snapshots/targets/x86/generic/immortalwrt-sdk-x86-generic_gcc-14.3.0_musl.Linux-x86_64.tar.zst"
-          curl -LO "$SDK_URL"
-          tar --use-compress-program=unzstd -xf "$(basename "$SDK_URL")"
+          echo "📥 下载 ${{ matrix.name }} SDK..."
+          curl -LO "${{ matrix.sdk_url }}"
+          tar --use-compress-program=unzstd -xf "$(basename "${{ matrix.sdk_url }}")"
           SDK_DIR=$(find . -maxdepth 1 -type d -name "immortalwrt-sdk-*" -print -quit)
-          mv "$SDK_DIR" immortalwrt-sdk-apk
-          echo "SDK_DIR_APK=$PWD/immortalwrt-sdk-apk" >> $GITHUB_ENV
-          echo "✅ SDK 已解压到: immortalwrt-sdk-apk"
+          mv "$SDK_DIR" sdk
+          echo "SDK_DIR=$PWD/sdk" >> $GITHUB_ENV
+          echo "✅ SDK 已解压"
           
-      - name: "5️⃣ 配置并编译 APK 包"
-        if: steps.version.outputs.skip != 'true'
+      - name: "4️⃣ 配置并编译 ${{ matrix.pkg_type }}"
         run: |
           set -e
-          cd "$SDK_DIR_APK"
+          cd "$SDK_DIR"
           
           echo "📝 配置 feeds..."
-          echo "src-git packages https://github.com/immortalwrt/packages.git" > feeds.conf
-          echo "src-git luci https://github.com/immortalwrt/luci.git" >> feeds.conf
+          cat > feeds.conf <<EOF
+          src-git packages https://github.com/immortalwrt/packages.git
+          src-git luci https://github.com/immortalwrt/luci.git
+          EOF
+          
           ./scripts/feeds update -a
           ./scripts/feeds install -a
           
-          echo "📦 复制源码到 SDK..."
+          echo "📦 复制源码..."
           cp -r "$SRC_DIR" package/luci-app-tailscale
           
           echo "⚙️  生成配置..."
           cat > .config <<EOF
-          CONFIG_TARGET_PACKAGING_APK=y
+          ${{ matrix.config_extra }}
           CONFIG_PACKAGE_luci-app-tailscale=m
           CONFIG_PACKAGE_luci-i18n-tailscale-zh-cn=m
           CONFIG_PACKAGE_luci-i18n-tailscale-zh-tw=m
@@ -249,140 +255,65 @@ jobs:
           
           make defconfig
           
-          echo "🔨 开始编译 APK..."
+          echo "🔨 开始编译 ${{ matrix.pkg_type }}..."
           make package/luci-app-tailscale/{clean,compile} V=s -j$(nproc) IGNORE_ERRORS=m
           make package/feeds/luci/luci-i18n-tailscale-zh-cn/{clean,compile} V=s -j$(nproc) IGNORE_ERRORS=m || true
           make package/feeds/luci/luci-i18n-tailscale-zh-tw/{clean,compile} V=s -j$(nproc) IGNORE_ERRORS=m || true
           
-          echo "📦 收集 APK 产物..."
-          mkdir -p ../out-apk
-          find bin/packages -type f -name "luci-app-tailscale*.apk" -exec cp -v {} ../out-apk/ \;
-          find bin/packages -type f -name "luci-i18n-tailscale*.apk" -exec cp -v {} ../out-apk/ \;
+          echo "📦 收集产物..."
+          mkdir -p ../output
+          find bin/packages -type f \( -name "luci-app-tailscale*.${{ matrix.pkg_ext }}" -o -name "luci-i18n-tailscale*.${{ matrix.pkg_ext }}" \) -exec cp -v {} ../output/ \;
           
-          echo "✅ APK 编译完成"
+          echo "✅ ${{ matrix.pkg_type }} 编译完成"
           
-      - name: "6️⃣ 验证 APK 产物"
-        if: steps.version.outputs.skip != 'true'
-        run: |
-          echo ""
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "📦 APK 产物列表"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          ls -lh out-apk/ || echo "⚠️  未找到 APK 文件"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          
-      # ========================================
-      # ImmortalWrt 24.10 SDK (IPK)
-      # ========================================
-      - name: "7️⃣ 下载 ImmortalWrt 24.10 SDK (IPK)"
-        if: steps.version.outputs.skip != 'true'
-        run: |
-          set -e
-          echo "📥 下载 ImmortalWrt 24.10 SDK..."
-          SDK_URL="https://downloads.immortalwrt.org/releases/24.10.0/targets/x86/64/immortalwrt-sdk-24.10.0-x86-64_gcc-13.3.0_musl.Linux-x86_64.tar.zst"
-          curl -LO "$SDK_URL"
-          tar --use-compress-program=unzstd -xf "$(basename "$SDK_URL")"
-          SDK_DIR_RAW=$(find . -maxdepth 1 -type d -name "immortalwrt-sdk-*" ! -name "*-apk" -print -quit)
-          mv "$SDK_DIR_RAW" immortalwrt-sdk-ipk
-          echo "SDK_DIR_IPK=$PWD/immortalwrt-sdk-ipk" >> $GITHUB_ENV
-          echo "✅ SDK 已解压到: immortalwrt-sdk-ipk"
-          
-      - name: "8️⃣ 配置并编译 IPK 包"
-        if: steps.version.outputs.skip != 'true'
-        run: |
-          set -e
-          cd "$SDK_DIR_IPK"
-          
-          echo "📝 配置 feeds..."
-          echo "src-git packages https://github.com/immortalwrt/packages.git" > feeds.conf
-          echo "src-git luci https://github.com/immortalwrt/luci.git" >> feeds.conf
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a
-          
-          echo "📦 复制源码到 SDK..."
-          cp -r "$SRC_DIR" package/luci-app-tailscale
-          
-          echo "⚙️  生成配置..."
-          cat > .config <<EOF
-          CONFIG_PACKAGE_luci-app-tailscale=m
-          CONFIG_PACKAGE_luci-i18n-tailscale-zh-cn=m
-          CONFIG_PACKAGE_luci-i18n-tailscale-zh-tw=m
-          # CONFIG_ALL_KMODS is not set
-          EOF
-          
-          make defconfig
-          
-          echo "🔨 开始编译 IPK..."
-          make package/luci-app-tailscale/{clean,compile} V=s -j$(nproc) IGNORE_ERRORS=m
-          make package/feeds/luci/luci-i18n-tailscale-zh-cn/{clean,compile} V=s -j$(nproc) IGNORE_ERRORS=m || true
-          make package/feeds/luci/luci-i18n-tailscale-zh-tw/{clean,compile} V=s -j$(nproc) IGNORE_ERRORS=m || true
-          
-          echo "📦 收集 IPK 产物..."
-          mkdir -p ../out-ipk
-          find bin/packages -type f -name "luci-app-tailscale*.ipk" -exec cp -v {} ../out-ipk/ \;
-          find bin/packages -type f -name "luci-i18n-tailscale*.ipk" -exec cp -v {} ../out-ipk/ \;
-          
-          echo "✅ IPK 编译完成"
-          
-      - name: "9️⃣ 验证 IPK 产物"
-        if: steps.version.outputs.skip != 'true'
-        run: |
-          echo ""
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "📦 IPK 产物列表"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          ls -lh out-ipk/ || echo "⚠️  未找到 IPK 文件"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          
-      # ========================================
-      # 汇总 & 发布
-      # ========================================
-      - name: "🔟 汇总产物"
-        if: steps.version.outputs.skip != 'true'
-        run: |
-          set -e
-          mkdir -p out
-          
-          echo "📦 汇总 APK 文件..."
-          for file in out-apk/*; do
-            [ -f "$file" ] || continue
-            filename=$(basename "$file")
-            if [[ "$filename" == luci-app-tailscale* ]] || [[ "$filename" == luci-i18n-tailscale* ]]; then
-              cp -v "$file" out/
-            fi
-          done
-          
-          echo "📦 汇总 IPK 文件..."
-          for file in out-ipk/*; do
-            [ -f "$file" ] || continue
-            filename=$(basename "$file")
-            if [[ "$filename" == luci-app-tailscale* ]] || [[ "$filename" == luci-i18n-tailscale* ]]; then
-              cp -v "$file" out/
-            fi
-          done
-          
-          echo ""
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "📦 最终产物（已过滤依赖包）"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          ls -lh out/
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      - name: "5️⃣ 上传产物"
+        uses: actions/upload-artifact@v4
+        with:
+          name: packages-${{ matrix.pkg_type }}
+          path: output/*
+          retention-days: 1
 
-      - name: "1️⃣1️⃣ 生成构建时间"
-        if: steps.version.outputs.skip != 'true'
+  # ========================================
+  # Job 3: 发布 Release
+  # ========================================
+  release:
+    needs: [check-version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: "1️⃣ 检出代码"
+        uses: actions/checkout@v4
+        
+      - name: "2️⃣ 下载所有产物"
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          
+      - name: "3️⃣ 汇总产物"
+        run: |
+          mkdir -p release
+          echo "📦 汇总所有产物..."
+          find artifacts -type f \( -name "*.apk" -o -name "*.ipk" \) -exec cp -v {} release/ \;
+          
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "📦 最终产物"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          ls -lh release/
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          
+      - name: "4️⃣ 生成构建时间"
         id: build_time
         run: |
           BUILD_TIME=$(TZ=Asia/Shanghai date +"%Y-%m-%d %H:%M:%S")
           echo "time=$BUILD_TIME" >> $GITHUB_OUTPUT
           echo "📅 构建时间: $BUILD_TIME CST"
-
-      - name: "1️⃣2️⃣ 发布到 GitHub Release"
-        if: steps.version.outputs.skip != 'true'
+          
+      - name: "5️⃣ 发布到 GitHub Release"
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: "${{ steps.version.outputs.tag }}"
-          name: "luci-app-tailscale ${{ steps.version.outputs.version }}"
-          files: "out/*"
+          tag_name: "${{ needs.check-version.outputs.tag }}"
+          name: "luci-app-tailscale ${{ needs.check-version.outputs.version }}"
+          files: "release/*"
           body: |
             ## 📦 包含文件
             - **APK 格式**：适用于 ImmortalWrt 主线（新版 apk 包管理器）
@@ -410,7 +341,7 @@ jobs:
             ```
 
             ## 📌 版本信息
-            - **上游版本**: ${{ steps.version.outputs.tag }}
+            - **上游版本**: ${{ needs.check-version.outputs.tag }}
             - **构建时间**: ${{ steps.build_time.outputs.time }} CST
             - **包含语言**: English, 简体中文, 繁體中文
 
@@ -424,16 +355,15 @@ jobs:
             - 支持固件升级时保留配置（勾选保留配置）
             - 修复官方 tailscale 包生成的配置问题
 
-      - name: "1️⃣3️⃣ 同步到 Gitee Release"
-        if: steps.version.outputs.skip != 'true'
+      - name: "6️⃣ 同步到 Gitee Release"
         continue-on-error: true
         run: |
           chmod +x .github/scripts/release-gitee.sh
           .github/scripts/release-gitee.sh \
             "whzhni/luci-app-tailscale" \
             "${{ secrets.GITEE_TOKEN }}" \
-            "${{ steps.version.outputs.tag }}" \
-            "${{ steps.version.outputs.version }}" \
+            "${{ needs.check-version.outputs.tag }}" \
+            "${{ needs.check-version.outputs.version }}" \
             "${{ steps.build_time.outputs.time }}" \
             "${{ github.repository }}" \
             "luci-app-tailscale"
