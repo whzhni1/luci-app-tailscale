@@ -8,7 +8,7 @@ STOP=01
 INSTALL_PRIORITY=1
 
 # 软件包列表
-PACKAGES="luci-app-wechatpush luci-app-passwall luci-app-openlist luci-app-filemanager luci-proto-wireguard luci-i18n-package-manager-zh-cn luci-i18n-firewall-zh-cn vsftpd openssh-sftp-server luci-app-ttyd luci-app-lucky luci-theme-aurora"
+PACKAGES="luci-app-wechatpush luci-app-passwall luci-app-openlist luci-app-filemanager luci-i18n-package-manager-zh-cn luci-i18n-firewall-zh-cn vsftpd openssh-sftp-server luci-app-ttyd luci-app-lucky luci-app-tailscale luci-theme-aurora"
 
 # Gitee 仓库所有者列表（按优先级顺序尝试）
 GITEE_OWNERS="whzhni sirpdboy kiddin9"
@@ -30,6 +30,7 @@ API_TPL="https://gitee.com/api/v5/repos/%s/releases/latest"
 # 待安装包列表
 PENDING_PACKAGES=""
 FAILED_PACKAGES=""
+INSTALLED_PACKAGES=""
 # ====================================================
 
 # 日志函数
@@ -122,7 +123,7 @@ remove_self() {
     if [ ! -f "/etc/init.d/auto-setup" ]; then
         log "✓ 自动配置脚本已成功删除"
         # 检查是否需要重启
-        if is_installed "luci-proto-wireguard"; then 
+        if echo " $INSTALLED_PACKAGES " | grep -q " luci-proto-wireguard "; then 
             log "检测到 luci-proto-wireguard 已安装"
             log "⚠ 此包需要重启系统才能生效"
             log "系统将在 10 秒后自动重启..."
@@ -149,7 +150,7 @@ install_pkg_official() {
     log "  安装 $pkg..."
     if opkg install "$pkg" >>"$LOG_FILE" 2>&1; then
         log "  ✓ $pkg 安装成功"
-        
+        INSTALLED_PACKAGES="$INSTALLED_PACKAGES $pkg"
         # 智能安装语言包
         local lang=""
         case "$pkg" in
@@ -403,7 +404,7 @@ install_pkg_gitee() {
     
     # 清理临时文件
     rm -f /tmp/*${app}*.ipk 2>/dev/null
-    
+    INSTALLED_PACKAGES="$INSTALLED_PACKAGES $pkg"
     log "  ✓ $pkg 安装完成"
     return 0
 }
