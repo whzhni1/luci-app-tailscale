@@ -8,7 +8,7 @@ DEVICE_MODEL="$(cat /tmp/sysinfo/model 2>/dev/null || echo '未知设备')"
 PUSH_TITLE="$DEVICE_MODEL 插件更新通知"
 
 # 安装优先级：1=官方优先，其他=Gitee优先
-INSTALL_PRIORITY=0
+INSTALL_PRIORITY=1
 
 # Gitee 配置
 GITEE_OWNERS="whzhni sirpdboy kiddin9"
@@ -352,7 +352,8 @@ is_better_binary() {
 
 update_from_gitee() {
     local pkg="$1" repo="$2"
-    local app_name="${pkg#luci-app-}" app_name="${app_name#luci-theme-}"
+    local app_name="${pkg#luci-app-}"
+    app_name="${app_name#luci-theme-}"
     
     log "  从 Gitee 更新 $pkg (仓库: $repo)"
     backup_config
@@ -370,52 +371,130 @@ update_from_gitee() {
     local files=$(echo "$json" | grep -o '"browser_download_url":"[^"]*\.ipk"' | cut -d'"' -f4 | xargs -n1 basename)
     [ -z "$files" ] && { log "  ✗ 未找到 ipk 文件"; cleanup_backup; return 1; }
     
-    # 智能分类 ipk 文件
-    local main="" luci="" i18n=""
-    while IFS= read -r f; do
-        [ -z "$f" ] && continue
-        case "$f" in
-            *luci-i18n-*${app_name}*zh-cn*.ipk) [ -z "$i18n" ] && i18n="$f" ;;
-            luci-app-${app_name}_*.ipk|luci-theme-${app_name}_*.ipk) [ -z "$luci" ] && luci="$f" ;;
-            *${app_name}*.ipk)
-                case "$f" in
-                    luci-*|*-luci-*) ;;
-                    *) is_arch_match "$f" "$arch" && is_better_binary "$main" "$f" && main="$f" ;;
-                esac ;;
-        esac
-    done <<EOF
-$files
+    log "  ====== 获取的文件列表 ======"
+    echo "$files" | while read f; do log "    $f"; done
+    log "  ============================"
+    
+    # ===== 定义搜索规则（优先级从高到低）=====
+    # 格式：类型|关键词1|关键词2|关键词3|排除词(逗号分隔)
+    local search_rules="
+主程序wanji|$app_name|$arch|wanji|luci-
+主程序|$app_name|$arch||luci-,wanji
+Luci应用|luci-app|$app_name||
+Luci主题|luci-theme|$app_name||
+中文语言包|luci-i18n|$app_name|zh-cn|
+"
+    
+    # ===== 搜索匹配文件（内存操作）=====
+    local install_list=""
+    local old_IFS="$IFS"
+    IFS=$'\n'
+    
+    for rule in $search_rules; do
+        [ -z "$rule" ] && continue
+        
+        # 解析规则
+        IFS='|' read -r name kw1 kw2 kw3 excludes <<EOF
+$rule
 EOF
-    
-    local order="$main $luci $i18n"
-    [ -z "$(echo $order | tr -d ' ')" ] && { log "  ✗ 未找到匹配包"; cleanup_backup; return 1; }
-    
-    log "  安装计划: $order"
-    
-    local count=0
-    for file in $order; do
-        [ -z "$file" ] && continue
-        local url=$(echo "$json" | grep -o "\"browser_download_url\":\"[^\"]*${file}\"" | cut -d'"' -f4)
-        [ -z "$url" ] && { log "  ⚠ 未找到 $file 下载链接"; continue; }
+        IFS=$'\n'
         
-        log "  下载: $file"
-        curl -fsSL -o "/tmp/$file" "$url" || { log "  ✗ 下载失败"; rm -f /tmp/*${app_name}*.ipk; restore_config; return 1; }
+        [ -z "$name" ] && continue
         
-        log "  安装 $file..."
-        if ! opkg install --force-reinstall "/tmp/$file" >>"$LOG_FILE" 2>&1; then
-            log "  ✗ 首次安装失败，尝试卸载重装..."
-            local name=$(echo "$file" | sed 's/_.*\.ipk$//')
-            opkg remove "$name" >>"$LOG_FILE" 2>&1
-            opkg install "/tmp/$file" >>"$LOG_FILE" 2>&1 || \
-                { log "  ✗ 重装失败"; rm -f /tmp/*${app_name}*.ipk; restore_config; return 1; }
+        local result="$files"
+        
+        # 应用关键词过滤
+        for kw in $kw1 $kw2 $kw3; do
+            [ -n "$kw" ] && result=$(echo "$result" | grep -i "$kw")
+        done
+        
+        # 应用排除过滤
+        if [ -n "$excludes" ]; then
+            IFS=','
+            for ex in $excludes; do
+                [ -n "$ex" ] && result=$(echo "$result" | grep -v "$ex")
+            done
+            IFS=$'\n'
         fi
-        log "  ✓ $file 安装成功"
+        
+        # 取第一个匹配结果
+        result=$(echo "$result" | head -n1)
+        
+        if [ -n "$result" ]; then
+            install_list="$install_list $result"
+            log "  [匹配] $name: $result"
+        fi
+    done
+    
+    IFS="$old_IFS"
+    
+    # 去除多余空格
+    install_list=$(echo $install_list)
+    
+    [ -z "$install_list" ] && { 
+        log "  ✗ 未找到任何匹配的安装包"
+        cleanup_backup
+        return 1
+    }
+    
+    log "  ====== 安装计划 ======"
+    log "    $install_list"
+    log "  ======================"
+    
+    # ===== 下载并安装 =====
+    local count=0
+    for file in $install_list; do
+        local url=$(echo "$json" | grep -o "\"browser_download_url\":\"[^\"]*${file}\"" | cut -d'"' -f4)
+        
+        if [ -z "$url" ]; then
+            log "  ⚠ 未找到 $file 的下载链接，跳过"
+            continue
+        fi
+        
+        log "  "
+        log "  ------ 处理文件 ------"
+        log "  文件名: $file"
+        log "  下载地址: $url"
+        
+        if ! curl -fsSL -o "/tmp/$file" "$url"; then
+            log "  ✗ 下载失败"
+            rm -f /tmp/*${app_name}*.ipk
+            restore_config
+            return 1
+        fi
+        log "  ✓ 下载完成"
+        
+        log "  开始安装..."
+        if opkg install --force-reinstall "/tmp/$file" >>"$LOG_FILE" 2>&1; then
+            log "  ✓ 安装成功"
+        else
+            log "  ⚠ 强制重装失败，尝试卸载后安装..."
+            local pkg_name=$(echo "$file" | sed 's/_.*\.ipk$//')
+            log "  包名: $pkg_name"
+            opkg remove "$pkg_name" >>"$LOG_FILE" 2>&1
+            
+            if opkg install "/tmp/$file" >>"$LOG_FILE" 2>&1; then
+                log "  ✓ 安装成功"
+            else
+                log "  ✗ 安装失败"
+                rm -f /tmp/*${app_name}*.ipk
+                restore_config
+                return 1
+            fi
+        fi
         count=$((count + 1))
+        log "  ----------------------"
     done
     
     rm -f /tmp/*${app_name}*.ipk 2>/dev/null
     restore_config
-    log "  ✓ $pkg 更新完成 (版本: $version, 共 $count 个包)"
+    
+    log "  "
+    log "  =============================="
+    log "  ✓ $pkg 更新完成"
+    log "  版本: $version"
+    log "  共安装: $count 个包"
+    log "  =============================="
     return 0
 }
 
@@ -654,6 +733,7 @@ generate_report() {
 
 # ==================== 主函数 ====================
 run_update() {
+    : > "$LOG_FILE"
     log "======================================"
     log "OpenWrt 自动更新脚本 v${SCRIPT_VERSION}"
     log "开始执行 (PID: $$)"
