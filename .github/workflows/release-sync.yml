@@ -44,22 +44,25 @@ jobs:
             echo "✅ GitHub 最新标签: $GH_TAG"
           fi
 
-      - name: 🔍 检查 Gitee 是否存在该标签
+      - name: 🔍 检查 Gitee Release 是否存在
         id: check_gitee
         if: steps.github_tag.outputs.github_tag != ''
         run: |
           GITHUB_TAG="${{ steps.github_tag.outputs.github_tag }}"
           
-          # 直接查询指定标签是否存在
+          # 直接访问 Gitee Release 页面判断是否存在
           HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
-            "https://gitee.com/api/v5/repos/${{ matrix.repo.gitee_owner }}/${{ matrix.repo.gitee_repo }}/tags/${GITHUB_TAG}?access_token=${{ secrets.GITEE_TOKEN }}")
+            "https://gitee.com/${{ matrix.repo.gitee_owner }}/${{ matrix.repo.gitee_repo }}/releases/tag/${GITHUB_TAG}")
+          
+          echo "📍 检查 URL: https://gitee.com/${{ matrix.repo.gitee_owner }}/${{ matrix.repo.gitee_repo }}/releases/tag/${GITHUB_TAG}"
+          echo "📍 HTTP 状态码: $HTTP_CODE"
           
           if [ "$HTTP_CODE" = "200" ]; then
             echo "new_version=false" >> $GITHUB_OUTPUT
-            echo "::notice::[${{ matrix.repo.gitee_repo }}] Gitee 已存在标签 $GITHUB_TAG，无需同步"
+            echo "::notice::[${{ matrix.repo.gitee_repo }}] Gitee 已存在 Release $GITHUB_TAG，无需同步"
           else
             echo "new_version=true" >> $GITHUB_OUTPUT
-            echo "::notice::[${{ matrix.repo.gitee_repo }}] Gitee 不存在标签 $GITHUB_TAG，需要同步"
+            echo "::notice::[${{ matrix.repo.gitee_repo }}] Gitee 不存在 Release $GITHUB_TAG，需要同步"
           fi
 
       - name: ⬇️ 下载 GitHub Release 资源
