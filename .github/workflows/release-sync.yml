@@ -1,9 +1,9 @@
 name: 同步 GitHub 仓库到 Gitee
 
 on:
-  workflow_dispatch:   # 手动触发
+  workflow_dispatch:
   schedule:
-    - cron: '0 23 * * *'   # 每天 UTC 23:00 = 北京时间 07:00
+    - cron: '0 23 * * *'
 
 jobs:
   sync:
@@ -11,18 +11,15 @@ jobs:
     strategy:
       matrix:
         repo:
-          # 第一个仓库：luci-app-lucky
           - github_owner: "gdy666"
             github_repo: "luci-app-lucky"
             gitee_owner: "whzhni"
             gitee_repo: "lucky"
-          # 第二个仓库：luci-theme-aurora
           - github_owner: "eamonxg"
             github_repo: "luci-theme-aurora"
             gitee_owner: "whzhni"
             gitee_repo: "luci-theme-aurora"
-          # 后续添加更多仓库只需在此继续添加即可
-      fail-fast: false  # 一个仓库失败不影响其他仓库
+      fail-fast: false
     
     name: 同步 ${{ matrix.repo.github_repo }}
     
@@ -44,34 +41,35 @@ jobs:
             echo "github_tag=" >> $GITHUB_OUTPUT
           else
             echo "github_tag=$GH_TAG" >> $GITHUB_OUTPUT
-            echo "GitHub 最新版本 (${{ matrix.repo.github_repo }}): $GH_TAG"
+            echo "✅ GitHub 最新标签 (${{ matrix.repo.github_repo }}): $GH_TAG"
           fi
 
-      - name: 🔍 获取 Gitee 最新标签
-        id: gitee_tag
+      - name: 🔍 检查 Gitee 是否已有该标签
+        id: check_gitee
         if: steps.github_tag.outputs.github_tag != ''
         run: |
-          GITEE_TAG=$(curl -s "https://gitee.com/api/v5/repos/${{ matrix.repo.gitee_owner }}/${{ matrix.repo.gitee_repo }}/tags?access_token=${{ secrets.GITEE_TOKEN }}" | jq -r '.[0].name // empty')
-          echo "gitee_tag=$GITEE_TAG" >> $GITHUB_OUTPUT
-          echo "Gitee 最新版本 (${{ matrix.repo.gitee_repo }}): $GITEE_TAG"
-
-      - name: 🔄 比较版本
-        id: compare
-        if: steps.github_tag.outputs.github_tag != ''
-        run: |
-          GITHUB_VER="${{ steps.github_tag.outputs.github_tag }}"
-          GITEE_VER="${{ steps.gitee_tag.outputs.gitee_tag }}"
+          GITHUB_TAG="${{ steps.github_tag.outputs.github_tag }}"
           
-          if [ "$GITHUB_VER" != "$GITEE_VER" ]; then
-            echo "new_version=true" >> $GITHUB_OUTPUT
-            echo "::notice::[${{ matrix.repo.github_repo }}] 检测到新版本: $GITHUB_VER (Gitee: $GITEE_VER)"
-          else
+          # 获取 Gitee 所有标签（增加获取数量）
+          GITEE_TAGS=$(curl -s "https://gitee.com/api/v5/repos/${{ matrix.repo.gitee_owner }}/${{ matrix.repo.gitee_repo }}/tags?access_token=${{ secrets.GITEE_TOKEN }}&page=1&per_page=100")
+          
+          # 输出前 5 个标签用于调试
+          echo "📋 Gitee 前 5 个标签："
+          echo "$GITEE_TAGS" | jq -r '.[0:5][].name'
+          
+          # 检查 GitHub 标签是否在 Gitee 中存在
+          GITEE_HAS_TAG=$(echo "$GITEE_TAGS" | jq -r --arg tag "$GITHUB_TAG" '.[] | select(.name == $tag) | .name')
+          
+          if [ -n "$GITEE_HAS_TAG" ]; then
             echo "new_version=false" >> $GITHUB_OUTPUT
-            echo "::notice::[${{ matrix.repo.github_repo }}] 版本一致 ($GITHUB_VER)，无需同步"
+            echo "::notice::[${{ matrix.repo.gitee_repo }}] Gitee 已有标签 $GITHUB_TAG，无需同步"
+          else
+            echo "new_version=true" >> $GITHUB_OUTPUT
+            echo "::notice::[${{ matrix.repo.gitee_repo }}] Gitee 没有标签 $GITHUB_TAG，需要同步"
           fi
 
       - name: ⬇️ 下载 GitHub Release 资源
-        if: steps.compare.outputs.new_version == 'true'
+        if: steps.check_gitee.outputs.new_version == 'true'
         run: |
           TAG=${{ steps.github_tag.outputs.github_tag }}
           GITHUB_REPO="${{ matrix.repo.github_owner }}/${{ matrix.repo.github_repo }}"
@@ -102,7 +100,7 @@ jobs:
           ls -lh out
 
       - name: 📤 发布到 Gitee
-        if: steps.compare.outputs.new_version == 'true'
+        if: steps.check_gitee.outputs.new_version == 'true'
         run: |
           chmod +x .github/scripts/release-gitee.sh
           BUILD_TIME=$(date +"%Y-%m-%d %H:%M:%S")
