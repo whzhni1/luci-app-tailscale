@@ -36,7 +36,7 @@ jobs:
         id: github_tag
         run: |
           GH_TAG=$(curl -s https://api.github.com/repos/${{ matrix.repo.github_owner }}/${{ matrix.repo.github_repo }}/tags | jq -r '.[0].name // empty')
-          if [ -z "$GH_TAG" ] || [ "$GH_TAG" = "null" ]; then
+          if [ -z "$GH_TAG" ]; then
             echo "::warning::未找到 GitHub 标签，跳过 ${{ matrix.repo.github_repo }}"
             echo "github_tag=" >> $GITHUB_OUTPUT
           else
@@ -50,28 +50,23 @@ jobs:
         run: |
           GITHUB_TAG="${{ steps.github_tag.outputs.github_tag }}"
           
-          # 使用 Gitee API 获取指定 tag 的 release
-          response=$(curl -s -w "\n%{http_code}" \
+          # 调用 Gitee API 获取指定标签的 Release
+          response=$(curl -s \
             "https://gitee.com/api/v5/repos/${{ matrix.repo.gitee_owner }}/${{ matrix.repo.gitee_repo }}/releases/tags/${GITHUB_TAG}?access_token=${{ secrets.GITEE_TOKEN }}")
           
-          HTTP_CODE=$(echo "$response" | tail -n1)
-          BODY=$(echo "$response" | sed '$d')
+          echo "📍 检查标签: $GITHUB_TAG"
           
-          echo "📍 API URL: https://gitee.com/api/v5/repos/${{ matrix.repo.gitee_owner }}/${{ matrix.repo.gitee_repo }}/releases/tags/${GITHUB_TAG}"
-          echo "📍 HTTP 状态码: $HTTP_CODE"
+          # 提取 tag_name，如果不存在返回空
+          GITEE_TAG=$(echo "$response" | jq -r '.tag_name // empty')
           
-          if [ "$HTTP_CODE" = "200" ]; then
+          if [ -n "$GITEE_TAG" ]; then
             echo "new_version=false" >> $GITHUB_OUTPUT
-            echo "::notice::[${{ matrix.repo.gitee_repo }}] Gitee 已存在 Release $GITHUB_TAG，无需同步"
-          elif [ "$HTTP_CODE" = "404" ]; then
-            echo "new_version=true" >> $GITHUB_OUTPUT
-            echo "::notice::[${{ matrix.repo.gitee_repo }}] Gitee 不存在 Release $GITHUB_TAG，需要同步"
+            echo "::notice::[${{ matrix.repo.gitee_repo }}] ✅ Gitee 已存在 Release $GITEE_TAG，无需同步"
           else
-            # 其他错误情况
-            echo "::warning::无法确定 Release 状态 (HTTP $HTTP_CODE)，跳过同步"
-            echo "$BODY" | jq '.' || echo "$BODY"
-            echo "new_version=false" >> $GITHUB_OUTPUT
+            echo "new_version=true" >> $GITHUB_OUTPUT
+            echo "::notice::[${{ matrix.repo.gitee_repo }}] 🆕 Gitee 不存在 Release $GITHUB_TAG，需要同步"
           fi
+
       - name: ⬇️ 下载 GitHub Release 资源
         if: steps.check_gitee.outputs.new_version == 'true'
         run: |
