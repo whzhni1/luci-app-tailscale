@@ -139,6 +139,83 @@ jobs:
           
           set -e  # 恢复错误时退出
 
+      - name: 🧹 过滤 luci-app-lucky 旧版本文件
+        if: steps.check_gitee.outputs.new_version == 'true' && matrix.repo.github_repo == 'luci-app-lucky'
+        run: |
+          TAG=${{ steps.github_tag.outputs.github_tag }}
+          # 去掉版本号的 v 前缀
+          VERSION=${TAG#v}
+          
+          echo "📋 当前版本: $VERSION"
+          echo ""
+          echo "📂 过滤前的文件:"
+          ls -1 out/ 2>/dev/null || true
+          echo ""
+          
+          cd out
+          
+          # 标记是否已保留 luci-app 和 luci-i18n 文件
+          luci_app_kept=false
+          luci_i18n_kept=false
+          
+          # 创建临时目录存放保留的文件
+          mkdir -p ../keep
+          
+          for file in *; do
+            # 跳过源码包
+            if [[ "$file" == source-* ]]; then
+              echo "  ✅ 保留源码包: $file"
+              mv "$file" ../keep/
+              continue
+            fi
+            
+            # 规则1: luci-app- 开头的文件，只保留第一个
+            if [[ "$file" == luci-app-* ]]; then
+              if [ "$luci_app_kept" = false ]; then
+                echo "  ✅ 保留 luci-app: $file"
+                mv "$file" ../keep/
+                luci_app_kept=true
+              else
+                echo "  ❌ 删除多余 luci-app: $file"
+                rm -f "$file"
+              fi
+              continue
+            fi
+            
+            # 规则2: luci-i18n 开头的文件，只保留第一个
+            if [[ "$file" == luci-i18n* ]]; then
+              if [ "$luci_i18n_kept" = false ]; then
+                echo "  ✅ 保留 luci-i18n: $file"
+                mv "$file" ../keep/
+                luci_i18n_kept=true
+              else
+                echo "  ❌ 删除多余 luci-i18n: $file"
+                rm -f "$file"
+              fi
+              continue
+            fi
+            
+            # 规则3: 包含当前版本号且包含 wanji 的文件
+            if [[ "$file" == *"$VERSION"* ]] && [[ "$file" == *wanji* ]]; then
+              echo "  ✅ 保留版本+wanji: $file"
+              mv "$file" ../keep/
+              continue
+            fi
+            
+            # 其他文件删除
+            echo "  ❌ 删除旧版本: $file"
+            rm -f "$file"
+          done
+          
+          # 将保留的文件移回 out 目录
+          cd ..
+          rm -rf out
+          mv keep out
+          
+          echo ""
+          echo "🎯 过滤后的文件:"
+          ls -lh out/ 2>/dev/null || echo "  (无文件)"
+
       - name: 📤 发布到 Gitee
         if: steps.check_gitee.outputs.new_version == 'true'
         run: |
