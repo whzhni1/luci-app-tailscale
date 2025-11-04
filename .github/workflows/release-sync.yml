@@ -70,6 +70,8 @@ jobs:
       - name: ⬇️ 下载 GitHub Release 资源
         if: steps.check_gitee.outputs.new_version == 'true'
         run: |
+          set +e  # 允许命令失败，不立即退出
+          
           TAG=${{ steps.github_tag.outputs.github_tag }}
           GITHUB_REPO="${{ matrix.repo.github_owner }}/${{ matrix.repo.github_repo }}"
           
@@ -78,13 +80,26 @@ jobs:
           
           release_info=$(curl -s https://api.github.com/repos/$GITHUB_REPO/releases/tags/$TAG)
           
+          # 检查是否成功获取 Release 信息
+          if ! echo "$release_info" | jq -e '.tag_name' > /dev/null 2>&1; then
+            echo "::warning::未找到 Release $TAG，尝试继续..."
+          fi
+          
           # 下载 Release 附件
-          assets_count=$(echo "$release_info" | jq '.assets | length')
+          assets_count=$(echo "$release_info" | jq '.assets | length' 2>/dev/null || echo "0")
           if [ "$assets_count" -gt 0 ]; then
             echo "📥 下载 $assets_count 个 Release 附件..."
             echo "$release_info" | jq -r '.assets[].browser_download_url' | while read url; do
-              echo "  ↓ $(basename $url)"
-              curl -L -o "out/$(basename $url)" "$url"
+              if [ -n "$url" ]; then
+                filename=$(basename "$url")
+                echo "  ↓ 下载: $filename"
+                # 添加重试和错误处理
+                if curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 30 -o "out/$filename" "$url"; then
+                  echo "    ✅ 成功: $filename"
+                else
+                  echo "    ⚠️  失败: $filename (跳过)"
+                fi
+              fi
             done
           else
             echo "⚠️  未找到 Release 附件"
@@ -92,15 +107,47 @@ jobs:
           
           # 下载源码包
           echo "📥 下载源码包..."
-          curl -L -o "out/source-$TAG.zip" "https://github.com/$GITHUB_REPO/archive/refs/tags/$TAG.zip"
-          curl -L -o "out/source-$TAG.tar.gz" "https://github.com/$GITHUB_REPO/archive/refs/tags/$TAG.tar.gz"
           
-          echo "✅ 下载完成:"
-          ls -lh out
+          # ZIP 格式
+          if curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 30 \
+            -o "out/source-$TAG.zip" \
+            "https://github.com/$GITHUB_REPO/archive/refs/tags/$TAG.zip"; then
+            echo "  ✅ ZIP: source-$TAG.zip"
+          else
+            echo "  ⚠️  ZIP 下载失败 (跳过)"
+          fi
+          
+          # TAR.GZ 格式
+          if curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 30 \
+            -o "out/source-$TAG.tar.gz" \
+            "https://github.com/$GITHUB_REPO/archive/refs/tags/$TAG.tar.gz"; then
+            echo "  ✅ TAR.GZ: source-$TAG.tar.gz"
+          else
+            echo "  ⚠️  TAR.GZ 下载失败 (跳过)"
+          fi
+          
+          echo ""
+          echo "✅ 下载完成，文件列表:"
+          ls -lh out/ 2>/dev/null || echo "  (无文件)"
+          
+          # 检查是否至少有一个文件
+          file_count=$(ls -1 out/ 2>/dev/null | wc -l)
+          if [ "$file_count" -eq 0 ]; then
+            echo "::warning::未成功下载任何文件"
+            exit 0  # 不算失败，只是警告
+          fi
+          
+          set -e  # 恢复错误时退出
 
       - name: 📤 发布到 Gitee
         if: steps.check_gitee.outputs.new_version == 'true'
         run: |
+          # 检查是否有文件需要发布
+          if [ ! -d "out" ] || [ -z "$(ls -A out 2>/dev/null)" ]; then
+            echo "::warning::没有文件可发布，跳过"
+            exit 0
+          fi
+          
           chmod +x .github/scripts/release-gitee.sh
           BUILD_TIME=$(date +"%Y-%m-%d %H:%M:%S")
           VERSION=${{ steps.github_tag.outputs.github_tag }}
