@@ -1,7 +1,7 @@
 #!/bin/sh
 
 # ==================== 全局配置 ====================
-SCRIPT_VERSION="1.0.3"
+SCRIPT_VERSION="1.0.4"
 LOG_FILE="/tmp/auto-update.log"
 CONFIG_BACKUP_DIR="/tmp/config_Backup"
 DEVICE_MODEL="$(cat /tmp/sysinfo/model 2>/dev/null || echo '未知设备')"
@@ -20,11 +20,50 @@ SCRIPT_PATH="/whzhni/luci-app-tailscale/raw/main/auto-update.sh"
 # 排除列表
 EXCLUDE_PACKAGES="kernel kmod- base-files busybox lib opkg uclient-fetch ca-bundle ca-certificates luci-app-lucky"
 
+# ==================== 包管理器变量 ====================
+PKG_EXT=""           # .ipk 或 .apk
+PKG_INSTALL=""       # 安装命令
+PKG_UPDATE=""        # 更新源命令
+SYS_ARCH=""          # 系统架构
+
 # ==================== 工具函数 ====================
 log() {
     local msg="[$(date '+%Y-%m-%d %H:%M:%S')] $1"
     echo "$msg" | tee -a "$LOG_FILE"
     case "$1" in -*) ;; *) logger -t "auto-update" "$1" 2>/dev/null ;; esac
+}
+
+# ==================== 检测包管理器 ====================
+detect_package_manager() {
+    if which opkg >/dev/null 2>&1; then
+        PKG_EXT=".ipk"
+        PKG_INSTALL="opkg install"
+        PKG_UPDATE="opkg update"
+    else
+        PKG_EXT=".apk"
+        PKG_INSTALL="apk add --allow-untrusted"
+        PKG_UPDATE="apk update"
+    fi
+    log "包管理器: $(echo $PKG_INSTALL | awk '{print $1}')"
+    log "包格式: $PKG_EXT"
+}
+
+get_system_arch() {
+    if [ -z "$SYS_ARCH" ]; then
+        case "$(uname -m)" in
+            aarch64)   SYS_ARCH="arm64" ;;
+            armv7l)    SYS_ARCH="armv7" ;;
+            armv6l)    SYS_ARCH="armv6" ;;
+            armv5tel)  SYS_ARCH="armv5" ;;
+            x86_64)    SYS_ARCH="x86_64" ;;
+            i686|i386) SYS_ARCH="i386" ;;
+            mips)      SYS_ARCH="mips" ;;
+            mipsel)    SYS_ARCH="mipsle" ;;
+            riscv64)   SYS_ARCH="riscv64" ;;
+            *)         SYS_ARCH="unknown" ;;
+        esac
+        log "系统架构: $SYS_ARCH"
+    fi
 }
 
 normalize_version() {
@@ -38,53 +77,18 @@ compare_versions() {
     [ "$v1" = "$v2" ]
 }
 
-get_system_arch() {
-    case "$(uname -m)" in
-        aarch64) echo "arm64" ;;
-        armv7l)  echo "armv7" ;;
-        armv6l)  echo "armv6" ;;
-        x86_64)  echo "x86_64" ;;
-        i686|i386) echo "i386" ;;
-        *) echo "unknown" ;;
-    esac
-}
-
-# ==================== 时间转换函数 ====================
-convert_minutes_to_readable() {
-    local minutes="$1"
-    
-    [ -z "$minutes" ] || [ "$minutes" -eq 0 ] && { echo "未设置"; return; }
-    
-    # 转换为周 (>= 7天)
-    if [ "$minutes" -ge 10080 ]; then
-        echo "$((minutes / 10080))周"
-    # 转换为天 (>= 1天)
-    elif [ "$minutes" -ge 1440 ]; then
-        echo "$((minutes / 1440))天"
-    # 转换为小时 (>= 1小时)
-    elif [ "$minutes" -ge 60 ]; then
-        echo "$((minutes / 60))小时"
-    # 小于1小时显示分钟
-    else
-        echo "${minutes}分钟"
-    fi
-}
-
 # ==================== 获取更新周期 ====================
 get_update_schedule() {
-    # 从crontab读取包含auto-update.sh的定时任务
     local cron_entry=$(crontab -l 2>/dev/null | grep "auto-update.sh" | grep -v "^#" | head -n1)
     
     [ -z "$cron_entry" ] && { echo "未设置"; return; }
     
-    # 解析cron表达式 (分 时 日 月 周)
     local minute=$(echo "$cron_entry" | awk '{print $1}')
     local hour=$(echo "$cron_entry" | awk '{print $2}')
     local day=$(echo "$cron_entry" | awk '{print $3}')
     local month=$(echo "$cron_entry" | awk '{print $4}')
     local weekday=$(echo "$cron_entry" | awk '{print $5}')
     
-    # 星期转换
     local week_name=""
     case "$weekday" in
         0|7) week_name="日" ;;
@@ -96,26 +100,21 @@ get_update_schedule() {
         6) week_name="六" ;;
     esac
     
-    # 格式化小时（补零）
     local hour_str=""
     if [ "$hour" != "*" ] && ! echo "$hour" | grep -q "/"; then
         hour_str=$(printf "%02d" "$hour")
     fi
     
-    # 判断执行周期
     if [ "$weekday" != "*" ]; then
-        # 每周固定星期
         if [ -n "$hour_str" ]; then
             echo "每周${week_name} ${hour_str}点"
         else
             echo "每周${week_name}"
         fi
     elif echo "$hour" | grep -q "^\*/"; then
-        # 每N小时执行
         local h=$(echo "$hour" | sed 's/\*\///')
         echo "每${h}小时"
     elif echo "$day" | grep -q "^\*/"; then
-        # 每N天执行
         local d=$(echo "$day" | sed 's/\*\///')
         if [ -n "$hour_str" ]; then
             echo "每${d}天 ${hour_str}点"
@@ -123,31 +122,27 @@ get_update_schedule() {
             echo "每${d}天"
         fi
     elif [ "$hour" != "*" ] && [ "$day" = "*" ]; then
-        # 每天固定时间执行
         echo "每天${hour_str}点"
     elif [ "$hour" = "*" ] && echo "$minute" | grep -q "^\*/"; then
-        # 每N分钟执行
         local m=$(echo "$minute" | sed 's/\*\///')
         echo "每${m}分钟"
     elif [ "$hour" = "*" ] && [ "$minute" != "*" ]; then
-        # 每小时固定分钟执行
         echo "每小时"
     else
-        # 其他情况显示原始表达式
         echo "$minute $hour $day $month $weekday"
     fi
 }
 
 # ==================== 状态推送函数 ====================
 send_status_push() {
+    : > "$LOG_FILE"
+    
     log "======================================"
     log "发送状态推送"
     log "======================================"
     
-    # 获取更新周期
     local schedule=$(get_update_schedule)
     
-    # 构建推送消息
     local message="自动更新已打开\n\n"
     message="${message}**脚本版本**: $SCRIPT_VERSION\n"
     message="${message}**自动更新时间**: $schedule\n\n"
@@ -176,12 +171,27 @@ is_package_excluded() {
     return 1
 }
 
-opkg_check() {
-    opkg "$@" 2>/dev/null | grep -q "^$2 "
+is_installed() {
+    if echo "$PKG_INSTALL" | grep -q "opkg"; then
+        opkg list-installed | grep -q "^$1 "
+    else
+        apk info -e "$1" >/dev/null 2>&1
+    fi
 }
 
 get_package_version() {
-    opkg "$1" | grep "^$2 " | awk '{print $3}'
+    if echo "$PKG_INSTALL" | grep -q "opkg"; then
+        opkg "$1" | grep "^$2 " | awk '{print $3}'
+    else
+        case "$1" in
+            list-installed)
+                apk info "$2" 2>/dev/null | grep "^$2-" | sed "s/^$2-//" | cut -d'-' -f1
+                ;;
+            list)
+                apk search "$2" 2>/dev/null | grep "^$2-" | sed "s/^$2-//" | cut-d'-' -f1
+                ;;
+        esac
+    fi
 }
 
 install_language_package() {
@@ -192,13 +202,19 @@ install_language_package() {
         *) return 0 ;;
     esac
     
-    opkg_check list "$lang_pkg" || return 0
+    # 检查语言包是否存在于软件源
+    if echo "$PKG_INSTALL" | grep -q "opkg"; then
+        opkg list 2>/dev/null | grep -q "^$lang_pkg " || return 0
+    else
+        apk search "$lang_pkg" 2>/dev/null | grep -q "^$lang_pkg" || return 0
+    fi
     
+    # 检查是否已安装
     local action="安装"
-    opkg_check list-installed "$lang_pkg" && action="升级"
+    is_installed "$lang_pkg" && action="升级"
     
     log "    ${action}语言包 $lang_pkg..."
-    if opkg $action "$lang_pkg" >>"$LOG_FILE" 2>&1; then
+    if $PKG_INSTALL "$lang_pkg" >>"$LOG_FILE" 2>&1; then
         log "    ✓ $lang_pkg ${action}成功"
     else
         log "    ⚠ $lang_pkg ${action}失败（不影响主程序）"
@@ -274,15 +290,23 @@ classify_packages() {
     log "======================================"
     
     log "更新软件源..."
-    opkg update >>"$LOG_FILE" 2>&1 || { log "✗ 软件源更新失败"; return 1; }
+    if ! $PKG_UPDATE >>"$LOG_FILE" 2>&1; then
+        log "✗ 软件源更新失败"
+        return 1
+    fi
     log "✓ 软件源更新成功"
     
-    # 初始化全局变量
     OFFICIAL_PACKAGES=""
     NON_OFFICIAL_PACKAGES=""
     EXCLUDED_COUNT=0
     
-    local pkgs=$(opkg list-installed | awk '{print $1}' | grep -v "^luci-i18n-")
+    local pkgs=""
+    if echo "$PKG_INSTALL" | grep -q "opkg"; then
+        pkgs=$(opkg list-installed | awk '{print $1}' | grep -v "^luci-i18n-")
+    else
+        pkgs=$(apk info 2>/dev/null | grep -v "^luci-i18n-")
+    fi
+    
     local total=$(echo "$pkgs" | wc -l)
     
     log "检测到 $total 个已安装包（已排除语言包）"
@@ -291,10 +315,19 @@ classify_packages() {
     for pkg in $pkgs; do
         if is_package_excluded "$pkg"; then
             EXCLUDED_COUNT=$((EXCLUDED_COUNT + 1))
-        elif opkg info "$pkg" 2>/dev/null | grep -q "^Description:"; then
-            OFFICIAL_PACKAGES="$OFFICIAL_PACKAGES $pkg"
+        elif echo "$PKG_INSTALL" | grep -q "opkg"; then
+            if opkg info "$pkg" 2>/dev/null | grep -q "^Description:"; then
+                OFFICIAL_PACKAGES="$OFFICIAL_PACKAGES $pkg"
+            else
+                NON_OFFICIAL_PACKAGES="$NON_OFFICIAL_PACKAGES $pkg"
+            fi
         else
-            NON_OFFICIAL_PACKAGES="$NON_OFFICIAL_PACKAGES $pkg"
+            # apk 简单判断：有仓库来源的算官方
+            if apk info "$pkg" 2>/dev/null | grep -q "^origin:"; then
+                OFFICIAL_PACKAGES="$OFFICIAL_PACKAGES $pkg"
+            else
+                NON_OFFICIAL_PACKAGES="$NON_OFFICIAL_PACKAGES $pkg"
+            fi
         fi
     done
     
@@ -327,29 +360,7 @@ get_gitee_version() {
     echo "$json" | grep -o '"tag_name":"[^"]*"' | head -n1 | cut -d'"' -f4
 }
 
-is_arch_match() {
-    case "$1" in
-        *_$2.ipk|*_$2_*.ipk|*_all.ipk) return 0 ;;
-        *) return 1 ;;
-    esac
-}
-
-is_better_binary() {
-    [ -z "$1" ] && return 0
-    case "$2" in
-        *_wanji.ipk)
-            case "$1" in
-                *_wanji.ipk) [ "$2" \> "$1" ] ;;
-                *) return 0 ;;
-            esac ;;
-        *)
-            case "$1" in
-                *_wanji.ipk) return 1 ;;
-                *) [ "$2" \> "$1" ] ;;
-            esac ;;
-    esac
-}
-
+# ==================== Gitee 更新函数 ====================
 update_from_gitee() {
     local pkg="$1" repo="$2"
     local app_name="${pkg#luci-app-}"
@@ -358,7 +369,6 @@ update_from_gitee() {
     log "  从 Gitee 更新 $pkg (仓库: $repo)"
     backup_config
     
-    local arch=$(get_system_arch)
     local json=$(curl -s "https://gitee.com/api/v5/repos/${repo}/releases/latest")
     
     [ -z "$json" ] && { log "  ✗ API 请求失败"; cleanup_backup; return 1; }
@@ -366,134 +376,134 @@ update_from_gitee() {
     local version=$(echo "$json" | grep -o '"tag_name":"[^"]*"' | head -n1 | cut -d'"' -f4)
     [ -z "$version" ] && { log "  ✗ 无法获取版本"; cleanup_backup; return 1; }
     
-    log "  Gitee 最新版本: $version"
+    log "  版本: $version"
     
-    local files=$(echo "$json" | grep -o '"browser_download_url":"[^"]*\.ipk"' | cut -d'"' -f4 | xargs -n1 basename)
-    [ -z "$files" ] && { log "  ✗ 未找到 ipk 文件"; cleanup_backup; return 1; }
+    # 获取所有包文件（完整URL）
+    local all_files=$(echo "$json" | grep -o "\"browser_download_url\":\"[^\"]*\\${PKG_EXT}\"" | cut -d'"' -f4)
+    [ -z "$all_files" ] && { log "  ✗ 未找到 ${PKG_EXT} 文件"; cleanup_backup; return 1; }
     
-    log "  ====== 获取的文件列表 ======"
-    echo "$files" | while read f; do log "    $f"; done
-    log "  ============================"
+    log "  ====== 可用文件 ======"
+    echo "$all_files" | while read url; do 
+        [ -n "$url" ] && log "    $(basename "$url")"
+    done
+    log "  ====================="
     
-    # ===== 定义搜索规则（优先级从高到低）=====
-    # 格式：类型|关键词1|关键词2|关键词3|排除词(逗号分隔)
+    # 定义关键字组合（用 | 分隔关键字）
     local search_rules="
-主程序wanji|$app_name|$arch|wanji|luci-
-主程序|$app_name|$arch||luci-,wanji
-Luci应用|luci-app|$app_name||
-Luci主题|luci-theme|$app_name||
-中文语言包|luci-i18n|$app_name|zh-cn|
+$SYS_ARCH
+luci-app|$app_name
+luci-theme|$app_name
+luci-i18n|$app_name|zh-cn
 "
     
-    # ===== 搜索匹配文件（内存操作）=====
-    local install_list=""
+    # 搜索匹配的文件
+    local matched_files=""
     local old_IFS="$IFS"
     IFS=$'\n'
     
     for rule in $search_rules; do
         [ -z "$rule" ] && continue
         
-        # 解析规则
-        IFS='|' read -r name kw1 kw2 kw3 excludes <<EOF
-$rule
-EOF
+        IFS='|'
+        set -- $rule
+        local keywords="$*"
         IFS=$'\n'
         
-        [ -z "$name" ] && continue
-        
-        local result="$files"
-        
-        # 应用关键词过滤
-        for kw in $kw1 $kw2 $kw3; do
-            [ -n "$kw" ] && result=$(echo "$result" | grep -i "$kw")
-        done
-        
-        # 应用排除过滤
-        if [ -n "$excludes" ]; then
-            IFS=','
-            for ex in $excludes; do
-                [ -n "$ex" ] && result=$(echo "$result" | grep -v "$ex")
+        for file_url in $all_files; do
+            local filename=$(basename "$file_url")
+            
+            # 跳过已匹配的
+            case " $matched_files " in *" $file_url "*) continue ;; esac
+            
+            # 检查所有关键字是否都匹配
+            local all_match=1
+            IFS='|'
+            for kw in $rule; do
+                [ -z "$kw" ] && continue
+                echo "$filename" | grep -qi "$kw" || { all_match=0; break; }
             done
             IFS=$'\n'
-        fi
-        
-        # 取第一个匹配结果
-        result=$(echo "$result" | head -n1)
-        
-        if [ -n "$result" ]; then
-            install_list="$install_list $result"
-            log "  [匹配] $name: $result"
-        fi
+            
+            # 主程序排除 luci- 开头
+            if ! echo "$rule" | grep -q "luci-"; then
+                echo "$filename" | grep -q "^luci-" && all_match=0
+            fi
+            
+            if [ $all_match -eq 1 ]; then
+                matched_files="$matched_files $file_url"
+                log "  [匹配] [$keywords] -> $filename"
+                break
+            fi
+        done
     done
     
     IFS="$old_IFS"
     
-    # 去除多余空格
-    install_list=$(echo $install_list)
-    
-    [ -z "$install_list" ] && { 
-        log "  ✗ 未找到任何匹配的安装包"
-        cleanup_backup
-        return 1
-    }
+    [ -z "$matched_files" ] && { log "  ✗ 未找到匹配文件"; cleanup_backup; return 1; }
     
     log "  ====== 安装计划 ======"
-    log "    $install_list"
-    log "  ======================"
+    for url in $matched_files; do
+        log "    $(basename "$url")"
+    done
+    log "  ====================="
     
-    # ===== 下载并安装 =====
+    # 下载并安装
     local count=0
-    for file in $install_list; do
-        local url=$(echo "$json" | grep -o "\"browser_download_url\":\"[^\"]*${file}\"" | cut -d'"' -f4)
-        
-        if [ -z "$url" ]; then
-            log "  ⚠ 未找到 $file 的下载链接，跳过"
-            continue
-        fi
+    for file_url in $matched_files; do
+        local filename=$(basename "$file_url")
         
         log "  "
         log "  ------ 处理文件 ------"
-        log "  文件名: $file"
-        log "  下载地址: $url"
+        log "  文件名: $filename"
+        log "  下载地址: $file_url"
         
-        if ! curl -fsSL -o "/tmp/$file" "$url"; then
+        if ! curl -fsSL -o "/tmp/$filename" "$file_url"; then
             log "  ✗ 下载失败"
-            rm -f /tmp/*${app_name}*.ipk
+            rm -f /tmp/*${app_name}*${PKG_EXT} 2>/dev/null
             restore_config
             return 1
         fi
         log "  ✓ 下载完成"
         
         log "  开始安装..."
-        if opkg install --force-reinstall "/tmp/$file" >>"$LOG_FILE" 2>&1; then
-            log "  ✓ 安装成功"
-        else
-            log "  ⚠ 强制重装失败，尝试卸载后安装..."
-            local pkg_name=$(echo "$file" | sed 's/_.*\.ipk$//')
-            log "  包名: $pkg_name"
-            opkg remove "$pkg_name" >>"$LOG_FILE" 2>&1
-            
-            if opkg install "/tmp/$file" >>"$LOG_FILE" 2>&1; then
+        if echo "$PKG_INSTALL" | grep -q "opkg"; then
+            if opkg install --force-reinstall "/tmp/$filename" >>"$LOG_FILE" 2>&1; then
                 log "  ✓ 安装成功"
+                count=$((count + 1))
+            else
+                log "  ⚠ 强制重装失败，尝试卸载后安装..."
+                local pkg_name=$(echo "$filename" | sed "s/_.*\\${PKG_EXT}$//")
+                opkg remove "$pkg_name" >>"$LOG_FILE" 2>&1
+                if opkg install "/tmp/$filename" >>"$LOG_FILE" 2>&1; then
+                    log "  ✓ 安装成功"
+                    count=$((count + 1))
+                else
+                    log "  ✗ 安装失败"
+                    rm -f /tmp/*${app_name}*${PKG_EXT} 2>/dev/null
+                    restore_config
+                    return 1
+                fi
+            fi
+        else
+            if $PKG_INSTALL "/tmp/$filename" >>"$LOG_FILE" 2>&1; then
+                log "  ✓ 安装成功"
+                count=$((count + 1))
             else
                 log "  ✗ 安装失败"
-                rm -f /tmp/*${app_name}*.ipk
+                rm -f /tmp/*${app_name}*${PKG_EXT} 2>/dev/null
                 restore_config
                 return 1
             fi
         fi
-        count=$((count + 1))
         log "  ----------------------"
     done
     
-    rm -f /tmp/*${app_name}*.ipk 2>/dev/null
+    rm -f /tmp/*${app_name}*${PKG_EXT} 2>/dev/null
     restore_config
     
     log "  "
     log "  =============================="
-    log "  ✓ $pkg 更新完成"
-    log "  版本: $version"
-    log "  共安装: $count 个包"
+    log "  ✓ $pkg 更新完成 (v$version, $count 个包)"
     log "  =============================="
     return 0
 }
@@ -515,18 +525,31 @@ update_official_packages() {
         local cur=$(get_package_version list-installed "$pkg")
         local new=$(get_package_version list "$pkg")
         
-        if [ "$cur" != "$new" ]; then
+        if [ "$cur" != "$new" ] && [ -n "$new" ]; then
             log "↻ $pkg: $cur → $new"
             log "  正在升级..."
-            if opkg upgrade "$pkg" >>"$LOG_FILE" 2>&1; then
-                log "  ✓ 升级成功"
-                UPDATED_PACKAGES="${UPDATED_PACKAGES}\n    - $pkg: $cur → $new"
-                OFFICIAL_UPDATED=$((OFFICIAL_UPDATED + 1))
-                install_language_package "$pkg"
+            
+            if echo "$PKG_INSTALL" | grep -q "opkg"; then
+                if opkg upgrade "$pkg" >>"$LOG_FILE" 2>&1; then
+                    log "  ✓ 升级成功"
+                    UPDATED_PACKAGES="${UPDATED_PACKAGES}\n    - $pkg: $cur → $new"
+                    OFFICIAL_UPDATED=$((OFFICIAL_UPDATED + 1))
+                    install_language_package "$pkg"
+                else
+                    log "  ✗ 升级失败"
+                    FAILED_PACKAGES="${FAILED_PACKAGES}\n    - $pkg"
+                    OFFICIAL_FAILED=$((OFFICIAL_FAILED + 1))
+                fi
             else
-                log "  ✗ 升级失败"
-                FAILED_PACKAGES="${FAILED_PACKAGES}\n    - $pkg"
-                OFFICIAL_FAILED=$((OFFICIAL_FAILED + 1))
+                if apk upgrade "$pkg" >>"$LOG_FILE" 2>&1; then
+                    log "  ✓ 升级成功"
+                    UPDATED_PACKAGES="${UPDATED_PACKAGES}\n    - $pkg: $cur → $new"
+                    OFFICIAL_UPDATED=$((OFFICIAL_UPDATED + 1))
+                else
+                    log "  ✗ 升级失败"
+                    FAILED_PACKAGES="${FAILED_PACKAGES}\n    - $pkg"
+                    OFFICIAL_FAILED=$((OFFICIAL_FAILED + 1))
+                fi
             fi
         else
             log "○ $pkg: $cur (已是最新)"
@@ -733,13 +756,23 @@ generate_report() {
 
 # ==================== 主函数 ====================
 run_update() {
-    : > "$LOG_FILE"
+    rm -f "$LOG_FILE"
+    touch "$LOG_FILE"
+    
     log "======================================"
     log "OpenWrt 自动更新脚本 v${SCRIPT_VERSION}"
     log "开始执行 (PID: $$)"
     log "日志文件: $LOG_FILE"
-    log "安装优先级: $([ "$INSTALL_PRIORITY" = "1" ] && echo "官方源优先" || echo "Gitee 优先")"
     log "======================================"
+    log ""
+    
+    # 检测包管理器
+    detect_package_manager
+    
+    # 获取系统架构
+    get_system_arch
+    
+    log "安装优先级: $([ "$INSTALL_PRIORITY" = "1" ] && echo "官方源优先" || echo "Gitee 优先")"
     log ""
     
     check_script_update
@@ -771,9 +804,7 @@ run_update() {
 }
 
 # ==================== 参数处理 ====================
-# 检查是否带参数 ts
 if [ "$1" = "ts" ]; then
-    # 仅执行状态推送，不运行更新
     send_status_push
     exit 0
 fi
