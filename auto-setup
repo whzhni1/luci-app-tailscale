@@ -174,22 +174,32 @@ install_pkg_official() {
         log "  ✓ $pkg 安装成功"
         INSTALLED_PACKAGES="$INSTALLED_PACKAGES $pkg"
         
-        # 智能安装语言包（仅opkg支持）
-        if echo "$PKG_INSTALL" | grep -q "opkg"; then
-            local lang=""
-            case "$pkg" in
-                luci-app-*)
-                    lang="luci-i18n-${pkg#luci-app-}-zh-cn"
-                    ;;
-                luci-theme-*)
-                    lang="luci-i18n-theme-${pkg#luci-theme-}-zh-cn"
-                    ;;
-            esac
+        # 智能安装语言包
+        local lang=""
+        case "$pkg" in
+            luci-app-*)
+                lang="luci-i18n-${pkg#luci-app-}-zh-cn"
+                ;;
+            luci-theme-*)
+                lang="luci-i18n-theme-${pkg#luci-theme-}-zh-cn"
+                ;;
+        esac
+        
+        if [ -n "$lang" ] && ! is_installed "$lang"; then
+            # 检查语言包是否存在于软件源
+            local lang_exists=0
+            if echo "$PKG_INSTALL" | grep -q "opkg"; then
+                opkg list 2>/dev/null | grep -q "^$lang " && lang_exists=1
+            else
+                apk search "$lang" 2>/dev/null | grep -q "^$lang" && lang_exists=1
+            fi
             
-            if [ -n "$lang" ] && ! is_installed "$lang"; then
+            if [ $lang_exists -eq 1 ]; then
                 log "  尝试安装语言包 $lang..."
                 if $PKG_INSTALL "$lang" >>"$LOG_FILE" 2>&1; then
                     log "  ✓ $lang 安装成功"
+                else
+                    log "  ⚠ $lang 安装失败（不影响主程序）"
                 fi
             fi
         fi
