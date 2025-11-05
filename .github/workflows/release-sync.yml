@@ -50,14 +50,36 @@ jobs:
         run: |
           GITHUB_TAG="${{ steps.github_tag.outputs.github_tag }}"
           
-          # 调用 Gitee API 获取指定标签的 Release
-          response=$(curl -s \
-            "https://gitee.com/api/v5/repos/${{ matrix.repo.gitee_owner }}/${{ matrix.repo.gitee_repo }}/releases/tags/${GITHUB_TAG}?access_token=${{ secrets.GITEE_TOKEN }}")
-          
           echo "📍 检查标签: $GITHUB_TAG"
           
-          # 提取 tag_name，如果不存在返回空
-          GITEE_TAG=$(echo "$response" | jq -r '.tag_name // empty')
+          # 调用 Gitee API 获取指定标签的 Release
+          response=$(curl -s -w "\n%{http_code}" \
+            "https://gitee.com/api/v5/repos/${{ matrix.repo.gitee_owner }}/${{ matrix.repo.gitee_repo }}/releases/tags/${GITHUB_TAG}?access_token=${{ secrets.GITEE_TOKEN }}")
+          
+          # 分离 HTTP 状态码和响应体
+          http_code=$(echo "$response" | tail -n1)
+          body=$(echo "$response" | sed '$d')
+          
+          echo "📍 HTTP 状态码: $http_code"
+          
+          # 检查 HTTP 状态码
+          if [ "$http_code" != "200" ]; then
+            echo "::notice::API 返回状态码 $http_code，判断为不存在"
+            echo "new_version=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # 检查响应是否为有效 JSON
+          if ! echo "$body" | jq empty > /dev/null 2>&1; then
+            echo "::warning::API 返回非 JSON 格式，响应内容:"
+            echo "$body" | head -n 5
+            echo "::notice::无法解析响应，为安全起见判断为需要同步"
+            echo "new_version=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # 提取 tag_name
+          GITEE_TAG=$(echo "$body" | jq -r '.tag_name // empty')
           
           if [ -n "$GITEE_TAG" ]; then
             echo "new_version=false" >> $GITHUB_OUTPUT
