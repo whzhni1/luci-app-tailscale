@@ -20,95 +20,45 @@ jobs:
       tag: ${{ steps.version.outputs.tag }}
       build_time: ${{ steps.build_time.outputs.time }}
     steps:
-      - name: "📥 检出代码"
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: "🔍 检查上游版本"
+      - name: "检查版本"
         id: version
         run: |
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "📊 版本检查"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          
-          echo "📡 获取上游最新版本..."
           upstream=$(curl -s "https://api.github.com/repos/asvow/luci-app-tailscale/tags" | jq -r '.[0].name // "none"')
-          
-          echo "📦 获取当前仓库版本..."
           current=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             "https://api.github.com/repos/${{ github.repository }}/tags" | jq -r '.[0].name // "none"')
           
-          echo ""
-          echo "  上游版本: $upstream"
-          echo "  当前版本: $current"
-          echo ""
-          
           if [ "$upstream" = "$current" ]; then
-            echo "✅ 版本一致，跳过构建"
+            echo "版本一致，跳过"
             echo "skip=true" >> $GITHUB_OUTPUT
           else
-            echo "🆕 发现新版本，开始构建"
+            echo "发现新版本: $upstream"
             echo "skip=false" >> $GITHUB_OUTPUT
-            version_number=$(echo "$upstream" | sed 's/^v//')
-            echo "version=$version_number" >> $GITHUB_OUTPUT
+            echo "version=$(echo $upstream | sed 's/^v//')" >> $GITHUB_OUTPUT
             echo "tag=$upstream" >> $GITHUB_OUTPUT
           fi
-          
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-      - name: "📅 生成构建时间"
+      - name: "生成构建时间"
         id: build_time
         if: steps.version.outputs.skip == 'false'
-        run: |
-          BUILD_TIME=$(TZ=Asia/Shanghai date +'%Y-%m-%d %H:%M:%S')
-          echo "time=$BUILD_TIME" >> $GITHUB_OUTPUT
-          echo "⏰ 构建时间: $BUILD_TIME CST"
+        run: echo "time=$(TZ=Asia/Shanghai date +'%Y-%m-%d %H:%M:%S')" >> $GITHUB_OUTPUT
 
-      - name: "📦 拉取源码"
+      - name: "拉取并修改源码"
         if: steps.version.outputs.skip == 'false'
         run: |
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "📥 克隆源码"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           git clone https://github.com/asvow/luci-app-tailscale luci-app-tailscale
           cd luci-app-tailscale
-          echo "✅ 源码克隆完成"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-
-      - name: "🔧 修改源码"
-        if: steps.version.outputs.skip == 'false'
-        run: |
-          cd luci-app-tailscale
           
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "🔧 开始源码修改"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          # Makefile
+          sed -i '/^PKG_VERSION:=/a\\ndefine Package/luci-app-tailscale/conffiles\n/etc/config/tailscale\n/etc/config/tailscale_data/\nendef' Makefile
           
-          echo "1️⃣ 修改 Makefile - 添加配置文件保护"
-          if ! grep -q "define Package/luci-app-tailscale/conffiles" Makefile; then
-            sed -i '/^PKG_VERSION:=/a\\ndefine Package/luci-app-tailscale/conffiles\n/etc/config/tailscale\n/etc/config/tailscale_data/\nendef' Makefile
-            echo "   ✅ 已添加 conffiles 定义"
-          else
-            echo "   ⚠️  conffiles 定义已存在"
-          fi
-          
-          echo ""
-          echo "2️⃣ 修改默认配置路径"
-          sed -i "s|'/etc/tailscale'|'/etc/config/tailscale_data'|g" root/etc/config/tailscale
-          echo "   ✅ 配置路径: /etc/tailscale → /etc/config/tailscale_data"
-          
-          echo ""
-          echo "3️⃣ 修改 init.d 脚本"
+          # 配置和脚本
+          sed -i "s|'/etc/tailscale'|'/etc/config/tailscale_data'|g" root/etc/config/tailscale root/etc/init.d/tailscale htdocs/luci-static/resources/view/tailscale/setting.js
           sed -i 's|/var/lib/tailscale|/var/run/tailscale|g' root/etc/init.d/tailscale
-          sed -i '/rm -rf "$CONFIG_PATH"/i\	# 只删除临时目录，保护数据目录' root/etc/init.d/tailscale
-          echo "   ✅ 临时目录: /var/lib/tailscale → /var/run/tailscale"
+          sed -i '/rm -rf "$CONFIG_PATH"/i\	# 只删除临时目录' root/etc/init.d/tailscale
           
-          echo ""
-          echo "4️⃣ 修改 LuCI 界面 JS"
-          sed -i "s|'/etc/tailscale'|'/etc/config/tailscale_data'|g" htdocs/luci-static/resources/view/tailscale/setting.js
-          echo "   ✅ 界面默认路径已更新"
-          
-          echo ""
-          echo "5️⃣ 生成 uci-defaults 脚本"
+          # uci-defaults
           mkdir -p root/etc/uci-defaults
           cat > root/etc/uci-defaults/40_luci-tailscale <<'EOF'
           #!/bin/sh
@@ -126,14 +76,10 @@ jobs:
           rm -f /tmp/luci-indexcache
           EOF
           chmod +x root/etc/uci-defaults/40_luci-tailscale
-          echo "   ✅ uci-defaults 脚本已生成"
           
-          echo ""
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "✅ 所有修改完成"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "源码修改完成"
 
-      - name: "📤 上传源码"
+      - name: "上传源码"
         if: steps.version.outputs.skip == 'false'
         uses: actions/upload-artifact@v4
         with:
@@ -151,35 +97,26 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: "OpenWrt 主线 (APK)"
-            arch: x86_64
+          - arch: x86_64
             sdk: SNAPSHOT
             pkg_type: apk
             
-          - name: "OpenWrt 24.10 (IPK)"
-            arch: x86_64
+          - arch: x86_64
             sdk: openwrt-24.10
             pkg_type: ipk
 
-    name: "🔨 ${{ matrix.name }}"
-
-    outputs:
-      apk_status: ${{ steps.build_status.outputs.apk_status }}
-      ipk_status: ${{ steps.build_status.outputs.ipk_status }}
+    name: "${{ matrix.sdk }}-${{ matrix.pkg_type }}"
 
     steps:
-      - name: "📥 检出代码"
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: "📦 下载源码"
+      - name: "下载源码"
         uses: actions/download-artifact@v4
         with:
           name: source
           path: luci-app-tailscale
 
-      - name: "🔨 编译 ${{ matrix.pkg_type }}"
-        id: compile
-        continue-on-error: true
+      - name: "编译"
         uses: sbwml/openwrt-gh-action-sdk@go1.25
         env:
           ARCH: ${{ matrix.arch }}-${{ matrix.sdk }}
@@ -187,59 +124,30 @@ jobs:
           PACKAGES: luci-app-tailscale
           NO_REFRESH_CHECK: true
 
-      - name: "📋 列出编译产物"
-        id: list_files
+      - name: "收集产物"
+        id: collect
         run: |
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "📦 编译产物 (${{ matrix.pkg_type }})"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          mkdir -p output
+          find bin/packages/${{ matrix.arch }}/packages_ci -name "*luci*tailscale*.${{ matrix.pkg_type }}" -exec cp -v {} output/ \;
           
-          # 检查是否有编译产物
-          if [ -d "bin/packages/${{ matrix.arch }}/packages_ci" ]; then
-            FILES=$(find bin/packages/${{ matrix.arch }}/packages_ci -name "*luci*tailscale*.${{ matrix.pkg_type }}" -exec basename {} \;)
-            if [ -n "$FILES" ]; then
-              echo "$FILES" | while read file; do
-                size=$(find bin/packages/${{ matrix.arch }}/packages_ci -name "$file" -exec ls -lh {} \; | awk '{print $5}')
-                echo "  ✅ $file ($size)"
-              done
-              
-              # 保存文件列表到输出
-              echo "files<<EOF" >> $GITHUB_OUTPUT
-              echo "$FILES" >> $GITHUB_OUTPUT
-              echo "EOF" >> $GITHUB_OUTPUT
-              
-              echo "status=success" >> $GITHUB_OUTPUT
-            else
-              echo "  ❌ 未找到编译产物"
-              echo "status=failed" >> $GITHUB_OUTPUT
-            fi
-          else
-            echo "  ❌ 编译目录不存在"
-            echo "status=failed" >> $GITHUB_OUTPUT
-          fi
+          # 统计文件信息
+          FILES=$(ls output/)
+          COUNT=$(echo "$FILES" | wc -l)
+          SIZE=$(du -sh output | awk '{print $1}')
           
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "files<<EOF" >> $GITHUB_OUTPUT
+          echo "$FILES" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          echo "count=$COUNT" >> $GITHUB_OUTPUT
+          echo "size=$SIZE" >> $GITHUB_OUTPUT
 
-      - name: "📤 上传产物到 Artifacts"
-        if: steps.list_files.outputs.status == 'success'
+      - name: "上传产物"
         uses: actions/upload-artifact@v4
         with:
           name: packages-${{ matrix.pkg_type }}
-          path: bin/packages/${{ matrix.arch }}/packages_ci/*luci*tailscale*
+          path: output/*
 
-      - name: "📦 打包压缩"
-        if: steps.list_files.outputs.status == 'success'
-        run: |
-          echo "📦 打包 ${{ matrix.pkg_type }} 文件..."
-          cd bin/packages/${{ matrix.arch }}/packages_ci
-          tar -czf ../../../../${{ matrix.pkg_type }}-packages.tar.gz *luci*tailscale*
-          
-          echo ""
-          echo "✅ 打包完成"
-          ls -lh ../../../../${{ matrix.pkg_type }}-packages.tar.gz
-
-      - name: "🚀 发布到 GitHub Release"
-        if: steps.list_files.outputs.status == 'success'
+      - name: "发布到 Release"
         uses: ncipollo/release-action@v1
         with:
           tag: ${{ needs.prepare.outputs.tag }}
@@ -247,78 +155,50 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           allowUpdates: true
           replacesArtifacts: true
-          artifacts: "${{ matrix.pkg_type }}-packages.tar.gz"
+          artifacts: "output/*"
           body: |
-            ## 📦 下载包
+            ## 📦 下载文件
             
-            - **apk-packages.tar.gz** - OpenWrt 主线 (SNAPSHOT)
-            - **ipk-packages.tar.gz** - OpenWrt 24.10
-            
-            每个压缩包包含：
-            - `luci-app-tailscale` - 主程序包
-            - `luci-i18n-tailscale-zh-cn` - 简体中文语言包
-            - `luci-i18n-tailscale-zh-tw` - 繁体中文语言包
+            直接下载 APK 或 IPK 文件即可安装。
             
             ## 📥 安装方法
             
-            ### APK 格式（OpenWrt 主线）
+            **APK 格式（OpenWrt 主线）：**
             ```bash
-            # 解压
-            tar -xzf apk-packages.tar.gz
+            # 下载文件
+            wget https://github.com/${{ github.repository }}/releases/download/${{ needs.prepare.outputs.tag }}/luci-app-tailscale-*.apk
+            wget https://github.com/${{ github.repository }}/releases/download/${{ needs.prepare.outputs.tag }}/luci-i18n-tailscale-zh-cn-*.apk
             
-            # 安装主程序
+            # 安装
             apk add --allow-untrusted luci-app-tailscale-*.apk
-            
-            # 安装中文语言包（可选）
-            apk add --allow-untrusted luci-i18n-tailscale-zh-cn-*.apk
+            apk add --allow-untrusted luci-i18n-tailscale-zh-cn-*.apk  # 可选
             ```
             
-            ### IPK 格式（OpenWrt 24.10）
+            **IPK 格式（OpenWrt 24.10）：**
             ```bash
-            # 解压
-            tar -xzf ipk-packages.tar.gz
+            # 下载文件
+            wget https://github.com/${{ github.repository }}/releases/download/${{ needs.prepare.outputs.tag }}/luci-app-tailscale_*_all.ipk
+            wget https://github.com/${{ github.repository }}/releases/download/${{ needs.prepare.outputs.tag }}/luci-i18n-tailscale-zh-cn_*_all.ipk
             
-            # 安装主程序
+            # 安装
             opkg install luci-app-tailscale_*_all.ipk
-            
-            # 安装中文语言包（可选）
-            opkg install luci-i18n-tailscale-zh-cn_*_all.ipk
+            opkg install luci-i18n-tailscale-zh-cn_*_all.ipk  # 可选
             ```
             
             ## 🔧 配置说明
             
-            **配置文件位置**：
-            - UCI 配置：`/etc/config/tailscale`
+            - 配置文件：`/etc/config/tailscale`
             - 数据目录：`/etc/config/tailscale_data/`
             - 授权文件：`/etc/config/tailscale_data/tailscaled.state`
             
-            **特性**：
+            **特性：**
             - ✅ 重新安装时自动保留配置
-            - ✅ 固件升级时保留配置和授权信息
-            - ✅ 自动修复官方 tailscale 包的配置问题
+            - ✅ 固件升级时保留配置和授权
+            - ✅ 自动修复官方包配置问题
             
-            ## 📌 版本信息
+            ---
             
-            - **上游版本**：${{ needs.prepare.outputs.tag }}
-            - **构建时间**：${{ needs.prepare.outputs.build_time }} CST
-            - **适用系统**：OpenWrt / ImmortalWrt
-            
-            ## ⚠️ 注意事项
-            
-            1. 本包仅包含 LuCI 界面插件和语言包
-            2. `tailscale` 主程序会自动从系统源安装（依赖项）
-            3. 首次安装需要网络连接以下载依赖
-            4. 支持 x86_64 架构（其他架构请自行编译）
-
-      - name: "📊 设置构建状态"
-        id: build_status
-        if: always()
-        run: |
-          if [ "${{ matrix.pkg_type }}" = "apk" ]; then
-            echo "apk_status=${{ steps.list_files.outputs.status || 'failed' }}" >> $GITHUB_OUTPUT
-          else
-            echo "ipk_status=${{ steps.list_files.outputs.status || 'failed' }}" >> $GITHUB_OUTPUT
-          fi
+            **版本：** ${{ needs.prepare.outputs.tag }} | **构建时间：** ${{ needs.prepare.outputs.build_time }} CST
 
   # ========================================
   # 任务 3: 生成构建报告
@@ -328,95 +208,95 @@ jobs:
     if: always() && needs.prepare.outputs.skip == 'false'
     runs-on: ubuntu-latest
     steps:
-      - name: "📊 生成构建报告"
+      - name: "下载产物"
+        uses: actions/download-artifact@v4
+        with:
+          pattern: packages-*
+          path: packages
+
+      - name: "生成报告"
         run: |
-          # 下载所有 artifacts
-          mkdir -p report
+          cat > $GITHUB_STEP_SUMMARY << 'EOF'
+          # 构建报告
+          
+          ## 基本信息
+          
+          | 项目 | 值 |
+          |------|-----|
+          | 版本 | `${{ needs.prepare.outputs.tag }}` |
+          | 构建时间 | ${{ needs.prepare.outputs.build_time }} CST |
+          | 工作流 | [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |
+          | Release | [${{ needs.prepare.outputs.tag }}](${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ needs.prepare.outputs.tag }}) |
+          
+          ## 编译状态
+          
+          | 包类型 | 平台 | 状态 | 文件数 | 总大小 |
+          |--------|------|------|--------|--------|
+          EOF
+          
+          # APK 状态
+          if [ -d "packages/packages-apk" ]; then
+            APK_COUNT=$(find packages/packages-apk -type f | wc -l)
+            APK_SIZE=$(du -sh packages/packages-apk | awk '{print $1}')
+            APK_STATUS="✅ 成功"
+          else
+            APK_COUNT="0"
+            APK_SIZE="-"
+            APK_STATUS="❌ 失败"
+          fi
+          echo "| APK | OpenWrt 主线 (SNAPSHOT) | $APK_STATUS | $APK_COUNT | $APK_SIZE |" >> $GITHUB_STEP_SUMMARY
+          
+          # IPK 状态
+          if [ -d "packages/packages-ipk" ]; then
+            IPK_COUNT=$(find packages/packages-ipk -type f | wc -l)
+            IPK_SIZE=$(du -sh packages/packages-ipk | awk '{print $1}')
+            IPK_STATUS="✅ 成功"
+          else
+            IPK_COUNT="0"
+            IPK_SIZE="-"
+            IPK_STATUS="❌ 失败"
+          fi
+          echo "| IPK | OpenWrt 24.10 | $IPK_STATUS | $IPK_COUNT | $IPK_SIZE |" >> $GITHUB_STEP_SUMMARY
           
           cat >> $GITHUB_STEP_SUMMARY << 'EOF'
-          # 📊 构建报告
           
-          ## 📋 基本信息
-          
-          | 项目 | 信息 |
-          |------|------|
-          | 🏷️ **版本** | `${{ needs.prepare.outputs.tag }}` |
-          | 📅 **构建时间** | ${{ needs.prepare.outputs.build_time }} CST |
-          | 🔗 **上游仓库** | [asvow/luci-app-tailscale](https://github.com/asvow/luci-app-tailscale) |
-          | 📦 **Release** | [${{ needs.prepare.outputs.tag }}](${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ needs.prepare.outputs.tag }}) |
-          
-          ## 🔨 编译状态
-          
-          | 包类型 | 平台 | 状态 | 下载 |
-          |--------|------|------|------|
-          | APK | OpenWrt 主线 (SNAPSHOT) | ${{ needs.build.result == 'success' && '✅ 成功' || '❌ 失败' }} | [apk-packages.tar.gz](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ needs.prepare.outputs.tag }}/apk-packages.tar.gz) |
-          | IPK | OpenWrt 24.10 | ${{ needs.build.result == 'success' && '✅ 成功' || '❌ 失败' }} | [ipk-packages.tar.gz](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ needs.prepare.outputs.tag }}/ipk-packages.tar.gz) |
-          
-          ## 📦 包含文件
+          ## 文件列表
           
           ### APK 包
           
+          | 文件名 | 大小 | 下载 |
+          |--------|------|------|
           EOF
           
-          # 尝试下载并列出 APK 文件
-          if curl -sL "${{ github.server_url }}/${{ github.repository }}/releases/download/${{ needs.prepare.outputs.tag }}/apk-packages.tar.gz" -o apk-packages.tar.gz 2>/dev/null; then
-            tar -tzf apk-packages.tar.gz | while read file; do
-              echo "- \`$file\`" >> $GITHUB_STEP_SUMMARY
+          if [ -d "packages/packages-apk" ]; then
+            find packages/packages-apk -type f | while read file; do
+              filename=$(basename "$file")
+              filesize=$(ls -lh "$file" | awk '{print $5}')
+              download_url="[$filename](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ needs.prepare.outputs.tag }}/$filename)"
+              echo "| \`$filename\` | $filesize | $download_url |" >> $GITHUB_STEP_SUMMARY
             done
           else
-            echo "> ⚠️ 未找到 APK 包" >> $GITHUB_STEP_SUMMARY
+            echo "| - | - | - |" >> $GITHUB_STEP_SUMMARY
           fi
           
           cat >> $GITHUB_STEP_SUMMARY << 'EOF'
           
           ### IPK 包
           
+          | 文件名 | 大小 | 下载 |
+          |--------|------|------|
           EOF
           
-          # 尝试下载并列出 IPK 文件
-          if curl -sL "${{ github.server_url }}/${{ github.repository }}/releases/download/${{ needs.prepare.outputs.tag }}/ipk-packages.tar.gz" -o ipk-packages.tar.gz 2>/dev/null; then
-            tar -tzf ipk-packages.tar.gz | while read file; do
-              echo "- \`$file\`" >> $GITHUB_STEP_SUMMARY
+          if [ -d "packages/packages-ipk" ]; then
+            find packages/packages-ipk -type f | while read file; do
+              filename=$(basename "$file")
+              filesize=$(ls -lh "$file" | awk '{print $5}')
+              download_url="[$filename](${{ github.server_url }}/${{ github.repository }}/releases/download/${{ needs.prepare.outputs.tag }}/$filename)"
+              echo "| \`$filename\` | $filesize | $download_url |" >> $GITHUB_STEP_SUMMARY
             done
           else
-            echo "> ⚠️ 未找到 IPK 包" >> $GITHUB_STEP_SUMMARY
+            echo "| - | - | - |" >> $GITHUB_STEP_SUMMARY
           fi
-          
-          cat >> $GITHUB_STEP_SUMMARY << 'EOF'
-          
-          ## 📥 安装命令
-          
-          ### APK (OpenWrt 主线)
-          ```bash
-          wget https://github.com/${{ github.repository }}/releases/download/${{ needs.prepare.outputs.tag }}/apk-packages.tar.gz
-          tar -xzf apk-packages.tar.gz
-          apk add --allow-untrusted luci-app-tailscale-*.apk
-          ```
-          
-          ### IPK (OpenWrt 24.10)
-          ```bash
-          wget https://github.com/${{ github.repository }}/releases/download/${{ needs.prepare.outputs.tag }}/ipk-packages.tar.gz
-          tar -xzf ipk-packages.tar.gz
-          opkg install luci-app-tailscale_*_all.ipk
-          ```
-          
-          ## 🔧 修改内容
-          
-          - ✅ 配置文件保护 (`/etc/config/tailscale`)
-          - ✅ 数据目录迁移 (`/etc/config/tailscale_data/`)
-          - ✅ 授权信息持久化
-          - ✅ 自动修复官方包配置问题
-          - ✅ 固件升级配置保留
-          
-          ## ⏱️ 构建耗时
-          
-          - **开始时间**: ${{ github.event.repository.pushed_at }}
-          - **完成时间**: ${{ needs.prepare.outputs.build_time }}
-          
-          ---
-          
-          <sub>🤖 由 GitHub Actions 自动生成 | [查看工作流](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})</sub>
-          EOF
 
   # ========================================
   # 任务 4: 同步到 Gitee（可选）
@@ -426,16 +306,11 @@ jobs:
     if: needs.prepare.outputs.skip == 'false'
     runs-on: ubuntu-latest
     steps:
-      - name: "📥 检出代码"
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: "🔄 同步到 Gitee Release"
+      - name: "同步到 Gitee"
         continue-on-error: true
         run: |
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "🔄 同步到 Gitee"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          
           if [ -f .github/scripts/release-gitee.sh ]; then
             chmod +x .github/scripts/release-gitee.sh
             .github/scripts/release-gitee.sh \
@@ -446,9 +321,4 @@ jobs:
               "${{ needs.prepare.outputs.build_time }}" \
               "${{ github.repository }}" \
               "luci-app-tailscale"
-            echo "✅ 同步完成"
-          else
-            echo "⚠️  未找到 Gitee 同步脚本，跳过"
           fi
-          
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
