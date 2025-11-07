@@ -18,6 +18,7 @@ jobs:
       skip: ${{ steps.version.outputs.skip }}
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
+      build_time: ${{ steps.build_time.outputs.time }}
     steps:
       - uses: actions/checkout@v4
 
@@ -39,26 +40,27 @@ jobs:
             echo "tag=$upstream" >> $GITHUB_OUTPUT
           fi
 
+      - name: "生成构建时间"
+        id: build_time
+        if: steps.version.outputs.skip == 'false'
+        run: |
+          echo "time=$(TZ=Asia/Shanghai date +'%Y-%m-%d %H:%M:%S')" >> $GITHUB_OUTPUT
+
       - name: "拉取并修改源码"
         if: steps.version.outputs.skip == 'false'
         run: |
           git clone https://github.com/asvow/luci-app-tailscale luci-app-tailscale
           cd luci-app-tailscale
           
-          # 1. Makefile
+          # Makefile
           sed -i '/^PKG_VERSION:=/a\\ndefine Package/luci-app-tailscale/conffiles\n/etc/config/tailscale\n/etc/config/tailscale_data/\nendef' Makefile
           
-          # 2. 配置
-          sed -i "s|'/etc/tailscale'|'/etc/config/tailscale_data'|g" root/etc/config/tailscale
-          
-          # 3. init.d
+          # 配置和脚本
+          sed -i "s|'/etc/tailscale'|'/etc/config/tailscale_data'|g" root/etc/config/tailscale root/etc/init.d/tailscale htdocs/luci-static/resources/view/tailscale/setting.js
           sed -i 's|/var/lib/tailscale|/var/run/tailscale|g' root/etc/init.d/tailscale
           sed -i '/rm -rf "$CONFIG_PATH"/i\	# 只删除临时目录' root/etc/init.d/tailscale
           
-          # 4. JS
-          sed -i "s|'/etc/tailscale'|'/etc/config/tailscale_data'|g" htdocs/luci-static/resources/view/tailscale/setting.js
-          
-          # 5. uci-defaults
+          # uci-defaults
           mkdir -p root/etc/uci-defaults
           cat > root/etc/uci-defaults/40_luci-tailscale <<'EOF'
           #!/bin/sh
@@ -83,7 +85,6 @@ jobs:
         with:
           name: source
           path: luci-app-tailscale/
-          retention-days: 1
 
   # ========================================
   # Job 2: 并行编译 APK 和 IPK
@@ -104,7 +105,7 @@ jobs:
             sdk: openwrt-24.10
             pkg_type: ipk
 
-    name: "${{ matrix.sdk }}-${{ matrix.arch }}-${{ matrix.pkg_type }}"
+    name: "${{ matrix.sdk }}-${{ matrix.pkg_type }}"
 
     steps:
       - uses: actions/checkout@v4
@@ -115,10 +116,10 @@ jobs:
           name: source
           path: luci-app-tailscale
 
-      - name: "构建包"
+      - name: "构建 ${{ matrix.pkg_type }}"
         uses: sbwml/openwrt-gh-action-sdk@go1.25
         env:
-          ARCH: ${{ matrix.arch }}-immortalwrt-${{ matrix.sdk }}
+          ARCH: ${{ matrix.arch }}-${{ matrix.sdk }}
           FEEDNAME: packages_ci
           PACKAGES: luci-app-tailscale
           NO_REFRESH_CHECK: true
@@ -127,39 +128,65 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: packages-${{ matrix.pkg_type }}
-          path: |
-            bin/packages/${{ matrix.arch }}/packages_ci/*luci*tailscale*.${{ matrix.pkg_type }}
+          path: bin/packages/${{ matrix.arch }}/packages_ci/*luci*tailscale*
 
-      - name: "打包并发布"
+      - name: "打包"
         run: |
           cd bin/packages/${{ matrix.arch }}/packages_ci
-          tar -czf ../../../../${{ matrix.pkg_type }}-packages.tar.gz *luci*tailscale*.${{ matrix.pkg_type }}
+          tar -czf ../../../../${{ matrix.pkg_type }}-packages.tar.gz *luci*tailscale*
 
-      - name: "上传到 Release"
+      - name: "发布到 Release"
         uses: ncipollo/release-action@v1
         with:
-          name: ${{ needs.prepare.outputs.tag }}
           tag: ${{ needs.prepare.outputs.tag }}
+          name: "luci-app-tailscale ${{ needs.prepare.outputs.version }}"
           token: ${{ secrets.GITHUB_TOKEN }}
           allowUpdates: true
           replacesArtifacts: true
           artifacts: "${{ matrix.pkg_type }}-packages.tar.gz"
           body: |
-            ## 📦 包含文件
-            - `apk-packages.tar.gz` - ImmortalWrt 主线
-            - `ipk-packages.tar.gz` - ImmortalWrt 24.10
-
+            ## 📦 下载
+            - `apk-packages.tar.gz` - OpenWrt 主线 (SNAPSHOT)
+            - `ipk-packages.tar.gz` - OpenWrt 24.10
+            
             ## 📥 安装
             ```bash
-            # APK
+            # APK (主线)
             apk add --allow-untrusted luci-app-tailscale*.apk
             
-            # IPK
+            # IPK (24.10)
             opkg install luci-app-tailscale*.ipk
             ```
-
+            
             ## 🔧 配置保护
             - 配置: `/etc/config/tailscale`
             - 数据: `/etc/config/tailscale_data/`
+            - 授权: `/etc/config/tailscale_data/tailscaled.state`
+            
+            **版本**: ${{ needs.prepare.outputs.tag }}  
+            **构建**: ${{ needs.prepare.outputs.build_time }} CST
 
-            版本: ${{ needs.prepare.outputs.tag }}
+  # ========================================
+  # Job 3: 同步 Gitee（可选）
+  # ========================================
+  gitee:
+    needs: [prepare, build]
+    if: needs.prepare.outputs.skip == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: "同步到 Gitee"
+        continue-on-error: true
+        run: |
+          if [ -f .github/scripts/release-gitee.sh ]; then
+            chmod +x .github/scripts/release-gitee.sh
+            .github/scripts/release-gitee.sh \
+              "whzhni/luci-app-tailscale" \
+              "${{ secrets.GITEE_TOKEN }}" \
+              "${{ needs.prepare.outputs.tag }}" \
+              "${{ needs.prepare.outputs.version }}" \
+              "${{ needs.prepare.outputs.build_time }}" \
+              "${{ github.repository }}" \
+              "luci-app-tailscale"
+          fi
