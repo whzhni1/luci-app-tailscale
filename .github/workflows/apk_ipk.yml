@@ -130,11 +130,6 @@ jobs:
           name: packages-${{ matrix.pkg_type }}
           path: bin/packages/${{ matrix.arch }}/packages_ci/*luci*tailscale*
 
-      - name: "打包"
-        run: |
-          cd bin/packages/${{ matrix.arch }}/packages_ci
-          tar -czf ../../../../${{ matrix.pkg_type }}-packages.tar.gz *luci*tailscale*
-
       - name: "发布到 Release"
         uses: ncipollo/release-action@v1
         with:
@@ -143,11 +138,11 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           allowUpdates: true
           replacesArtifacts: true
-          artifacts: "${{ matrix.pkg_type }}-packages.tar.gz"
+          artifacts: "bin/packages/${{ matrix.arch }}/packages_ci/*luci*tailscale*"
           body: |
-            ## 📦 下载
-            - `apk-packages.tar.gz` - OpenWrt 主线 (SNAPSHOT)
-            - `ipk-packages.tar.gz` - OpenWrt 24.10
+            ## 📦 包含文件
+            - **APK 文件** - OpenWrt 主线 (SNAPSHOT)
+            - **IPK 文件** - OpenWrt 24.10
             
             ## 📥 安装
             ```bash
