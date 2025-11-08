@@ -2,8 +2,8 @@ name: "构建 Tailscale（APK + IPK 并行）"
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '0 23 * * *'
+  #schedule:
+    # - cron: '0 23 * * *'
 
 permissions:
   contents: write
