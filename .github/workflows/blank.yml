@@ -36,7 +36,6 @@ jobs:
       - name: "检查 Tailscale 版本"
         id: check
         run: |
-          # 获取 Tailscale 官方最新版本
           upstream=$(curl -s "https://api.github.com/repos/${{ env.TAILSCALE_REPO }}/releases/latest" | jq -r '.tag_name // "none"')
           current=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             "https://api.github.com/repos/${{ github.repository }}/tags" | jq -r '.[0].name // "none"')
@@ -64,7 +63,7 @@ jobs:
         run: echo "time=$(TZ=Asia/Shanghai date +'%Y-%m-%d %H:%M:%S')" >> $GITHUB_OUTPUT
 
   # ========================================
-  # 任务 2: 编译 Tailscale（IMM 官方结构）
+  # 任务 2: 编译 Tailscale（LuCI 兼容版）
   # ========================================
   build-tailscale:
     needs: check-version
@@ -194,23 +193,52 @@ jobs:
             fi
           fi
 
-      - name: "下载 IMM 官方配置文件"
+      - name: "下载配置文件（LuCI 兼容版）"
         run: |
-          echo "📥 下载 IMM 官方打包文件..."
-          mkdir -p imm_files
+          echo "📥 下载配置文件..."
+          mkdir -p config_files
           
-          # 下载 init.d 脚本
-          curl -fsSL -o imm_files/tailscale.init \
-            https://raw.githubusercontent.com/${{ env.IMM_PACKAGES_REPO }}/master/net/tailscale/files/tailscale.init
+          # ========================================
+          # 🔥 从 LuCI 源码获取 init.d（保证 LuCI 完美控制）
+          # ========================================
+          echo "📥 克隆 LuCI 源码获取 init.d..."
+          git clone --depth=1 https://github.com/${{ env.LUCI_REPO }} /tmp/luci-source
           
-          # 下载配置文件
-          curl -fsSL -o imm_files/tailscale.conf \
+          if [ -f /tmp/luci-source/root/etc/init.d/tailscale ]; then
+            echo "✅ 找到 LuCI 的 init.d 脚本"
+            cp /tmp/luci-source/root/etc/init.d/tailscale config_files/tailscale.init
+            
+            # 🔥 修改路径以兼容 /usr/sbin（LuCI 显示需要）
+            echo "🔧 修改 init.d 路径：/usr/bin → /usr/sbin..."
+            sed -i 's|/usr/bin/tailscaled|/usr/sbin/tailscaled|g' config_files/tailscale.init
+            sed -i 's|/usr/bin/tailscale|/usr/sbin/tailscale|g' config_files/tailscale.init
+            
+            # 验证修改
+            if grep -q "/usr/sbin/tailscale" config_files/tailscale.init; then
+              echo "✅ init.d 路径已修改为 /usr/sbin"
+            else
+              echo "⚠️ 警告：init.d 中未找到 tailscale 路径"
+            fi
+          else
+            echo "❌ 错误：LuCI 源码中未找到 init.d"
+            exit 1
+          fi
+          
+          # ========================================
+          # 从 IMM 下载配置文件
+          # ========================================
+          echo "📥 下载 IMM 官方配置文件..."
+          curl -fsSL -o config_files/tailscale.conf \
             https://raw.githubusercontent.com/${{ env.IMM_PACKAGES_REPO }}/master/net/tailscale/files/tailscale.conf
           
-          chmod +x imm_files/tailscale.init
+          chmod +x config_files/tailscale.init
           
-          echo "✅ IMM 配置文件下载完成："
-          ls -lh imm_files/
+          echo "✅ 配置文件准备完成："
+          ls -lh config_files/
+          
+          echo ""
+          echo "📄 init.d 脚本内容（前 30 行）："
+          head -30 config_files/tailscale.init
 
       - name: "打包 IPK 和 APK"
         run: |
@@ -219,7 +247,7 @@ jobs:
           VERSION=$(echo "${{ needs.check-version.outputs.version }}" | sed 's/^v//')
           
           # ========================================
-          # 创建 IMM 官方风格的目录结构
+          # 创建目录结构（IMM 风格 + LuCI 兼容）
           # ========================================
           mkdir -p ipk/usr/sbin ipk/usr/bin ipk/etc/config ipk/etc/init.d ipk/CONTROL
           mkdir -p output
@@ -232,24 +260,24 @@ jobs:
           fi
           
           # ========================================
-          # 🔥 IMM 官方风格：主程序在 /usr/sbin
+          # 🔥 安装到 /usr/sbin（LuCI 显示需要）
           # ========================================
-          echo "📦 安装到 /usr/sbin (IMM 官方风格)..."
+          echo "📦 安装到 /usr/sbin (LuCI 兼容)..."
           install -m 0755 "${binary}" ipk/usr/sbin/tailscaled
           ln -sf tailscaled ipk/usr/sbin/tailscale
           
-          # 🔥 可选：在 /usr/bin 创建软链接方便命令行使用
+          # 🔥 在 /usr/bin 创建软链接（命令行使用）
           ln -sf ../sbin/tailscaled ipk/usr/bin/tailscaled
           ln -sf ../sbin/tailscale ipk/usr/bin/tailscale
           
           SIZE=$(du -b ipk/usr/sbin/tailscaled | awk '{print $1}')
           
           # ========================================
-          # 🔥 安装 IMM 官方配置文件
+          # 🔥 安装配置文件（LuCI init.d + IMM config）
           # ========================================
-          echo "📝 安装 IMM 官方配置..."
-          install -m 0644 imm_files/tailscale.conf ipk/etc/config/tailscale
-          install -m 0755 imm_files/tailscale.init ipk/etc/init.d/tailscale
+          echo "📝 安装配置文件..."
+          install -m 0644 config_files/tailscale.conf ipk/etc/config/tailscale
+          install -m 0755 config_files/tailscale.init ipk/etc/init.d/tailscale
           
           # ========================================
           # 验证文件结构
@@ -266,7 +294,7 @@ jobs:
             echo "📦 打包 ${ARCH}..."
             
             # ========================================
-            # 🔥 生成 IMM 风格的 control 文件
+            # 生成 control 文件
             # ========================================
             cat > ipk/CONTROL/control <<EOF
           Package: tailscale
@@ -279,15 +307,15 @@ jobs:
           Architecture: ${ARCH}
           Installed-Size: ${SIZE}
           Maintainer: Automated Build <https://github.com/${{ github.repository }}>
-          Description: Tailscale VPN client (optimized build)
+          Description: Tailscale VPN client (LuCI compatible build)
            It creates a secure network between your servers, computers,
            and cloud instances. Even when separated by firewalls or subnets.
            .
-           This is an optimized build with UPX compression.
+           Features: UPX compressed, LuCI compatible init.d, /usr/sbin location.
           EOF
             
             # ========================================
-            # 🔥 生成 conffiles（opkg 自动生成 /lib/upgrade/keep.d/tailscale）
+            # 生成 conffiles（固件升级保留配置）
             # ========================================
             cat > ipk/CONTROL/conffiles <<'CONFEOF'
           /etc/config/tailscale
@@ -309,7 +337,7 @@ jobs:
             cat > apk-build/.PKGINFO <<APKEOF
           pkgname = tailscale
           pkgver = ${VERSION}
-          pkgdesc = Tailscale VPN client (optimized build)
+          pkgdesc = Tailscale VPN client (LuCI compatible)
           url = https://tailscale.com
           arch = ${ARCH}
           license = BSD-3-Clause
@@ -369,7 +397,7 @@ jobs:
           # ========================================
           echo "🗑️ 移除冲突文件（由 tailscale 包提供）..."
           
-          # 移除 init.d 脚本
+          # 移除 init.d 脚本（由 tailscale 包提供 LuCI 版本）
           rm -rf root/etc/init.d
           
           # 移除二进制文件
@@ -380,7 +408,7 @@ jobs:
           rm -rf root/etc/config/tailscale 2>/dev/null || true
           
           echo "✅ 保留的文件（仅 LuCI Web 界面）："
-          find root -type f 2>/dev/null || echo "root 目录为空"
+          find root -type f 2>/dev/null | head -20 || echo "root 目录为空"
           
           # ========================================
           # 删除 Tailscale 依赖（独立安装）
@@ -522,7 +550,7 @@ jobs:
           | LuCI | ${{ needs.check-version.outputs.luci_version }} |
           | 构建时间 | ${{ needs.check-version.outputs.build_time }} CST |
           | UPX 压缩 | ${{ env.ENABLE_COMPRESSION == 'true' && '✅ 已启用' || '❌ 未启用' }} |
-          | 包结构 | IMM 官方兼容 |
+          | init.d 来源 | LuCI 官方（自动同步） |
           
           ## 📥 安装说明
           
@@ -582,29 +610,46 @@ jobs:
           ## 🔧 配置说明
           
           - **二进制文件：** `/usr/sbin/tailscaled` (主程序) + `/usr/bin/tailscaled` (软链接)
-          - **配置文件：** `/etc/config/tailscale` (IMM 官方格式)
-          - **服务脚本：** `/etc/init.d/tailscale` (IMM 官方版本)
+          - **配置文件：** `/etc/config/tailscale` (IMM 格式)
+          - **服务脚本：** `/etc/init.d/tailscale` (LuCI 官方版本，自动同步)
           - **数据目录：** `/etc/config/tailscale_data/`
           - **授权文件：** `/etc/config/tailscale_data/tailscaled.state`
           
           **特性：**
-          - ✅ 完全兼容 IMM 官方包结构
-          - ✅ LuCI 完美支持（显示 + 控制）
+          - ✅ **LuCI 完美支持**（显示 + 控制）
+          - ✅ **init.d 自动同步 LuCI 官方最新版**
           - ✅ 固件升级保留配置
           - ✅ 重新安装保留数据
-          - ✅ UPX 压缩减小体积
+          - ✅ UPX 压缩减小体积 50-70%
           - ✅ 无文件冲突
           
-          ## 🆚 与官方包对比
+          ## 🆚 与其他构建对比
           
-          | 特性 | IMM 官方包 | 本构建 |
-          |------|-----------|--------|
-          | 二进制来源 | Tailscale 官方源码 | ✅ 同左 |
-          | init.d 脚本 | IMM 官方 | ✅ 同左 |
-          | 配置文件 | IMM 官方 | ✅ 同左 |
-          | UPX 压缩 | ❌ 未压缩 | ✅ 已压缩 |
-          | 包大小 | ~20MB | ~5-10MB |
-          | LuCI 兼容 | ✅ 完美 | ✅ 完美 |
+          | 特性 | IMM 官方包 | GuNanOvO 包 | 本构建 |
+          |------|-----------|------------|--------|
+          | 二进制位置 | /usr/sbin | /usr/bin | ✅ /usr/sbin |
+          | init.d 来源 | IMM 官方 | GuNanOvO | ✅ LuCI 官方 |
+          | LuCI 显示 | ✅ 正常 | ❌ 异常 | ✅ 正常 |
+          | LuCI 控制 | ⚠️ 需配合 LuCI 包 | ❌ 不可用 | ✅ 完美 |
+          | UPX 压缩 | ❌ 未压缩 | ✅ 已压缩 | ✅ 已压缩 |
+          | 包大小 | ~20MB | ~5-10MB | ~5-10MB |
+          | 自动更新 init.d | ❌ | ❌ | ✅ 跟随 LuCI |
+          
+          ## 🔄 init.d 自动同步机制
+          
+          本构建的 init.d 脚本每次编译时自动从 LuCI 官方源码同步：
+          
+          ```yaml
+          编译时：
+            1. 克隆 LuCI 源码
+            2. 提取 init.d 脚本
+            3. 自动修改路径（/usr/bin → /usr/sbin）
+            4. 打包到 tailscale 包
+          
+          结果：
+            - LuCI 更新 init.d → 下次编译自动同步 ✅
+            - 无需手动维护 ✅
+          ```
           
           ---
           
@@ -662,10 +707,12 @@ jobs:
           
           **Release：** [${{ needs.check-version.outputs.version }}](${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ needs.check-version.outputs.version }})
           
-          **包结构：** IMM 官方兼容（/usr/sbin + IMM 配置文件）
+          **关键特性：**
+          - 🔧 二进制位置：/usr/sbin (LuCI 兼容)
+          - 📝 init.d 来源：LuCI 官方（自动同步）
+          - 🎨 LuCI 控制：完美支持
+          - 🗜️ UPX 压缩：已启用
           
           **支持架构：** arm (14), arm64 (4), mips (3), mipsle (4), mips64 (2), mips64le (1), 386 (2), amd64 (1), geode (1)
-          
-          **特性：** UPX 压缩 + LuCI 完美支持 + 固件升级保留配置
           EOF
           fi
