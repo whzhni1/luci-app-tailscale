@@ -274,8 +274,8 @@ jobs:
           path: output/*
           if-no-files-found: error
           retention-days: 7
-
-  build-luci:
+          
+   build-luci:
     needs: check-version
     if: needs.check-version.outputs.skip == 'false'
     runs-on: ubuntu-latest
@@ -298,30 +298,90 @@ jobs:
           git clone https://github.com/${{ env.LUCI_REPO }} luci-app-tailscale
           cd luci-app-tailscale
           
+          # ========================================
+          # 移除与 tailscale 包冲突的文件
+          # ========================================
+          echo "🗑️ 移除冲突文件..."
+          
+          # 移除 init.d 脚本（由 tailscale 包提供）
+          rm -rf root/etc/init.d
+          
+          # 移除其他可能冲突的系统文件
+          rm -rf root/etc/config/tailscale 2>/dev/null || true
+          rm -rf root/usr/bin 2>/dev/null || true
+          rm -rf root/usr/sbin 2>/dev/null || true
+          
+          echo "✅ 保留的目录："
+          find root -type d 2>/dev/null || echo "root 目录为空"
+          
+          # ========================================
+          # 删除 Tailscale 依赖（独立安装）
+          # ========================================
           sed -i '/LUCI_DEPENDS:=/d' Makefile
           
+          # ========================================
+          # 添加配置文件保护
+          # ========================================
           if ! grep -q "conffiles" Makefile; then
-            sed -i '/^PKG_VERSION:=/a\\ndefine Package/luci-app-tailscale/conffiles\n/etc/config/tailscale\n/etc/config/tailscale_data/\nendef' Makefile
+            sed -i '/^PKG_VERSION:=/a\\ndefine Package/luci-app-tailscale/conffiles\n/etc/config/tailscale_data/\nendef' Makefile
           fi
           
-          find . -type f \( -name "*.js" -o -name "tailscale" -o -name "*.sh" \) -exec sed -i "s|'/etc/tailscale'|'/etc/config/tailscale_data'|g" {} \;
-          sed -i 's|/var/lib/tailscale|/var/run/tailscale|g' root/etc/init.d/tailscale 2>/dev/null || true
+          # ========================================
+          # 修改路径配置
+          # ========================================
+          find . -type f \( -name "*.js" -o -name "*.lua" -o -name "*.sh" \) \
+            -exec sed -i "s|'/etc/tailscale'|'/etc/config/tailscale_data'|g" {} \;
           
+          # ========================================
+          # 添加 uci-defaults 初始化脚本
+          # ========================================
           mkdir -p root/etc/uci-defaults
           cat > root/etc/uci-defaults/40_luci-tailscale <<'EOF'
           #!/bin/sh
+          
+          # 数据目录
           D="/etc/config/tailscale_data"
-          [ -f "$D/.initialized" ] && exit 0
-          mkdir -p "$D" && touch "$D/.initialized"
+          
+          # 避免重复执行
+          [ -f "$D/.luci_initialized" ] && exit 0
+          
+          # 创建数据目录
+          mkdir -p "$D"
+          touch "$D/.luci_initialized"
+          
+          # 清理旧配置
           rm -f /etc/config/tailscale-opkg
-          [ -f /etc/config/tailscale ] && {
-            sed -i "s|^config settings|config tailscale|g;/option state_file/d;s|'/etc/tailscale'|'$D'|g" /etc/config/tailscale
-            grep -q "option config_path" /etc/config/tailscale || sed -i "/option port/a\\	option config_path '$D'" /etc/config/tailscale
-          }
+          
+          # 迁移旧配置
+          if [ -f /etc/config/tailscale ]; then
+            # 修正配置格式
+            sed -i "s|^config settings|config tailscale|g" /etc/config/tailscale
+            sed -i "/option state_file/d" /etc/config/tailscale
+            sed -i "s|'/etc/tailscale'|'$D'|g" /etc/config/tailscale
+            
+            # 添加 config_path 配置
+            if ! grep -q "option config_path" /etc/config/tailscale; then
+              sed -i "/option port/a\\	option config_path '$D'" /etc/config/tailscale
+            fi
+          fi
+          
+          # 清理 ucitrack
           uci -q delete ucitrack.@tailscale[-1] 2>/dev/null
-          rm -f /tmp/luci-indexcache
+          
+          # 重建 LuCI 缓存
+          rm -f /tmp/luci-indexcache /tmp/luci-modulecache
+          
+          # 重启服务（如果已安装 tailscale）
+          if [ -x /etc/init.d/tailscale ]; then
+            /etc/init.d/tailscale restart 2>/dev/null || true
+          fi
+          
+          exit 0
           EOF
+          
           chmod +x root/etc/uci-defaults/40_luci-tailscale
+          
+          echo "✅ LuCI 源码准备完成"
 
       - name: "编译"
         uses: sbwml/openwrt-gh-action-sdk@go1.25
