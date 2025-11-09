@@ -152,17 +152,33 @@ jobs:
       - name: "打包 IPK 和 APK"
         id: package
         run: |
+          set -e  # 遇到错误立即退出
+          
           VERSION=$(echo "${{ needs.check-version.outputs.version }}" | sed 's/^v//')
           EPOCH=$(date +%s)
+          
+          echo "版本: $VERSION"
+          echo "架构列表: ${{ toJson(matrix.platform.targets) }}"
           
           mkdir -p ipk/usr/bin ipk/etc ipk/lib ipk/CONTROL
           mkdir -p output
           
           binary="build/tailscaled-linux-${{ matrix.platform.id }}"
+          
+          # 检查二进制文件是否存在
+          if [ ! -f "$binary" ]; then
+            echo "错误: 二进制文件不存在: $binary"
+            ls -la build/
+            exit 1
+          fi
+          
+          echo "二进制文件大小: $(du -h $binary)"
+          
           install -m 0755 "${binary}" ipk/usr/bin/tailscaled
           ln -sf tailscaled ipk/usr/bin/tailscale
           
           SIZE=$(du -sb ipk/usr/bin | awk '{print $1}')
+          echo "打包大小: $SIZE bytes"
           
           cp -a packaging/etc/* ipk/etc/
           cp -a packaging/lib/* ipk/lib/
@@ -171,8 +187,14 @@ jobs:
           
           echo '2.0' > debian-binary
           
+          # 解析架构列表
           targets='${{ toJson(matrix.platform.targets) }}'
+          echo "解析架构: $targets"
+          
+          # 循环处理每个架构
           echo "$targets" | jq -r '.[]' | while read ARCH; do
+            echo "处理架构: $ARCH"
+            
             # 生成 IPK
             sed -e "s/__VERSION__/${VERSION}/" \
                 -e "s/__ARCH__/${ARCH}/" \
@@ -182,7 +204,10 @@ jobs:
             
             tar --format=gnu --numeric-owner --group=0 --owner=0 -czf control.tar.gz -C ipk/CONTROL .
             tar --format=gnu --numeric-owner --group=0 --owner=0 -czf data.tar.gz -C ipk ./usr ./etc ./lib
-            tar --format=gnu --numeric-owner --group=0 --owner=0 -czf "output/tailscale_${VERSION}_${ARCH}.ipk" ./control.tar.gz ./data.tar.gz ./debian-binary
+            
+            IPK_FILE="output/tailscale_${VERSION}_${ARCH}.ipk"
+            tar --format=gnu --numeric-owner --group=0 --owner=0 -czf "$IPK_FILE" ./control.tar.gz ./data.tar.gz ./debian-binary
+            echo "✅ IPK: $IPK_FILE ($(du -h $IPK_FILE | awk '{print $1}'))"
             
             # 生成 APK
             mkdir -p apk-build
@@ -198,17 +223,39 @@ jobs:
           size = ${SIZE}
           EOF
             
+            APK_FILE="output/tailscale-${VERSION}-r1.${ARCH}.apk"
             cd apk-build
-            tar -czf "../output/tailscale-${VERSION}-r1.${ARCH}.apk" .
+            tar -czf "../${APK_FILE}" .
             cd ..
-            rm -rf apk-build
+            echo "✅ APK: $APK_FILE ($(du -h $APK_FILE | awk '{print $1}'))"
             
+            rm -rf apk-build
             rm -f control.tar.gz data.tar.gz
           done
+          
+          # 验证产物
+          echo ""
+          echo "📦 生成的文件列表:"
+          ls -lh output/
+          FILE_COUNT=$(ls -1 output/ 2>/dev/null | wc -l)
+          echo "文件数量: $FILE_COUNT"
+          
+          if [ "$FILE_COUNT" -eq 0 ]; then
+            echo "❌ 错误: 没有生成任何文件"
+            exit 1
+          fi
           
           echo "ipk_status=success" >> $GITHUB_OUTPUT
           echo "apk_status=success" >> $GITHUB_OUTPUT
 
+      - name: "上传产物"
+        if: steps.package.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tailscale-${{ matrix.platform.id }}
+          path: output/*
+          if-no-files-found: error  
+          
       - name: "设置状态"
         id: status
         if: always()
