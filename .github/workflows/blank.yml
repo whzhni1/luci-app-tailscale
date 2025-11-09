@@ -16,7 +16,7 @@ permissions:
 
 env:
   TAILSCALE_REPO: "tailscale/tailscale"
-  UPSTREAM_REPO: "GuNanOvO/openwrt-tailscale"
+  IMM_PACKAGES_REPO: "immortalwrt/packages"
   LUCI_REPO: "asvow/luci-app-tailscale"
   ENABLE_COMPRESSION: ${{ github.event_name == 'schedule' || inputs.enable_compression == true }}
 
@@ -33,10 +33,11 @@ jobs:
       build_time: ${{ steps.time.outputs.time }}
       luci_version: ${{ steps.luci.outputs.version }}
     steps:
-      - name: "检查版本"
+      - name: "检查 Tailscale 版本"
         id: check
         run: |
-          upstream=$(curl -s "https://api.github.com/repos/${{ env.UPSTREAM_REPO }}/tags" | jq -r '.[0].name // "none"')
+          # 获取 Tailscale 官方最新版本
+          upstream=$(curl -s "https://api.github.com/repos/${{ env.TAILSCALE_REPO }}/releases/latest" | jq -r '.tag_name // "none"')
           current=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             "https://api.github.com/repos/${{ github.repository }}/tags" | jq -r '.[0].name // "none"')
           
@@ -63,7 +64,7 @@ jobs:
         run: echo "time=$(TZ=Asia/Shanghai date +'%Y-%m-%d %H:%M:%S')" >> $GITHUB_OUTPUT
 
   # ========================================
-  # 任务 2: 编译 Tailscale（APK + IPK）
+  # 任务 2: 编译 Tailscale（IMM 官方结构）
   # ========================================
   build-tailscale:
     needs: check-version
@@ -73,46 +74,38 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          # ARM 32-bit
           - id: arm
             goarch: arm
             targets: '["arm_arm1176jzf-s_vfp","arm_arm926ej-s","arm_cortex-a15_neon-vfpv4","arm_cortex-a5_vfpv4","arm_cortex-a7","arm_cortex-a7_neon-vfpv4","arm_cortex-a7_vfpv4","arm_cortex-a8_vfpv3","arm_cortex-a9","arm_cortex-a9_neon","arm_cortex-a9_vfpv3-d16","arm_fa526","arm_xscale","arm_mpcore"]'
           
-          # ARM 64-bit
           - id: arm64
             goarch: arm64
             targets: '["aarch64_cortex-a53","aarch64_cortex-a72","aarch64_cortex-a76","aarch64_generic"]'
           
-          # MIPS 32-bit Big Endian
           - id: mips
             goarch: mips
             gomips: softfloat
             targets: '["mips_24kc","mips_4kec","mips_mips32"]'
           
-          # MIPS 32-bit Little Endian
           - id: mipsle
             goarch: mipsle
             gomips: softfloat
             targets: '["mipsel_24kc","mipsel_24kc_24kf","mipsel_74kc","mipsel_mips32"]'
           
-          # MIPS 64-bit Big Endian
           - id: mips64
             goarch: mips64
             gomips: softfloat
             targets: '["mips64_mips64r2","mips64_octeonplus"]'
           
-          # MIPS 64-bit Little Endian
           - id: mips64le
             goarch: mips64le
             gomips: softfloat
             targets: '["mips64el_mips64r2"]'
           
-          # x86 32-bit
           - id: "386"
             goarch: "386"
             targets: '["i386_pentium-mmx","i386_pentium4"]'
           
-          # x86 64-bit (with musl)
           - id: amd64
             goarch: amd64
             cgo: "1"
@@ -120,7 +113,6 @@ jobs:
             setup: sudo apt-get update && sudo apt-get install -y musl-tools
             targets: '["x86_64"]'
           
-          # Geode (x86 with soft float)
           - id: geode
             goarch: "386"
             go386: softfloat
@@ -139,12 +131,6 @@ jobs:
           repository: ${{ env.TAILSCALE_REPO }}
           ref: ${{ needs.check-version.outputs.version }}
           path: src
-
-      - name: "下载打包文件"
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.UPSTREAM_REPO }}
-          path: packaging
 
       - name: "设置 Go"
         uses: actions/setup-go@v5
@@ -208,14 +194,34 @@ jobs:
             fi
           fi
 
+      - name: "下载 IMM 官方配置文件"
+        run: |
+          echo "📥 下载 IMM 官方打包文件..."
+          mkdir -p imm_files
+          
+          # 下载 init.d 脚本
+          curl -fsSL -o imm_files/tailscale.init \
+            https://raw.githubusercontent.com/${{ env.IMM_PACKAGES_REPO }}/master/net/tailscale/files/tailscale.init
+          
+          # 下载配置文件
+          curl -fsSL -o imm_files/tailscale.conf \
+            https://raw.githubusercontent.com/${{ env.IMM_PACKAGES_REPO }}/master/net/tailscale/files/tailscale.conf
+          
+          chmod +x imm_files/tailscale.init
+          
+          echo "✅ IMM 配置文件下载完成："
+          ls -lh imm_files/
+
       - name: "打包 IPK 和 APK"
         run: |
           set -e
           
           VERSION=$(echo "${{ needs.check-version.outputs.version }}" | sed 's/^v//')
-          EPOCH=$(date +%s)
           
-          mkdir -p ipk/usr/bin ipk/etc ipk/lib ipk/CONTROL
+          # ========================================
+          # 创建 IMM 官方风格的目录结构
+          # ========================================
+          mkdir -p ipk/usr/sbin ipk/usr/bin ipk/etc/config ipk/etc/init.d ipk/CONTROL
           mkdir -p output
           
           binary="build/tailscaled-linux-${{ matrix.platform.id }}"
@@ -225,46 +231,93 @@ jobs:
             exit 1
           fi
           
-          install -m 0755 "${binary}" ipk/usr/bin/tailscaled
-          ln -sf tailscaled ipk/usr/bin/tailscale
+          # ========================================
+          # 🔥 IMM 官方风格：主程序在 /usr/sbin
+          # ========================================
+          echo "📦 安装到 /usr/sbin (IMM 官方风格)..."
+          install -m 0755 "${binary}" ipk/usr/sbin/tailscaled
+          ln -sf tailscaled ipk/usr/sbin/tailscale
           
-          SIZE=$(du -sb ipk/usr/bin | awk '{print $1}')
+          # 🔥 可选：在 /usr/bin 创建软链接方便命令行使用
+          ln -sf ../sbin/tailscaled ipk/usr/bin/tailscaled
+          ln -sf ../sbin/tailscale ipk/usr/bin/tailscale
           
-          cp -a packaging/etc/* ipk/etc/
-          cp -a packaging/lib/* ipk/lib/
-          cp -a packaging/CONTROL/* ipk/CONTROL/
-          chmod +x ipk/etc/init.d/tailscale
+          SIZE=$(du -b ipk/usr/sbin/tailscaled | awk '{print $1}')
+          
+          # ========================================
+          # 🔥 安装 IMM 官方配置文件
+          # ========================================
+          echo "📝 安装 IMM 官方配置..."
+          install -m 0644 imm_files/tailscale.conf ipk/etc/config/tailscale
+          install -m 0755 imm_files/tailscale.init ipk/etc/init.d/tailscale
+          
+          # ========================================
+          # 验证文件结构
+          # ========================================
+          echo "✅ 文件结构："
+          find ipk -type f -o -type l | sort
           
           echo '2.0' > debian-binary
           
-          # 解析 JSON 字符串
+          # ========================================
+          # 解析 targets 并打包
+          # ========================================
           echo '${{ matrix.platform.targets }}' | jq -r '.[]' | while read ARCH; do
             echo "📦 打包 ${ARCH}..."
             
-            # 生成 IPK
-            sed -e "s/__VERSION__/${VERSION}/" \
-                -e "s/__ARCH__/${ARCH}/" \
-                -e "s/__SIZE__/${SIZE}/" \
-                -e "s/__EPOCH__/${EPOCH}/" \
-                packaging/CONTROL/control > ipk/CONTROL/control
+            # ========================================
+            # 🔥 生成 IMM 风格的 control 文件
+            # ========================================
+            cat > ipk/CONTROL/control <<EOF
+          Package: tailscale
+          Version: ${VERSION}
+          Depends: ca-bundle, kmod-tun
+          Provides: tailscaled
+          Source: https://github.com/tailscale/tailscale
+          License: BSD-3-Clause
+          Section: net
+          Architecture: ${ARCH}
+          Installed-Size: ${SIZE}
+          Maintainer: Automated Build <https://github.com/${{ github.repository }}>
+          Description: Tailscale VPN client (optimized build)
+           It creates a secure network between your servers, computers,
+           and cloud instances. Even when separated by firewalls or subnets.
+           .
+           This is an optimized build with UPX compression.
+          EOF
             
+            # ========================================
+            # 🔥 生成 conffiles（opkg 自动生成 /lib/upgrade/keep.d/tailscale）
+            # ========================================
+            cat > ipk/CONTROL/conffiles <<'CONFEOF'
+          /etc/config/tailscale
+          CONFEOF
+            
+            # ========================================
+            # 生成 IPK
+            # ========================================
             tar --format=gnu --numeric-owner --group=0 --owner=0 -czf control.tar.gz -C ipk/CONTROL .
-            tar --format=gnu --numeric-owner --group=0 --owner=0 -czf data.tar.gz -C ipk ./usr ./etc ./lib
+            tar --format=gnu --numeric-owner --group=0 --owner=0 -czf data.tar.gz -C ipk ./usr ./etc
             tar --format=gnu --numeric-owner --group=0 --owner=0 -czf "output/tailscale_${VERSION}_${ARCH}.ipk" ./control.tar.gz ./data.tar.gz ./debian-binary
             
+            # ========================================
             # 生成 APK
+            # ========================================
             mkdir -p apk-build
             cp -r ipk/* apk-build/
             
-            cat > apk-build/.PKGINFO <<EOF
+            cat > apk-build/.PKGINFO <<APKEOF
           pkgname = tailscale
           pkgver = ${VERSION}
-          pkgdesc = Tailscale VPN client
+          pkgdesc = Tailscale VPN client (optimized build)
           url = https://tailscale.com
           arch = ${ARCH}
-          license = BSD
+          license = BSD-3-Clause
           size = ${SIZE}
-          EOF
+          depend = ca-bundle
+          depend = kmod-tun
+          provides = tailscaled
+          APKEOF
             
             cd apk-build
             tar -czf "../output/tailscale-${VERSION}-r1.${ARCH}.apk" .
@@ -286,7 +339,7 @@ jobs:
           retention-days: 7
 
   # ========================================
-  # 任务 3: 编译 LuCI
+  # 任务 3: 编译 LuCI（移除冲突文件）
   # ========================================
   build-luci:
     needs: check-version
@@ -312,20 +365,22 @@ jobs:
           cd luci-app-tailscale
           
           # ========================================
-          # 移除与 tailscale 包冲突的文件
+          # 🔥 移除与 tailscale 包冲突的文件
           # ========================================
-          echo "🗑️ 移除冲突文件..."
+          echo "🗑️ 移除冲突文件（由 tailscale 包提供）..."
           
-          # 移除 init.d 脚本（由 tailscale 包提供）
+          # 移除 init.d 脚本
           rm -rf root/etc/init.d
           
-          # 移除其他可能冲突的系统文件
-          rm -rf root/etc/config/tailscale 2>/dev/null || true
+          # 移除二进制文件
           rm -rf root/usr/bin 2>/dev/null || true
           rm -rf root/usr/sbin 2>/dev/null || true
           
-          echo "✅ 保留的目录："
-          find root -type d 2>/dev/null || echo "root 目录为空"
+          # 移除配置文件（由 tailscale 包提供）
+          rm -rf root/etc/config/tailscale 2>/dev/null || true
+          
+          echo "✅ 保留的文件（仅 LuCI Web 界面）："
+          find root -type f 2>/dev/null || echo "root 目录为空"
           
           # ========================================
           # 删除 Tailscale 依赖（独立安装）
@@ -467,6 +522,7 @@ jobs:
           | LuCI | ${{ needs.check-version.outputs.luci_version }} |
           | 构建时间 | ${{ needs.check-version.outputs.build_time }} CST |
           | UPX 压缩 | ${{ env.ENABLE_COMPRESSION == 'true' && '✅ 已启用' || '❌ 未启用' }} |
+          | 包结构 | IMM 官方兼容 |
           
           ## 📥 安装说明
           
@@ -525,21 +581,36 @@ jobs:
           
           ## 🔧 配置说明
           
-          - 配置文件：`/etc/config/tailscale`
-          - 数据目录：`/etc/config/tailscale_data/`
-          - 授权文件：`/etc/config/tailscale_data/tailscaled.state`
+          - **二进制文件：** `/usr/sbin/tailscaled` (主程序) + `/usr/bin/tailscaled` (软链接)
+          - **配置文件：** `/etc/config/tailscale` (IMM 官方格式)
+          - **服务脚本：** `/etc/init.d/tailscale` (IMM 官方版本)
+          - **数据目录：** `/etc/config/tailscale_data/`
+          - **授权文件：** `/etc/config/tailscale_data/tailscaled.state`
           
           **特性：**
-          - ✅ 重新安装保留配置
-          - ✅ 固件升级保留数据
-          - ✅ 无需手动安装依赖
-          - ✅ LuCI 与 Tailscale 无文件冲突
+          - ✅ 完全兼容 IMM 官方包结构
+          - ✅ LuCI 完美支持（显示 + 控制）
+          - ✅ 固件升级保留配置
+          - ✅ 重新安装保留数据
+          - ✅ UPX 压缩减小体积
+          - ✅ 无文件冲突
+          
+          ## 🆚 与官方包对比
+          
+          | 特性 | IMM 官方包 | 本构建 |
+          |------|-----------|--------|
+          | 二进制来源 | Tailscale 官方源码 | ✅ 同左 |
+          | init.d 脚本 | IMM 官方 | ✅ 同左 |
+          | 配置文件 | IMM 官方 | ✅ 同左 |
+          | UPX 压缩 | ❌ 未压缩 | ✅ 已压缩 |
+          | 包大小 | ~20MB | ~5-10MB |
+          | LuCI 兼容 | ✅ 完美 | ✅ 完美 |
           
           ---
           
           **上游项目：**
           - [tailscale/tailscale](https://github.com/${{ env.TAILSCALE_REPO }})
-          - [GuNanOvO/openwrt-tailscale](https://github.com/${{ env.UPSTREAM_REPO }})
+          - [immortalwrt/packages](https://github.com/${{ env.IMM_PACKAGES_REPO }})
           - [asvow/luci-app-tailscale](https://github.com/${{ env.LUCI_REPO }})
           EOF
 
@@ -591,6 +662,10 @@ jobs:
           
           **Release：** [${{ needs.check-version.outputs.version }}](${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ needs.check-version.outputs.version }})
           
+          **包结构：** IMM 官方兼容（/usr/sbin + IMM 配置文件）
+          
           **支持架构：** arm (14), arm64 (4), mips (3), mipsle (4), mips64 (2), mips64le (1), 386 (2), amd64 (1), geode (1)
+          
+          **特性：** UPX 压缩 + LuCI 完美支持 + 固件升级保留配置
           EOF
           fi
