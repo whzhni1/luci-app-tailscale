@@ -59,9 +59,6 @@ jobs:
         id: time
         run: echo "time=$(TZ=Asia/Shanghai date +'%Y-%m-%d %H:%M:%S')" >> $GITHUB_OUTPUT
 
-  # ========================================
-  # 编译 Tailscale（完整架构支持）
-  # ========================================
   build-tailscale:
     needs: check-version
     if: needs.check-version.outputs.skip == 'false'
@@ -70,7 +67,6 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          # ARM 32-bit（完整版）
           - id: 'arm'
             goarch: 'arm'
             targets: [
@@ -81,41 +77,34 @@ jobs:
               'arm_xscale', 'arm_mpcore'
             ]
           
-          # ARM 64-bit
           - id: 'arm64'
             goarch: 'arm64'
             targets: ['aarch64_cortex-a53', 'aarch64_cortex-a72', 'aarch64_cortex-a76', 'aarch64_generic']
           
-          # MIPS 32-bit Big Endian
           - id: 'mips'
             goarch: 'mips'
             gomips: 'softfloat'
             targets: ['mips_24kc', 'mips_4kec', 'mips_mips32']
           
-          # MIPS 32-bit Little Endian
           - id: 'mipsle'
             goarch: 'mipsle'
             gomips: 'softfloat'
             targets: ['mipsel_24kc', 'mipsel_24kc_24kf', 'mipsel_74kc', 'mipsel_mips32']
           
-          # MIPS 64-bit Big Endian
           - id: 'mips64'
             goarch: 'mips64'
             gomips: 'softfloat'
             targets: ['mips64_mips64r2', 'mips64_octeonplus']
           
-          # MIPS 64-bit Little Endian
           - id: 'mips64le'
             goarch: 'mips64le'
             gomips: 'softfloat'
             targets: ['mips64el_mips64r2']
           
-          # x86 32-bit
           - id: '386'
             goarch: '386'
             targets: ['i386_pentium-mmx', 'i386_pentium4']
           
-          # x86 64-bit (with musl)
           - id: 'amd64'
             goarch: 'amd64'
             cgo: '1'
@@ -123,7 +112,6 @@ jobs:
             setup: 'sudo apt-get update && sudo apt-get install -y musl-tools'
             targets: ['x86_64']
           
-          # Geode (x86 with soft float)
           - id: 'geode'
             goarch: '386'
             go386: 'softfloat'
@@ -156,11 +144,15 @@ jobs:
           cache: true
           cache-dependency-path: src/go.sum
 
-      - name: "设置 UPX"
+      - name: "安装 UPX"
         if: env.ENABLE_COMPRESSION == 'true'
-        uses: crazy-max/ghaction-upx@v2
-        with:
-          version: latest
+        run: |
+          echo "🔽 下载 UPX..."
+          UPX_VERSION=$(curl -s https://api.github.com/repos/upx/upx/releases/latest | jq -r '.tag_name')
+          wget -q "https://github.com/upx/upx/releases/download/${UPX_VERSION}/upx-${UPX_VERSION#v}-amd64_linux.tar.xz"
+          tar -xf upx-*.tar.xz
+          sudo mv upx-*/upx /usr/local/bin/
+          upx --version
 
       - name: "编译二进制"
         working-directory: src
@@ -183,6 +175,7 @@ jobs:
           go build -tags "${tags}" -ldflags "${ldflags}" -trimpath -o "../build/${output}" ./cmd/tailscaled
           
           chmod +x "../build/${output}"
+          echo "✅ 编译完成："
           ls -lh ../build/
 
       - name: "压缩二进制"
@@ -190,13 +183,21 @@ jobs:
         run: |
           binary="build/tailscaled-linux-${{ matrix.platform.id }}"
           
+          echo "📊 压缩前大小："
+          ls -lh "${binary}"
+          
           if [[ "${{ matrix.platform.id }}" =~ ^(mips64|mips64le)$ ]]; then
             echo "⚠️ 跳过 UPX 压缩（架构不支持）"
           else
             echo "🗜️ 开始 UPX 压缩..."
-            upx --lzma --best "${binary}" || echo "⚠️ UPX 压缩失败，使用原始文件"
+            if upx --lzma --best "${binary}"; then
+              echo "✅ UPX 压缩成功"
+              echo "📊 压缩后大小："
+              ls -lh "${binary}"
+            else
+              echo "⚠️ UPX 压缩失败，使用原始文件"
+            fi
           fi
-          ls -lh build/
 
       - name: "打包 IPK 和 APK"
         run: |
@@ -274,9 +275,6 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # ========================================
-  # 编译 LuCI
-  # ========================================
   build-luci:
     needs: check-version
     if: needs.check-version.outputs.skip == 'false'
@@ -343,6 +341,7 @@ jobs:
             exit 1
           fi
           
+          echo "✅ 收集完成："
           ls -lh output/
 
       - name: "上传产物"
@@ -353,9 +352,6 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # ========================================
-  # 发布 Release
-  # ========================================
   release:
     needs: [check-version, build-tailscale, build-luci]
     if: needs.check-version.outputs.skip == 'false'
@@ -379,6 +375,10 @@ jobs:
           
           echo "📦 Release 文件列表："
           ls -lh release/
+          echo ""
+          echo "📊 统计信息："
+          echo "IPK 文件数: $(ls release/*.ipk 2>/dev/null | wc -l)"
+          echo "APK 文件数: $(ls release/*.apk 2>/dev/null | wc -l)"
 
       - name: "生成 Release 说明"
         run: |
@@ -464,9 +464,6 @@ jobs:
           artifacts: "release/*"
           token: ${{ secrets.GITHUB_TOKEN }}
 
-  # ========================================
-  # 生成报告
-  # ========================================
   report:
     needs: [check-version, build-tailscale, build-luci]
     if: always()
@@ -503,6 +500,6 @@ jobs:
           
           **Release：** [${{ needs.check-version.outputs.version }}](${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ needs.check-version.outputs.version }})
           
-          **支持架构：** arm, arm64, mips, mipsle, mips64, mips64le, 386, amd64, geode（共 9 个架构）
+          **支持架构：** arm (14), arm64 (4), mips (3), mipsle (4), mips64 (2), mips64le (1), 386 (2), amd64 (1), geode (1)
           EOF
           fi
