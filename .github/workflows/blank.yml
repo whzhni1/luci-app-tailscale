@@ -2,6 +2,12 @@ name: "构建 Tailscale + LuCI（完整版）"
 
 on:
   workflow_dispatch:
+    inputs:
+      enable_compression:
+        description: '启用 UPX 压缩'
+        required: true
+        type: boolean
+        default: true
   schedule:
     - cron: '0 0 * * *'
 
@@ -12,6 +18,7 @@ env:
   TAILSCALE_REPO: "tailscale/tailscale"
   UPSTREAM_REPO: "GuNanOvO/openwrt-tailscale"
   LUCI_REPO: "asvow/luci-app-tailscale"
+  ENABLE_COMPRESSION: ${{ github.event_name == 'schedule' || inputs.enable_compression == true }}
 
 jobs:
   # ========================================
@@ -22,6 +29,7 @@ jobs:
     outputs:
       skip: ${{ steps.check.outputs.skip }}
       version: ${{ steps.check.outputs.version }}
+      current_version: ${{ steps.check.outputs.current_version }}
       build_time: ${{ steps.time.outputs.time }}
       luci_version: ${{ steps.luci.outputs.version }}
     steps:
@@ -35,23 +43,23 @@ jobs:
           echo "上游: $upstream"
           echo "当前: $current"
           
+          echo "version=$upstream" >> $GITHUB_OUTPUT
+          echo "current_version=$current" >> $GITHUB_OUTPUT
+          
           if [ "$upstream" = "$current" ]; then
             echo "skip=true" >> $GITHUB_OUTPUT
           else
             echo "skip=false" >> $GITHUB_OUTPUT
-            echo "version=$upstream" >> $GITHUB_OUTPUT
           fi
 
       - name: "获取 LuCI 版本"
         id: luci
-        if: steps.check.outputs.skip == 'false'
         run: |
           version=$(curl -s "https://api.github.com/repos/${{ env.LUCI_REPO }}/tags" | jq -r '.[0].name // "v1.0.0"')
           echo "version=$version" >> $GITHUB_OUTPUT
 
       - name: "生成构建时间"
         id: time
-        if: steps.check.outputs.skip == 'false'
         run: echo "time=$(TZ=Asia/Shanghai date +'%Y-%m-%d %H:%M:%S')" >> $GITHUB_OUTPUT
 
   # ========================================
@@ -72,6 +80,10 @@ jobs:
           - { id: 'amd64', goarch: 'amd64', cgo: '1', cc: 'musl-gcc', setup: 'sudo apt-get update && sudo apt-get install -y musl-tools', targets: ['x86_64'] }
 
     name: "Tailscale-${{ matrix.platform.id }}"
+
+    outputs:
+      ipk_status: ${{ steps.status.outputs.ipk_status }}
+      apk_status: ${{ steps.status.outputs.apk_status }}
 
     steps:
       - name: "环境准备"
@@ -97,6 +109,12 @@ jobs:
           cache: true
           cache-dependency-path: src/go.sum
 
+      - name: "设置 UPX"
+        if: env.ENABLE_COMPRESSION == 'true'
+        uses: crazy-max/ghaction-upx@v2
+        with:
+          version: latest
+
       - name: "编译二进制"
         working-directory: src
         env:
@@ -119,7 +137,20 @@ jobs:
           
           chmod +x "../build/${output}"
 
+      - name: "压缩二进制"
+        if: env.ENABLE_COMPRESSION == 'true'
+        run: |
+          binary="build/tailscaled-linux-${{ matrix.platform.id }}"
+          
+          if [[ "${{ matrix.platform.id }}" =~ ^(mips64|mips64le)$ ]]; then
+            echo "跳过 UPX 压缩（不支持的架构）"
+          else
+            upx --lzma --best "${binary}"
+            echo "UPX 压缩完成"
+          fi
+
       - name: "打包 IPK 和 APK"
+        id: package
         run: |
           VERSION=$(echo "${{ needs.check-version.outputs.version }}" | sed 's/^v//')
           EPOCH=$(date +%s)
@@ -174,8 +205,19 @@ jobs:
             
             rm -f control.tar.gz data.tar.gz
           done
+          
+          echo "ipk_status=success" >> $GITHUB_OUTPUT
+          echo "apk_status=success" >> $GITHUB_OUTPUT
+
+      - name: "设置状态"
+        id: status
+        if: always()
+        run: |
+          echo "ipk_status=${{ steps.package.outputs.ipk_status || 'failed' }}" >> $GITHUB_OUTPUT
+          echo "apk_status=${{ steps.package.outputs.apk_status || 'failed' }}" >> $GITHUB_OUTPUT
 
       - name: "上传产物"
+        if: steps.package.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: tailscale-${{ matrix.platform.id }}
@@ -189,6 +231,7 @@ jobs:
     if: needs.check-version.outputs.skip == 'false'
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         include:
           - sdk: SNAPSHOT
@@ -197,6 +240,10 @@ jobs:
             pkg_type: ipk
 
     name: "LuCI-${{ matrix.pkg_type }}"
+
+    outputs:
+      ipk_status: ${{ steps.status.outputs.ipk_status }}
+      apk_status: ${{ steps.status.outputs.apk_status }}
 
     steps:
       - uses: actions/checkout@v4
@@ -236,6 +283,8 @@ jobs:
           chmod +x root/etc/uci-defaults/40_luci-tailscale
 
       - name: "编译"
+        id: compile
+        continue-on-error: true
         uses: sbwml/openwrt-gh-action-sdk@go1.25
         env:
           ARCH: x86_64-${{ matrix.sdk }}
@@ -244,11 +293,29 @@ jobs:
           NO_REFRESH_CHECK: true
 
       - name: "收集产物"
+        id: collect
         run: |
           mkdir -p output
-          find bin/packages -name "*luci*tailscale*.${{ matrix.pkg_type }}" -exec cp -v {} output/ \;
+          if find bin/packages -name "*luci*tailscale*.${{ matrix.pkg_type }}" -exec cp -v {} output/ \; 2>/dev/null; then
+            echo "status=success" >> $GITHUB_OUTPUT
+          else
+            echo "status=failed" >> $GITHUB_OUTPUT
+          fi
+
+      - name: "设置状态"
+        id: status
+        if: always()
+        run: |
+          if [ "${{ matrix.pkg_type }}" = "ipk" ]; then
+            echo "ipk_status=${{ steps.collect.outputs.status || 'failed' }}" >> $GITHUB_OUTPUT
+            echo "apk_status=skipped" >> $GITHUB_OUTPUT
+          else
+            echo "apk_status=${{ steps.collect.outputs.status || 'failed' }}" >> $GITHUB_OUTPUT
+            echo "ipk_status=skipped" >> $GITHUB_OUTPUT
+          fi
 
       - name: "上传产物"
+        if: steps.collect.outputs.status == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: luci-${{ matrix.pkg_type }}
@@ -259,6 +326,7 @@ jobs:
   # ========================================
   release:
     needs: [check-version, build-tailscale, build-luci]
+    if: needs.check-version.outputs.skip == 'false'
     runs-on: ubuntu-latest
     steps:
       - name: "下载所有产物"
@@ -273,7 +341,6 @@ jobs:
           ls -lh release/
 
       - name: "生成 Release 说明"
-        id: release_body
         run: |
           cat > release.md <<'EOF'
           ## 📦 版本信息
@@ -283,6 +350,7 @@ jobs:
           | Tailscale | ${{ needs.check-version.outputs.version }} |
           | LuCI | ${{ needs.check-version.outputs.luci_version }} |
           | 构建时间 | ${{ needs.check-version.outputs.build_time }} CST |
+          | UPX 压缩 | ${{ env.ENABLE_COMPRESSION == 'true' && '✅ 已启用' || '❌ 未启用' }} |
           
           ## 📥 安装说明
           
@@ -352,27 +420,42 @@ jobs:
   # 任务 5: 生成报告
   # ========================================
   report:
-    needs: [check-version, build-tailscale, build-luci, release]
-    if: always() && needs.check-version.outputs.skip == 'false'
+    needs: [check-version, build-tailscale, build-luci]
+    if: always()
     runs-on: ubuntu-latest
     steps:
       - name: "生成报告"
         run: |
-          cat > $GITHUB_STEP_SUMMARY <<'EOF'
+          if [ "${{ needs.check-version.outputs.skip }}" = "true" ]; then
+            cat > $GITHUB_STEP_SUMMARY <<'EOF'
           # 构建报告
           
-          | 项目 | 值 |
-          |------|-----|
-          | Tailscale 版本 | `${{ needs.check-version.outputs.version }}` |
-          | LuCI 版本 | `${{ needs.check-version.outputs.luci_version }}` |
-          | 构建时间 | ${{ needs.check-version.outputs.build_time }} CST |
-          | Release | [${{ needs.check-version.outputs.version }}](${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ needs.check-version.outputs.version }}) |
+          **上游版本 ${{ needs.check-version.outputs.version }} 与本地版本 ${{ needs.check-version.outputs.current_version }} 相同，不做编译**
           
-          ## 编译状态
+          ---
           
-          | 组件 | 状态 |
-          |------|------|
-          | Tailscale APK+IPK | ${{ needs.build-tailscale.result == 'success' && '✅ 成功' || '❌ 失败' }} |
-          | LuCI APK+IPK | ${{ needs.build-luci.result == 'success' && '✅ 成功' || '❌ 失败' }} |
-          | Release | ${{ needs.release.result == 'success' && '✅ 成功' || '❌ 失败' }} |
+          检查时间：${{ needs.check-version.outputs.build_time }} CST
           EOF
+          else
+            # 获取状态
+            TS_IPK="${{ needs.build-tailscale.result == 'success' && '✅ 成功' || '❌ 失败' }}"
+            TS_APK="${{ needs.build-tailscale.result == 'success' && '✅ 成功' || '❌ 失败' }}"
+            LUCI_IPK="${{ needs.build-luci.result == 'success' && '✅ 成功' || '❌ 失败' }}"
+            LUCI_APK="${{ needs.build-luci.result == 'success' && '✅ 成功' || '❌ 失败' }}"
+            COMPRESSION="${{ env.ENABLE_COMPRESSION == 'true' && '✅ 已启用' || '❌ 未启用' }}"
+            
+            cat > $GITHUB_STEP_SUMMARY <<EOF
+          # 构建报告
+          
+          | 名称 | 上游版本 | 压缩状态 | IPK 编译 | APK 编译 |
+          |------|---------|---------|---------|---------|
+          | Tailscale | ${{ needs.check-version.outputs.version }} | ${COMPRESSION} | ${TS_IPK} | ${TS_APK} |
+          | LuCI | ${{ needs.check-version.outputs.luci_version }} | 无需压缩 | ${LUCI_IPK} | ${LUCI_APK} |
+          
+          ---
+          
+          **构建时间：** ${{ needs.check-version.outputs.build_time }} CST
+          
+          **Release：** [${{ needs.check-version.outputs.version }}](${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ needs.check-version.outputs.version }})
+          EOF
+          fi
