@@ -21,6 +21,9 @@ env:
   ENABLE_COMPRESSION: ${{ github.event_name == 'schedule' || inputs.enable_compression == true }}
 
 jobs:
+  # ========================================
+  # 任务 1: 检查版本
+  # ========================================
   check-version:
     runs-on: ubuntu-latest
     outputs:
@@ -59,6 +62,9 @@ jobs:
         id: time
         run: echo "time=$(TZ=Asia/Shanghai date +'%Y-%m-%d %H:%M:%S')" >> $GITHUB_OUTPUT
 
+  # ========================================
+  # 任务 2: 编译 Tailscale（APK + IPK）
+  # ========================================
   build-tailscale:
     needs: check-version
     if: needs.check-version.outputs.skip == 'false'
@@ -67,55 +73,58 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - id: 'arm'
-            goarch: 'arm'
-            targets: [
-              'arm_arm1176jzf-s_vfp', 'arm_arm926ej-s', 'arm_cortex-a15_neon-vfpv4',
-              'arm_cortex-a5_vfpv4', 'arm_cortex-a7', 'arm_cortex-a7_neon-vfpv4',
-              'arm_cortex-a7_vfpv4', 'arm_cortex-a8_vfpv3', 'arm_cortex-a9',
-              'arm_cortex-a9_neon', 'arm_cortex-a9_vfpv3-d16', 'arm_fa526',
-              'arm_xscale', 'arm_mpcore'
-            ]
+          # ARM 32-bit
+          - id: arm
+            goarch: arm
+            targets: '["arm_arm1176jzf-s_vfp","arm_arm926ej-s","arm_cortex-a15_neon-vfpv4","arm_cortex-a5_vfpv4","arm_cortex-a7","arm_cortex-a7_neon-vfpv4","arm_cortex-a7_vfpv4","arm_cortex-a8_vfpv3","arm_cortex-a9","arm_cortex-a9_neon","arm_cortex-a9_vfpv3-d16","arm_fa526","arm_xscale","arm_mpcore"]'
           
-          - id: 'arm64'
-            goarch: 'arm64'
-            targets: ['aarch64_cortex-a53', 'aarch64_cortex-a72', 'aarch64_cortex-a76', 'aarch64_generic']
+          # ARM 64-bit
+          - id: arm64
+            goarch: arm64
+            targets: '["aarch64_cortex-a53","aarch64_cortex-a72","aarch64_cortex-a76","aarch64_generic"]'
           
-          - id: 'mips'
-            goarch: 'mips'
-            gomips: 'softfloat'
-            targets: ['mips_24kc', 'mips_4kec', 'mips_mips32']
+          # MIPS 32-bit Big Endian
+          - id: mips
+            goarch: mips
+            gomips: softfloat
+            targets: '["mips_24kc","mips_4kec","mips_mips32"]'
           
-          - id: 'mipsle'
-            goarch: 'mipsle'
-            gomips: 'softfloat'
-            targets: ['mipsel_24kc', 'mipsel_24kc_24kf', 'mipsel_74kc', 'mipsel_mips32']
+          # MIPS 32-bit Little Endian
+          - id: mipsle
+            goarch: mipsle
+            gomips: softfloat
+            targets: '["mipsel_24kc","mipsel_24kc_24kf","mipsel_74kc","mipsel_mips32"]'
           
-          - id: 'mips64'
-            goarch: 'mips64'
-            gomips: 'softfloat'
-            targets: ['mips64_mips64r2', 'mips64_octeonplus']
+          # MIPS 64-bit Big Endian
+          - id: mips64
+            goarch: mips64
+            gomips: softfloat
+            targets: '["mips64_mips64r2","mips64_octeonplus"]'
           
-          - id: 'mips64le'
-            goarch: 'mips64le'
-            gomips: 'softfloat'
-            targets: ['mips64el_mips64r2']
+          # MIPS 64-bit Little Endian
+          - id: mips64le
+            goarch: mips64le
+            gomips: softfloat
+            targets: '["mips64el_mips64r2"]'
           
-          - id: '386'
-            goarch: '386'
-            targets: ['i386_pentium-mmx', 'i386_pentium4']
+          # x86 32-bit
+          - id: "386"
+            goarch: "386"
+            targets: '["i386_pentium-mmx","i386_pentium4"]'
           
-          - id: 'amd64'
-            goarch: 'amd64'
-            cgo: '1'
-            cc: 'musl-gcc'
-            setup: 'sudo apt-get update && sudo apt-get install -y musl-tools'
-            targets: ['x86_64']
+          # x86 64-bit (with musl)
+          - id: amd64
+            goarch: amd64
+            cgo: "1"
+            cc: musl-gcc
+            setup: sudo apt-get update && sudo apt-get install -y musl-tools
+            targets: '["x86_64"]'
           
-          - id: 'geode'
-            goarch: '386'
-            go386: 'softfloat'
-            targets: ['i386_geode']
+          # Geode (x86 with soft float)
+          - id: geode
+            goarch: "386"
+            go386: softfloat
+            targets: '["i386_geode"]'
 
     name: "Tailscale-${{ matrix.platform.id }}"
 
@@ -228,7 +237,8 @@ jobs:
           
           echo '2.0' > debian-binary
           
-          echo '${{ toJson(matrix.platform.targets) }}' | jq -r '.[]' | while read ARCH; do
+          # 解析 JSON 字符串
+          echo '${{ matrix.platform.targets }}' | jq -r '.[]' | while read ARCH; do
             echo "📦 打包 ${ARCH}..."
             
             # 生成 IPK
@@ -274,8 +284,11 @@ jobs:
           path: output/*
           if-no-files-found: error
           retention-days: 7
-          
-   build-luci:
+
+  # ========================================
+  # 任务 3: 编译 LuCI
+  # ========================================
+  build-luci:
     needs: check-version
     if: needs.check-version.outputs.skip == 'false'
     runs-on: ubuntu-latest
@@ -412,6 +425,9 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # ========================================
+  # 任务 4: 发布 Release
+  # ========================================
   release:
     needs: [check-version, build-tailscale, build-luci]
     if: needs.check-version.outputs.skip == 'false'
@@ -454,6 +470,8 @@ jobs:
           
           ## 📥 安装说明
           
+          ⚠️ **重要：必须先安装 Tailscale，再安装 LuCI**
+          
           ### 1. 安装 Tailscale（必需）
           
           根据你的架构选择对应的文件：
@@ -482,6 +500,15 @@ jobs:
           opkg install luci-i18n-tailscale-zh-cn_*_all.ipk  # 中文
           ```
           
+          ### 3. 刷新 LuCI（必需）
+          
+          ```bash
+          rm -f /tmp/luci-indexcache
+          /etc/init.d/uhttpd restart
+          ```
+          
+          然后访问 **服务 → Tailscale** 即可。
+          
           ## 📋 支持的架构
           
           - **ARM:** arm_cortex-a7, arm_cortex-a9, arm_cortex-a15, 等 14 个变体
@@ -491,7 +518,7 @@ jobs:
           - **x86:** i386_pentium-mmx, i386_pentium4, i386_geode
           - **x86_64:** x86_64
           
-          查看设备架构：
+          **查看设备架构：**
           ```bash
           opkg print-architecture
           ```
@@ -506,6 +533,7 @@ jobs:
           - ✅ 重新安装保留配置
           - ✅ 固件升级保留数据
           - ✅ 无需手动安装依赖
+          - ✅ LuCI 与 Tailscale 无文件冲突
           
           ---
           
@@ -524,6 +552,9 @@ jobs:
           artifacts: "release/*"
           token: ${{ secrets.GITHUB_TOKEN }}
 
+  # ========================================
+  # 任务 5: 生成报告
+  # ========================================
   report:
     needs: [check-version, build-tailscale, build-luci]
     if: always()
