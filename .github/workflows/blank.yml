@@ -21,9 +21,6 @@ env:
   ENABLE_COMPRESSION: ${{ github.event_name == 'schedule' || inputs.enable_compression == true }}
 
 jobs:
-  # ========================================
-  # 任务 1: 检查版本
-  # ========================================
   check-version:
     runs-on: ubuntu-latest
     outputs:
@@ -63,7 +60,7 @@ jobs:
         run: echo "time=$(TZ=Asia/Shanghai date +'%Y-%m-%d %H:%M:%S')" >> $GITHUB_OUTPUT
 
   # ========================================
-  # 任务 2: 编译 Tailscale（APK + IPK）
+  # 编译 Tailscale（完整架构支持）
   # ========================================
   build-tailscale:
     needs: check-version
@@ -73,17 +70,71 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - { id: 'arm', goarch: 'arm', targets: ['arm_cortex-a7', 'arm_cortex-a9', 'arm_cortex-a5_vfpv4'] }
-          - { id: 'arm64', goarch: 'arm64', targets: ['aarch64_cortex-a53', 'aarch64_cortex-a72', 'aarch64_generic'] }
-          - { id: 'mips', goarch: 'mips', gomips: 'softfloat', targets: ['mips_24kc', 'mips_mips32'] }
-          - { id: 'mipsle', goarch: 'mipsle', gomips: 'softfloat', targets: ['mipsel_24kc', 'mipsel_74kc'] }
-          - { id: 'amd64', goarch: 'amd64', cgo: '1', cc: 'musl-gcc', setup: 'sudo apt-get update && sudo apt-get install -y musl-tools', targets: ['x86_64'] }
+          # ARM 32-bit（完整版）
+          - id: 'arm'
+            goarch: 'arm'
+            targets: [
+              'arm_arm1176jzf-s_vfp', 'arm_arm926ej-s', 'arm_cortex-a15_neon-vfpv4',
+              'arm_cortex-a5_vfpv4', 'arm_cortex-a7', 'arm_cortex-a7_neon-vfpv4',
+              'arm_cortex-a7_vfpv4', 'arm_cortex-a8_vfpv3', 'arm_cortex-a9',
+              'arm_cortex-a9_neon', 'arm_cortex-a9_vfpv3-d16', 'arm_fa526',
+              'arm_xscale', 'arm_mpcore'
+            ]
+          
+          # ARM 64-bit
+          - id: 'arm64'
+            goarch: 'arm64'
+            targets: ['aarch64_cortex-a53', 'aarch64_cortex-a72', 'aarch64_cortex-a76', 'aarch64_generic']
+          
+          # MIPS 32-bit Big Endian
+          - id: 'mips'
+            goarch: 'mips'
+            gomips: 'softfloat'
+            targets: ['mips_24kc', 'mips_4kec', 'mips_mips32']
+          
+          # MIPS 32-bit Little Endian
+          - id: 'mipsle'
+            goarch: 'mipsle'
+            gomips: 'softfloat'
+            targets: ['mipsel_24kc', 'mipsel_24kc_24kf', 'mipsel_74kc', 'mipsel_mips32']
+          
+          # MIPS 64-bit Big Endian
+          - id: 'mips64'
+            goarch: 'mips64'
+            gomips: 'softfloat'
+            targets: ['mips64_mips64r2', 'mips64_octeonplus']
+          
+          # MIPS 64-bit Little Endian
+          - id: 'mips64le'
+            goarch: 'mips64le'
+            gomips: 'softfloat'
+            targets: ['mips64el_mips64r2']
+          
+          # x86 32-bit
+          - id: '386'
+            goarch: '386'
+            targets: ['i386_pentium-mmx', 'i386_pentium4']
+          
+          # x86 64-bit (with musl)
+          - id: 'amd64'
+            goarch: 'amd64'
+            cgo: '1'
+            cc: 'musl-gcc'
+            setup: 'sudo apt-get update && sudo apt-get install -y musl-tools'
+            targets: ['x86_64']
+          
+          # Geode (x86 with soft float)
+          - id: 'geode'
+            goarch: '386'
+            go386: 'softfloat'
+            targets: ['i386_geode']
 
     name: "Tailscale-${{ matrix.platform.id }}"
 
     steps:
       - name: "环境准备"
-        run: ${{ matrix.platform.setup || 'echo "跳过"' }}
+        if: matrix.platform.setup
+        run: ${{ matrix.platform.setup }}
 
       - name: "检出 Tailscale 源码"
         uses: actions/checkout@v4
@@ -117,11 +168,11 @@ jobs:
           GOOS: linux
           GOARCH: ${{ matrix.platform.goarch }}
           GOMIPS: ${{ matrix.platform.gomips || '' }}
+          GO386: ${{ matrix.platform.go386 || '' }}
           CGO_ENABLED: ${{ matrix.platform.cgo || '0' }}
           CC: ${{ matrix.platform.cc || '' }}
         run: |
           output="tailscaled-linux-${{ matrix.platform.id }}"
-          go="go"
           
           eval `CGO_ENABLED=0 GOOS=$(go env GOHOSTOS) GOARCH=$(go env GOHOSTARCH) go run ./cmd/mkversion`
           
@@ -132,6 +183,7 @@ jobs:
           go build -tags "${tags}" -ldflags "${ldflags}" -trimpath -o "../build/${output}" ./cmd/tailscaled
           
           chmod +x "../build/${output}"
+          ls -lh ../build/
 
       - name: "压缩二进制"
         if: env.ENABLE_COMPRESSION == 'true'
@@ -139,14 +191,17 @@ jobs:
           binary="build/tailscaled-linux-${{ matrix.platform.id }}"
           
           if [[ "${{ matrix.platform.id }}" =~ ^(mips64|mips64le)$ ]]; then
-            echo "跳过 UPX 压缩（不支持的架构）"
+            echo "⚠️ 跳过 UPX 压缩（架构不支持）"
           else
-            upx --lzma --best "${binary}"
-            echo "UPX 压缩完成"
+            echo "🗜️ 开始 UPX 压缩..."
+            upx --lzma --best "${binary}" || echo "⚠️ UPX 压缩失败，使用原始文件"
           fi
+          ls -lh build/
 
       - name: "打包 IPK 和 APK"
         run: |
+          set -e
+          
           VERSION=$(echo "${{ needs.check-version.outputs.version }}" | sed 's/^v//')
           EPOCH=$(date +%s)
           
@@ -154,6 +209,12 @@ jobs:
           mkdir -p output
           
           binary="build/tailscaled-linux-${{ matrix.platform.id }}"
+          
+          if [ ! -f "${binary}" ]; then
+            echo "❌ 错误：未找到二进制文件 ${binary}"
+            exit 1
+          fi
+          
           install -m 0755 "${binary}" ipk/usr/bin/tailscaled
           ln -sf tailscaled ipk/usr/bin/tailscale
           
@@ -166,8 +227,9 @@ jobs:
           
           echo '2.0' > debian-binary
           
-          targets='${{ toJson(matrix.platform.targets) }}'
-          echo "$targets" | jq -r '.[]' | while read ARCH; do
+          echo '${{ toJson(matrix.platform.targets) }}' | jq -r '.[]' | while read ARCH; do
+            echo "📦 打包 ${ARCH}..."
+            
             # 生成 IPK
             sed -e "s/__VERSION__/${VERSION}/" \
                 -e "s/__ARCH__/${ARCH}/" \
@@ -200,6 +262,9 @@ jobs:
             
             rm -f control.tar.gz data.tar.gz
           done
+          
+          echo "✅ 打包完成："
+          ls -lh output/
 
       - name: "上传产物"
         uses: actions/upload-artifact@v4
@@ -207,9 +272,10 @@ jobs:
           name: tailscale-${{ matrix.platform.id }}
           path: output/*
           if-no-files-found: error
+          retention-days: 7
 
   # ========================================
-  # 任务 3: 编译 LuCI
+  # 编译 LuCI
   # ========================================
   build-luci:
     needs: check-version
@@ -234,19 +300,15 @@ jobs:
           git clone https://github.com/${{ env.LUCI_REPO }} luci-app-tailscale
           cd luci-app-tailscale
           
-          # 删除 Tailscale 依赖
           sed -i '/LUCI_DEPENDS:=/d' Makefile
           
-          # 添加配置保护
           if ! grep -q "conffiles" Makefile; then
             sed -i '/^PKG_VERSION:=/a\\ndefine Package/luci-app-tailscale/conffiles\n/etc/config/tailscale\n/etc/config/tailscale_data/\nendef' Makefile
           fi
           
-          # 修改路径
           find . -type f \( -name "*.js" -o -name "tailscale" -o -name "*.sh" \) -exec sed -i "s|'/etc/tailscale'|'/etc/config/tailscale_data'|g" {} \;
           sed -i 's|/var/lib/tailscale|/var/run/tailscale|g' root/etc/init.d/tailscale 2>/dev/null || true
           
-          # uci-defaults
           mkdir -p root/etc/uci-defaults
           cat > root/etc/uci-defaults/40_luci-tailscale <<'EOF'
           #!/bin/sh
@@ -275,6 +337,13 @@ jobs:
         run: |
           mkdir -p output
           find bin/packages -name "*luci*tailscale*.${{ matrix.pkg_type }}" -exec cp -v {} output/ \;
+          
+          if [ -z "$(ls -A output/)" ]; then
+            echo "❌ 错误：未找到编译产物"
+            exit 1
+          fi
+          
+          ls -lh output/
 
       - name: "上传产物"
         uses: actions/upload-artifact@v4
@@ -282,9 +351,10 @@ jobs:
           name: luci-${{ matrix.pkg_type }}
           path: output/*
           if-no-files-found: error
+          retention-days: 7
 
   # ========================================
-  # 任务 4: 发布 Release
+  # 发布 Release
   # ========================================
   release:
     needs: [check-version, build-tailscale, build-luci]
@@ -295,11 +365,19 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+          merge-multiple: false
 
       - name: "整理文件"
         run: |
           mkdir -p release
           find artifacts -type f \( -name "*.apk" -o -name "*.ipk" \) -exec cp -v {} release/ \;
+          
+          if [ -z "$(ls -A release/)" ]; then
+            echo "❌ 错误：未找到任何产物文件"
+            exit 1
+          fi
+          
+          echo "📦 Release 文件列表："
           ls -lh release/
 
       - name: "生成 Release 说明"
@@ -344,8 +422,16 @@ jobs:
           opkg install luci-i18n-tailscale-zh-cn_*_all.ipk  # 中文
           ```
           
-          ## 📋 如何查看设备架构
+          ## 📋 支持的架构
           
+          - **ARM:** arm_cortex-a7, arm_cortex-a9, arm_cortex-a15, 等 14 个变体
+          - **ARM64:** aarch64_cortex-a53, aarch64_cortex-a72, aarch64_generic, 等
+          - **MIPS:** mips_24kc, mips_mips32, 等
+          - **MIPS64:** mips64_mips64r2, mips64_octeonplus
+          - **x86:** i386_pentium-mmx, i386_pentium4, i386_geode
+          - **x86_64:** x86_64
+          
+          查看设备架构：
           ```bash
           opkg print-architecture
           ```
@@ -379,7 +465,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
   # ========================================
-  # 任务 5: 生成报告
+  # 生成报告
   # ========================================
   report:
     needs: [check-version, build-tailscale, build-luci]
@@ -390,32 +476,33 @@ jobs:
         run: |
           if [ "${{ needs.check-version.outputs.skip }}" = "true" ]; then
             cat > $GITHUB_STEP_SUMMARY <<'EOF'
-          # 构建报告
+          # ⏭️ 构建跳过
           
-          **上游版本 ${{ needs.check-version.outputs.version }} 与本地版本 ${{ needs.check-version.outputs.current_version }} 相同，不做编译**
+          **上游版本 ${{ needs.check-version.outputs.version }} 与本地版本 ${{ needs.check-version.outputs.current_version }} 相同，无需编译**
           
           ---
           
           检查时间：${{ needs.check-version.outputs.build_time }} CST
           EOF
           else
-            # 使用 job result 判断状态（matrix 下更可靠）
-            TS_STATUS="${{ needs.build-tailscale.result == 'success' && '✅ 成功' || '❌ 失败' }}"
-            LUCI_STATUS="${{ needs.build-luci.result == 'success' && '✅ 成功' || '❌ 失败' }}"
+            TS_STATUS="${{ needs.build-tailscale.result == 'success' && '✅ 成功' || needs.build-tailscale.result == 'failure' && '❌ 失败' || '⏭️ 跳过' }}"
+            LUCI_STATUS="${{ needs.build-luci.result == 'success' && '✅ 成功' || needs.build-luci.result == 'failure' && '❌ 失败' || '⏭️ 跳过' }}"
             COMPRESSION="${{ env.ENABLE_COMPRESSION == 'true' && '✅ 已启用' || '❌ 未启用' }}"
             
             cat > $GITHUB_STEP_SUMMARY <<EOF
-          # 构建报告
+          # 🎯 构建报告
           
-          | 名称 | 上游版本 | 压缩状态 | IPK 编译 | APK 编译 |
-          |------|---------|---------|---------|---------|
-          | Tailscale | ${{ needs.check-version.outputs.version }} | ${COMPRESSION} | ${TS_STATUS} | ${TS_STATUS} |
-          | LuCI | ${{ needs.check-version.outputs.luci_version }} | 无需压缩 | ${LUCI_STATUS} | ${LUCI_STATUS} |
+          | 名称 | 上游版本 | 压缩状态 | 编译状态 |
+          |------|---------|---------|---------|
+          | Tailscale | ${{ needs.check-version.outputs.version }} | ${COMPRESSION} | ${TS_STATUS} |
+          | LuCI | ${{ needs.check-version.outputs.luci_version }} | 无需压缩 | ${LUCI_STATUS} |
           
           ---
           
           **构建时间：** ${{ needs.check-version.outputs.build_time }} CST
           
           **Release：** [${{ needs.check-version.outputs.version }}](${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ needs.check-version.outputs.version }})
+          
+          **支持架构：** arm, arm64, mips, mipsle, mips64, mips64le, 386, amd64, geode（共 9 个架构）
           EOF
           fi
