@@ -72,39 +72,47 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        platform:
+        include:
+          # ARM 32-bit
           - id: arm
             goarch: arm
             targets: '["arm_arm1176jzf-s_vfp","arm_arm926ej-s","arm_cortex-a15_neon-vfpv4","arm_cortex-a5_vfpv4","arm_cortex-a7","arm_cortex-a7_neon-vfpv4","arm_cortex-a7_vfpv4","arm_cortex-a8_vfpv3","arm_cortex-a9","arm_cortex-a9_neon","arm_cortex-a9_vfpv3-d16","arm_fa526","arm_xscale","arm_mpcore"]'
           
+          # ARM 64-bit
           - id: arm64
             goarch: arm64
             targets: '["aarch64_cortex-a53","aarch64_cortex-a72","aarch64_cortex-a76","aarch64_generic"]'
           
+          # MIPS 32-bit Big Endian
           - id: mips
             goarch: mips
             gomips: softfloat
             targets: '["mips_24kc","mips_4kec","mips_mips32"]'
           
+          # MIPS 32-bit Little Endian
           - id: mipsle
             goarch: mipsle
             gomips: softfloat
             targets: '["mipsel_24kc","mipsel_24kc_24kf","mipsel_74kc","mipsel_mips32"]'
           
+          # MIPS 64-bit Big Endian
           - id: mips64
             goarch: mips64
             gomips: softfloat
             targets: '["mips64_mips64r2","mips64_octeonplus"]'
           
+          # MIPS 64-bit Little Endian
           - id: mips64le
             goarch: mips64le
             gomips: softfloat
             targets: '["mips64el_mips64r2"]'
           
+          # x86 32-bit
           - id: "386"
             goarch: "386"
             targets: '["i386_pentium-mmx","i386_pentium4"]'
           
+          # x86 64-bit (with musl)
           - id: amd64
             goarch: amd64
             cgo: "1"
@@ -112,17 +120,18 @@ jobs:
             setup: sudo apt-get update && sudo apt-get install -y musl-tools
             targets: '["x86_64"]'
           
+          # Geode (x86 with soft float)
           - id: geode
             goarch: "386"
             go386: softfloat
             targets: '["i386_geode"]'
 
-    name: "Tailscale-${{ matrix.platform.id }}"
+    name: "Tailscale-${{ matrix.id }}"
 
     steps:
       - name: "环境准备"
-        if: matrix.platform.setup
-        run: ${{ matrix.platform.setup }}
+        if: matrix.setup
+        run: ${{ matrix.setup }}
 
       - name: "检出 Tailscale 源码"
         uses: actions/checkout@v4
@@ -152,13 +161,13 @@ jobs:
         working-directory: src
         env:
           GOOS: linux
-          GOARCH: ${{ matrix.platform.goarch }}
-          GOMIPS: ${{ matrix.platform.gomips || '' }}
-          GO386: ${{ matrix.platform.go386 || '' }}
-          CGO_ENABLED: ${{ matrix.platform.cgo || '0' }}
-          CC: ${{ matrix.platform.cc || '' }}
+          GOARCH: ${{ matrix.goarch }}
+          GOMIPS: ${{ matrix.gomips || '' }}
+          GO386: ${{ matrix.go386 || '' }}
+          CGO_ENABLED: ${{ matrix.cgo || '0' }}
+          CC: ${{ matrix.cc || '' }}
         run: |
-          output="tailscaled-linux-${{ matrix.platform.id }}"
+          output="tailscaled-linux-${{ matrix.id }}"
           
           eval `CGO_ENABLED=0 GOOS=$(go env GOHOSTOS) GOARCH=$(go env GOHOSTARCH) go run ./cmd/mkversion`
           
@@ -175,12 +184,12 @@ jobs:
       - name: "压缩二进制"
         if: env.ENABLE_COMPRESSION == 'true'
         run: |
-          binary="build/tailscaled-linux-${{ matrix.platform.id }}"
+          binary="build/tailscaled-linux-${{ matrix.id }}"
           
           echo "📊 压缩前大小："
           ls -lh "${binary}"
           
-          if [[ "${{ matrix.platform.id }}" =~ ^(mips64|mips64le)$ ]]; then
+          if [[ "${{ matrix.id }}" =~ ^(mips64|mips64le)$ ]]; then
             echo "⚠️ 跳过 UPX 压缩（架构不支持）"
           else
             echo "🗜️ 开始 UPX 压缩..."
@@ -252,7 +261,7 @@ jobs:
           mkdir -p ipk/usr/sbin ipk/usr/bin ipk/etc/config ipk/etc/init.d ipk/CONTROL
           mkdir -p output
           
-          binary="build/tailscaled-linux-${{ matrix.platform.id }}"
+          binary="build/tailscaled-linux-${{ matrix.id }}"
           
           if [ ! -f "${binary}" ]; then
             echo "❌ 错误：未找到二进制文件 ${binary}"
@@ -290,7 +299,7 @@ jobs:
           # ========================================
           # 解析 targets 并打包
           # ========================================
-          echo '${{ matrix.platform.targets }}' | jq -r '.[]' | while read ARCH; do
+          echo '${{ matrix.targets }}' | jq -r '.[]' | while read ARCH; do
             echo "📦 打包 ${ARCH}..."
             
             # ========================================
@@ -361,7 +370,7 @@ jobs:
       - name: "上传产物"
         uses: actions/upload-artifact@v4
         with:
-          name: tailscale-${{ matrix.platform.id }}
+          name: tailscale-${{ matrix.id }}
           path: output/*
           if-no-files-found: error
           retention-days: 7
@@ -634,22 +643,6 @@ jobs:
           | UPX 压缩 | ❌ 未压缩 | ✅ 已压缩 | ✅ 已压缩 |
           | 包大小 | ~20MB | ~5-10MB | ~5-10MB |
           | 自动更新 init.d | ❌ | ❌ | ✅ 跟随 LuCI |
-          
-          ## 🔄 init.d 自动同步机制
-          
-          本构建的 init.d 脚本每次编译时自动从 LuCI 官方源码同步：
-          
-          ```yaml
-          编译时：
-            1. 克隆 LuCI 源码
-            2. 提取 init.d 脚本
-            3. 自动修改路径（/usr/bin → /usr/sbin）
-            4. 打包到 tailscale 包
-          
-          结果：
-            - LuCI 更新 init.d → 下次编译自动同步 ✅
-            - 无需手动维护 ✅
-          ```
           
           ---
           
