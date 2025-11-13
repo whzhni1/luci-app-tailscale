@@ -9,7 +9,7 @@ on:
         type: boolean
         default: true
   schedule:
-    - cron: '0 0 * * *'
+    - cron: '0 16 * * *'
 
 permissions:
   contents: write
@@ -55,7 +55,7 @@ jobs:
       - name: "获取 LuCI 版本"
         id: luci
         run: |
-          version=$(curl -s "https://api.github.com/repos/${{ env.LUCI_REPO }}/tags" | jq -r '.[0].name // "v1.0.0"')
+          version=$(curl -s "https://api.github.com/repos/${{ env.LUCI_REPO }}/releases/latest" | jq -r '.tag_name // "none"')
           echo "version=$version" >> $GITHUB_OUTPUT
 
       - name: "生成构建时间"
