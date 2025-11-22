@@ -475,12 +475,13 @@ jobs:
           
           # 重建 LuCI 缓存
           rm -f /tmp/luci-indexcache /tmp/luci-modulecache
-          
+          # 启用tailscale服务
+          /etc/init.d/tailscale enable
           # 重启服务（如果已安装 tailscale）
           if [ -x /etc/init.d/tailscale ]; then
-            /etc/init.d/tailscale restart 2>/dev/null || /etc/init.d/tailscale start 2>/dev/null || true
+            /etc/init.d/tailscale restart 2>/dev/null || true
           fi
-          
+
           exit 0
           EOF
           
