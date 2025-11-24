@@ -88,7 +88,9 @@ jobs:
         run: |
           UPX_VERSION=$(curl -s https://api.github.com/repos/upx/upx/releases/latest | jq -r '.tag_name')
           wget -q "https://github.com/upx/upx/releases/download/${UPX_VERSION}/upx-${UPX_VERSION#v}-amd64_linux.tar.xz"
-          tar -xf upx-*.tar.xz && sudo mv upx-*/upx /usr/local/bin/ && upx --version
+          tar -xf upx-*.tar.xz
+          sudo mv upx-*/upx /usr/local/bin/
+          upx --version
 
       - name: "编译二进制"
         working-directory: src
@@ -113,9 +115,11 @@ jobs:
         if: env.ENABLE_COMPRESSION == 'true'
         run: |
           binary="build/tailscaled-linux-${{ matrix.id }}"
-          ls -lh "${binary}"
-          [[ "${{ matrix.id }}" =~ ^(mips64|mips64le)$ ]] && echo "⚠️ 跳过 UPX（架构不支持）" || \
-          (upx --lzma --best "${binary}" && echo "✅ UPX 压缩成功" && ls -lh "${binary}") || echo "⚠️ UPX 失败"
+          if [[ "${{ matrix.id }}" =~ ^(mips64|mips64le)$ ]]; then
+            echo "⚠️ 跳过 UPX 压缩（架构不支持）"
+          else
+            upx --lzma --best "${binary}" || echo "⚠️ UPX 压缩失败，使用原始文件"
+          fi
 
       - name: "下载配置文件"
         run: |
