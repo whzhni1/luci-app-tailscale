@@ -21,9 +21,6 @@ env:
   ENABLE_COMPRESSION: ${{ github.event_name == 'schedule' || inputs.enable_compression == true }}
 
 jobs:
-  # ========================================
-  # 任务 1: 检查版本
-  # ========================================
   check-version:
     runs-on: ubuntu-latest
     outputs:
@@ -33,38 +30,24 @@ jobs:
       build_time: ${{ steps.time.outputs.time }}
       luci_version: ${{ steps.luci.outputs.version }}
     steps:
-      - name: "检查 Tailscale 版本"
+      - name: "检查版本"
         id: check
         run: |
           upstream=$(curl -s "https://api.github.com/repos/${{ env.TAILSCALE_REPO }}/releases/latest" | jq -r '.tag_name // "none"')
-          current=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            "https://api.github.com/repos/${{ github.repository }}/tags" | jq -r '.[0].name // "none"')
-          
-          echo "上游: $upstream"
-          echo "当前: $current"
-          
+          current=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" "https://api.github.com/repos/${{ github.repository }}/tags" | jq -r '.[0].name // "none"')
+          echo "上游: $upstream, 当前: $current"
           echo "version=$upstream" >> $GITHUB_OUTPUT
           echo "current_version=$current" >> $GITHUB_OUTPUT
-          
-          if [ "$upstream" = "$current" ]; then
-            echo "skip=true" >> $GITHUB_OUTPUT
-          else
-            echo "skip=false" >> $GITHUB_OUTPUT
-          fi
+          echo "skip=$( [ "$upstream" = "$current" ] && echo true || echo false )" >> $GITHUB_OUTPUT
 
       - name: "获取 LuCI 版本"
         id: luci
-        run: |
-          version=$(curl -s "https://api.github.com/repos/${{ env.LUCI_REPO }}/releases/latest" | jq -r '.tag_name // "none"')
-          echo "version=$version" >> $GITHUB_OUTPUT
+        run: echo "version=$(curl -s "https://api.github.com/repos/${{ env.LUCI_REPO }}/releases/latest" | jq -r '.tag_name // "none"')" >> $GITHUB_OUTPUT
 
       - name: "生成构建时间"
         id: time
         run: echo "time=$(TZ=Asia/Shanghai date +'%Y-%m-%d %H:%M:%S')" >> $GITHUB_OUTPUT
 
-  # ========================================
-  # 任务 2: 编译 Tailscale（LuCI 兼容版）
-  # ========================================
   build-tailscale:
     needs: check-version
     if: needs.check-version.outputs.skip == 'false'
@@ -73,75 +56,28 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # ARM 32-bit
-          - id: arm
-            goarch: arm
-            targets: '["arm_arm1176jzf-s_vfp","arm_arm926ej-s","arm_cortex-a15_neon-vfpv4","arm_cortex-a5_vfpv4","arm_cortex-a7","arm_cortex-a7_neon-vfpv4","arm_cortex-a7_vfpv4","arm_cortex-a8_vfpv3","arm_cortex-a9","arm_cortex-a9_neon","arm_cortex-a9_vfpv3-d16","arm_fa526","arm_xscale","arm_mpcore"]'
-          
-          # ARM 64-bit
-          - id: arm64
-            goarch: arm64
-            targets: '["aarch64_cortex-a53","aarch64_cortex-a72","aarch64_cortex-a76","aarch64_generic"]'
-          
-          # MIPS 32-bit Big Endian
-          - id: mips
-            goarch: mips
-            gomips: softfloat
-            targets: '["mips_24kc","mips_4kec","mips_mips32"]'
-          
-          # MIPS 32-bit Little Endian
-          - id: mipsle
-            goarch: mipsle
-            gomips: softfloat
-            targets: '["mipsel_24kc","mipsel_24kc_24kf","mipsel_74kc","mipsel_mips32"]'
-          
-          # MIPS 64-bit Big Endian
-          - id: mips64
-            goarch: mips64
-            gomips: softfloat
-            targets: '["mips64_mips64r2","mips64_octeonplus"]'
-          
-          # MIPS 64-bit Little Endian
-          - id: mips64le
-            goarch: mips64le
-            gomips: softfloat
-            targets: '["mips64el_mips64r2"]'
-          
-          # x86 32-bit
-          - id: "386"
-            goarch: "386"
-            targets: '["i386_pentium-mmx","i386_pentium4"]'
-          
-          # x86 64-bit (with musl)
-          - id: amd64
-            goarch: amd64
-            cgo: "1"
-            cc: musl-gcc
-            setup: sudo apt-get update && sudo apt-get install -y musl-tools
-            targets: '["x86_64"]'
-          
-          # Geode (x86 with soft float)
-          - id: geode
-            goarch: "386"
-            go386: softfloat
-            targets: '["i386_geode"]'
-
+          - {id: arm, goarch: arm, targets: '["arm_arm1176jzf-s_vfp","arm_arm926ej-s","arm_cortex-a15_neon-vfpv4","arm_cortex-a5_vfpv4","arm_cortex-a7","arm_cortex-a7_neon-vfpv4","arm_cortex-a7_vfpv4","arm_cortex-a8_vfpv3","arm_cortex-a9","arm_cortex-a9_neon","arm_cortex-a9_vfpv3-d16","arm_fa526","arm_xscale","arm_mpcore"]'}
+          - {id: arm64, goarch: arm64, targets: '["aarch64_cortex-a53","aarch64_cortex-a72","aarch64_cortex-a76","aarch64_generic"]'}
+          - {id: mips, goarch: mips, gomips: softfloat, targets: '["mips_24kc","mips_4kec","mips_mips32"]'}
+          - {id: mipsle, goarch: mipsle, gomips: softfloat, targets: '["mipsel_24kc","mipsel_24kc_24kf","mipsel_74kc","mipsel_mips32"]'}
+          - {id: mips64, goarch: mips64, gomips: softfloat, targets: '["mips64_mips64r2","mips64_octeonplus"]'}
+          - {id: mips64le, goarch: mips64le, gomips: softfloat, targets: '["mips64el_mips64r2"]'}
+          - {id: "386", goarch: "386", targets: '["i386_pentium-mmx","i386_pentium4"]'}
+          - {id: amd64, goarch: amd64, cgo: "1", cc: musl-gcc, setup: "sudo apt-get update && sudo apt-get install -y musl-tools", targets: '["x86_64"]'}
+          - {id: geode, goarch: "386", go386: softfloat, targets: '["i386_geode"]'}
     name: "Tailscale-${{ matrix.id }}"
-
     steps:
       - name: "环境准备"
         if: matrix.setup
         run: ${{ matrix.setup }}
 
-      - name: "检出 Tailscale 源码"
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           repository: ${{ env.TAILSCALE_REPO }}
           ref: ${{ needs.check-version.outputs.version }}
           path: src
 
-      - name: "设置 Go"
-        uses: actions/setup-go@v5
+      - uses: actions/setup-go@v5
         with:
           go-version: stable
           cache: true
@@ -150,12 +86,9 @@ jobs:
       - name: "安装 UPX"
         if: env.ENABLE_COMPRESSION == 'true'
         run: |
-          echo "🔽 下载 UPX..."
           UPX_VERSION=$(curl -s https://api.github.com/repos/upx/upx/releases/latest | jq -r '.tag_name')
           wget -q "https://github.com/upx/upx/releases/download/${UPX_VERSION}/upx-${UPX_VERSION#v}-amd64_linux.tar.xz"
-          tar -xf upx-*.tar.xz
-          sudo mv upx-*/upx /usr/local/bin/
-          upx --version
+          tar -xf upx-*.tar.xz && sudo mv upx-*/upx /usr/local/bin/ && upx --version
 
       - name: "编译二进制"
         working-directory: src
@@ -167,144 +100,49 @@ jobs:
           CGO_ENABLED: ${{ matrix.cgo || '0' }}
           CC: ${{ matrix.cc || '' }}
         run: |
-          output="tailscaled-linux-${{ matrix.id }}"
-          
           eval `CGO_ENABLED=0 GOOS=$(go env GOHOSTOS) GOARCH=$(go env GOHOSTARCH) go run ./cmd/mkversion`
-          
-          tags="ts_include_cli,ts_omit_aws,ts_omit_bird,ts_omit_tap,ts_omit_kube,ts_omit_completion,ts_omit_ssh,ts_omit_wakeonlan,ts_omit_capture,ts_omit_relayserver,ts_omit_systray,ts_omit_taildrop,ts_omit_tpm,ts_omit_syspolicy,ts_omit_debugeventbus,ts_omit_webclient"
-          ldflags="-X tailscale.com/version.longStamp=${VERSION_LONG} -X tailscale.com/version.shortStamp=${VERSION_SHORT} -s -w"
-          
           mkdir -p ../build
-          go build -tags "${tags}" -ldflags "${ldflags}" -trimpath -o "../build/${output}" ./cmd/tailscaled
-          
-          chmod +x "../build/${output}"
-          echo "✅ 编译完成："
+          go build \
+            -tags "ts_include_cli,ts_omit_aws,ts_omit_bird,ts_omit_tap,ts_omit_kube,ts_omit_completion,ts_omit_ssh,ts_omit_wakeonlan,ts_omit_capture,ts_omit_relayserver,ts_omit_systray,ts_omit_taildrop,ts_omit_tpm,ts_omit_syspolicy,ts_omit_debugeventbus,ts_omit_webclient" \
+            -ldflags "-X tailscale.com/version.longStamp=${VERSION_LONG} -X tailscale.com/version.shortStamp=${VERSION_SHORT} -s -w" \
+            -trimpath -o "../build/tailscaled-linux-${{ matrix.id }}" ./cmd/tailscaled
+          chmod +x "../build/tailscaled-linux-${{ matrix.id }}"
           ls -lh ../build/
 
       - name: "压缩二进制"
         if: env.ENABLE_COMPRESSION == 'true'
         run: |
           binary="build/tailscaled-linux-${{ matrix.id }}"
-          
-          echo "📊 压缩前大小："
           ls -lh "${binary}"
-          
-          if [[ "${{ matrix.id }}" =~ ^(mips64|mips64le)$ ]]; then
-            echo "⚠️ 跳过 UPX 压缩（架构不支持）"
-          else
-            echo "🗜️ 开始 UPX 压缩..."
-            if upx --lzma --best "${binary}"; then
-              echo "✅ UPX 压缩成功"
-              echo "📊 压缩后大小："
-              ls -lh "${binary}"
-            else
-              echo "⚠️ UPX 压缩失败，使用原始文件"
-            fi
-          fi
+          [[ "${{ matrix.id }}" =~ ^(mips64|mips64le)$ ]] && echo "⚠️ 跳过 UPX（架构不支持）" || \
+          (upx --lzma --best "${binary}" && echo "✅ UPX 压缩成功" && ls -lh "${binary}") || echo "⚠️ UPX 失败"
 
-      - name: "下载配置文件（LuCI 兼容版）"
+      - name: "下载配置文件"
         run: |
-          echo "📥 下载配置文件..."
           mkdir -p config_files
-          
-          # ========================================
-          # 🔥 从 LuCI 源码获取 init.d（保证 LuCI 完美控制）
-          # ========================================
-          echo "📥 克隆 LuCI 源码获取 init.d..."
           git clone --depth=1 https://github.com/${{ env.LUCI_REPO }} /tmp/luci-source
-          
-          if [ -f /tmp/luci-source/root/etc/init.d/tailscale ]; then
-            echo "✅ 找到 LuCI 的 init.d 脚本"
-            cp /tmp/luci-source/root/etc/init.d/tailscale config_files/tailscale.init
-            
-            # 🔥 修改路径以兼容 /usr/sbin（LuCI 显示需要）
-            echo "🔧 修改 init.d 路径：/usr/bin → /usr/sbin..."
-            sed -i 's|/usr/bin/tailscaled|/usr/sbin/tailscaled|g' config_files/tailscale.init
-            sed -i 's|/usr/bin/tailscale|/usr/sbin/tailscale|g' config_files/tailscale.init
-            
-            # 验证修改
-            if grep -q "/usr/sbin/tailscale" config_files/tailscale.init; then
-              echo "✅ init.d 路径已修改为 /usr/sbin"
-            else
-              echo "⚠️ 警告：init.d 中未找到 tailscale 路径"
-            fi
-          else
-            echo "❌ 错误：LuCI 源码中未找到 init.d"
-            exit 1
-          fi
-          
-          # ========================================
-          # 从 IMM 下载配置文件
-          # ========================================
-          echo "📥 下载 IMM 官方配置文件..."
-          curl -fsSL -o config_files/tailscale.conf \
-            https://raw.githubusercontent.com/${{ env.IMM_PACKAGES_REPO }}/master/net/tailscale/files/tailscale.conf
-          
+          [ -f /tmp/luci-source/root/etc/init.d/tailscale ] || exit 1
+          sed 's|/usr/bin/tailscale|/usr/sbin/tailscale|g' /tmp/luci-source/root/etc/init.d/tailscale > config_files/tailscale.init
+          curl -fsSL -o config_files/tailscale.conf https://raw.githubusercontent.com/${{ env.IMM_PACKAGES_REPO }}/master/net/tailscale/files/tailscale.conf
           chmod +x config_files/tailscale.init
-          
-          echo "✅ 配置文件准备完成："
           ls -lh config_files/
-          
-          echo ""
-          echo "📄 init.d 脚本内容（前 30 行）："
-          head -30 config_files/tailscale.init
 
       - name: "打包 IPK 和 APK"
         run: |
-          set -e
-          
           VERSION=$(echo "${{ needs.check-version.outputs.version }}" | sed 's/^v//')
-          
-          # ========================================
-          # 创建目录结构（IMM 风格 + LuCI 兼容）
-          # ========================================
-          mkdir -p ipk/usr/sbin ipk/usr/bin ipk/etc/config ipk/etc/init.d ipk/CONTROL
-          mkdir -p output
-          
+          mkdir -p ipk/usr/{sbin,bin} ipk/etc/{config,init.d} ipk/CONTROL output
           binary="build/tailscaled-linux-${{ matrix.id }}"
-          
-          if [ ! -f "${binary}" ]; then
-            echo "❌ 错误：未找到二进制文件 ${binary}"
-            exit 1
-          fi
-          
-          # ========================================
-          # 🔥 安装到 /usr/sbin（LuCI 显示需要）
-          # ========================================
-          echo "📦 安装到 /usr/sbin (LuCI 兼容)..."
+          [ -f "${binary}" ] || exit 1
           install -m 0755 "${binary}" ipk/usr/sbin/tailscaled
           ln -sf tailscaled ipk/usr/sbin/tailscale
-          
-          # 🔥 在 /usr/bin 创建软链接（命令行使用）
           ln -sf ../sbin/tailscaled ipk/usr/bin/tailscaled
           ln -sf ../sbin/tailscale ipk/usr/bin/tailscale
-          
-          SIZE=$(du -b ipk/usr/sbin/tailscaled | awk '{print $1}')
-          
-          # ========================================
-          # 🔥 安装配置文件（LuCI init.d + IMM config）
-          # ========================================
-          echo "📝 安装配置文件..."
           install -m 0644 config_files/tailscale.conf ipk/etc/config/tailscale
           install -m 0755 config_files/tailscale.init ipk/etc/init.d/tailscale
-          
-          # ========================================
-          # 验证文件结构
-          # ========================================
-          echo "✅ 文件结构："
-          find ipk -type f -o -type l | sort
-          
+          SIZE=$(du -b ipk/usr/sbin/tailscaled | awk '{print $1}')
           echo '2.0' > debian-binary
           
-          # ========================================
-          # 解析 targets 并打包
-          # ========================================
           echo '${{ matrix.targets }}' | jq -r '.[]' | while read ARCH; do
-            echo "📦 打包 ${ARCH}..."
-            
-            # ========================================
-            # 生成 control 文件
-            # ========================================
             cat > ipk/CONTROL/control <<EOF
           Package: tailscale
           Version: ${VERSION}
@@ -317,32 +155,13 @@ jobs:
           Installed-Size: ${SIZE}
           Maintainer: Automated Build <https://github.com/${{ github.repository }}>
           Description: Tailscale VPN client (LuCI compatible build)
-           It creates a secure network between your servers, computers,
-           and cloud instances. Even when separated by firewalls or subnets.
-           .
-           Features: UPX compressed, LuCI compatible init.d, /usr/sbin location.
           EOF
-            
-            # ========================================
-            # 生成 conffiles（固件升级保留配置）
-            # ========================================
-            cat > ipk/CONTROL/conffiles <<'CONFEOF'
-          /etc/config/tailscale
-          CONFEOF
-            
-            # ========================================
-            # 生成 IPK
-            # ========================================
+            echo "/etc/config/tailscale" > ipk/CONTROL/conffiles
             tar --format=gnu --numeric-owner --group=0 --owner=0 -czf control.tar.gz -C ipk/CONTROL .
             tar --format=gnu --numeric-owner --group=0 --owner=0 -czf data.tar.gz -C ipk ./usr ./etc
             tar --format=gnu --numeric-owner --group=0 --owner=0 -czf "output/tailscale_${VERSION}_${ARCH}.ipk" ./control.tar.gz ./data.tar.gz ./debian-binary
             
-            # ========================================
-            # 生成 APK
-            # ========================================
-            mkdir -p apk-build
-            cp -r ipk/* apk-build/
-            
+            mkdir -p apk-build && cp -r ipk/* apk-build/
             cat > apk-build/.PKGINFO <<APKEOF
           pkgname = tailscale
           pkgver = ${VERSION}
@@ -355,29 +174,18 @@ jobs:
           depend = kmod-tun
           provides = tailscaled
           APKEOF
-            
-            cd apk-build
-            tar -czf "../output/tailscale-${VERSION}-r1.${ARCH}.apk" .
-            cd ..
-            rm -rf apk-build
-            
-            rm -f control.tar.gz data.tar.gz
+            tar -czf "output/tailscale-${VERSION}-r1.${ARCH}.apk" -C apk-build .
+            rm -rf apk-build control.tar.gz data.tar.gz
           done
-          
-          echo "✅ 打包完成："
           ls -lh output/
 
-      - name: "上传产物"
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: tailscale-${{ matrix.id }}
           path: output/*
           if-no-files-found: error
           retention-days: 7
 
-  # ========================================
-  # 任务 3: 编译 LuCI（移除冲突文件）
-  # ========================================
   build-luci:
     needs: check-version
     if: needs.check-version.outputs.skip == 'false'
@@ -386,110 +194,39 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - sdk: SNAPSHOT
-            pkg_type: apk
-          - sdk: openwrt-24.10
-            pkg_type: ipk
-
+          - {sdk: SNAPSHOT, pkg_type: apk}
+          - {sdk: openwrt-24.10, pkg_type: ipk}
     name: "LuCI-${{ matrix.pkg_type }}"
-
     steps:
       - uses: actions/checkout@v4
 
-      - name: "拉取 LuCI 源码"
+      - name: "准备 LuCI 源码"
         run: |
           git clone https://github.com/${{ env.LUCI_REPO }} luci-app-tailscale
           cd luci-app-tailscale
+          rm -rf root/etc/init.d root/usr/{bin,sbin} root/etc/config/tailscale 2>/dev/null || true
+          grep -q "conffiles" Makefile || sed -i '/^PKG_VERSION:=/a\\ndefine Package/luci-app-tailscale/conffiles\n/etc/config/tailscale_data/\nendef' Makefile
+          find . -type f \( -name "*.js" -o -name "*.lua" -o -name "*.sh" \) -exec sed -i "s|'/etc/tailscale'|'/etc/config/tailscale_data'|g" {} \;
           
-          # ========================================
-          # 🔥 移除与 tailscale 包冲突的文件
-          # ========================================
-          echo "🗑️ 移除冲突文件（由 tailscale 包提供）..."
-          
-          # 移除 init.d 脚本（由 tailscale 包提供 LuCI 版本）
-          rm -rf root/etc/init.d
-          
-          # 移除二进制文件
-          rm -rf root/usr/bin 2>/dev/null || true
-          rm -rf root/usr/sbin 2>/dev/null || true
-          
-          # 移除配置文件（由 tailscale 包提供）
-          rm -rf root/etc/config/tailscale 2>/dev/null || true
-          
-          echo "✅ 保留的文件（仅 LuCI Web 界面）："
-          find root -type f 2>/dev/null | head -20 || echo "root 目录为空"
-          
-          # ========================================
-          # 删除 Tailscale 依赖（独立安装）
-          # ========================================
-          # sed -i '/LUCI_DEPENDS:=/d' Makefile
-          
-          # ========================================
-          # 添加配置文件保护
-          # ========================================
-          if ! grep -q "conffiles" Makefile; then
-            sed -i '/^PKG_VERSION:=/a\\ndefine Package/luci-app-tailscale/conffiles\n/etc/config/tailscale_data/\nendef' Makefile
-          fi
-          
-          # ========================================
-          # 修改路径配置
-          # ========================================
-          find . -type f \( -name "*.js" -o -name "*.lua" -o -name "*.sh" \) \
-            -exec sed -i "s|'/etc/tailscale'|'/etc/config/tailscale_data'|g" {} \;
-          
-          # ========================================
-          # 添加 uci-defaults 初始化脚本
-          # ========================================
           mkdir -p root/etc/uci-defaults
           cat > root/etc/uci-defaults/40_luci-tailscale <<'EOF'
           #!/bin/sh
-          
-          # 数据目录
           D="/etc/config/tailscale_data"
-          
-          # 避免重复执行
           [ -f "$D/.luci_initialized" ] && exit 0
-          
-          # 创建数据目录
-          mkdir -p "$D"
-          touch "$D/.luci_initialized"
-          
-          # 清理旧配置
+          mkdir -p "$D" && touch "$D/.luci_initialized"
           rm -f /etc/config/tailscale-opkg
-          
-          # 迁移旧配置
           if [ -f /etc/config/tailscale ]; then
-            # 修正配置格式
-            sed -i "s|^config settings|config tailscale|g" /etc/config/tailscale
-            sed -i "/option state_file/d" /etc/config/tailscale
-            sed -i "s|'/etc/tailscale'|'$D'|g" /etc/config/tailscale
-            
-            # 添加 config_path 配置
-            if ! grep -q "option config_path" /etc/config/tailscale; then
-              sed -i "/option port/a\\	option config_path '$D'" /etc/config/tailscale
-            fi
+            sed -i "s|^config settings|config tailscale|g; /option state_file/d; s|'/etc/tailscale'|'$D'|g" /etc/config/tailscale
+            grep -q "option config_path" /etc/config/tailscale || sed -i "/option port/a\\	option config_path '$D'" /etc/config/tailscale
           fi
-          
-          # 清理 ucitrack
           uci -q delete ucitrack.@tailscale[-1] 2>/dev/null
-          
-          # 重建 LuCI 缓存
           rm -f /tmp/luci-indexcache /tmp/luci-modulecache
-          # 启用并重启tailscale服务（如果已安装）
-          if [ -x /etc/init.d/tailscale ]; then
-            /etc/init.d/tailscale enable
-            /etc/init.d/tailscale restart
-          fi
-
+          [ -x /etc/init.d/tailscale ] && /etc/init.d/tailscale enable && /etc/init.d/tailscale restart
           exit 0
           EOF
-          
           chmod +x root/etc/uci-defaults/40_luci-tailscale
-          
-          echo "✅ LuCI 源码准备完成"
 
-      - name: "编译"
-        uses: sbwml/openwrt-gh-action-sdk@go1.25
+      - uses: sbwml/openwrt-gh-action-sdk@go1.25
         env:
           ARCH: x86_64-${{ matrix.sdk }}
           FEEDNAME: packages_ci
@@ -500,33 +237,22 @@ jobs:
         run: |
           mkdir -p output
           find bin/packages -name "*luci*tailscale*.${{ matrix.pkg_type }}" -exec cp -v {} output/ \;
-          
-          if [ -z "$(ls -A output/)" ]; then
-            echo "❌ 错误：未找到编译产物"
-            exit 1
-          fi
-          
-          echo "✅ 收集完成："
+          [ -z "$(ls -A output/)" ] && exit 1
           ls -lh output/
 
-      - name: "上传产物"
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: luci-${{ matrix.pkg_type }}
           path: output/*
           if-no-files-found: error
           retention-days: 7
 
-  # ========================================
-  # 任务 4: 发布 Release
-  # ========================================
   release:
     needs: [check-version, build-tailscale, build-luci]
     if: needs.check-version.outputs.skip == 'false'
     runs-on: ubuntu-latest
     steps:
-      - name: "下载所有产物"
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           path: artifacts
           merge-multiple: false
@@ -535,18 +261,8 @@ jobs:
         run: |
           mkdir -p release
           find artifacts -type f \( -name "*.apk" -o -name "*.ipk" \) -exec cp -v {} release/ \;
-          
-          if [ -z "$(ls -A release/)" ]; then
-            echo "❌ 错误：未找到任何产物文件"
-            exit 1
-          fi
-          
-          echo "📦 Release 文件列表："
+          [ -z "$(ls -A release/)" ] && exit 1
           ls -lh release/
-          echo ""
-          echo "📊 统计信息："
-          echo "IPK 文件数: $(ls release/*.ipk 2>/dev/null | wc -l)"
-          echo "APK 文件数: $(ls release/*.apk 2>/dev/null | wc -l)"
 
       - name: "生成 Release 说明"
         run: |
@@ -559,101 +275,34 @@ jobs:
           | LuCI | ${{ needs.check-version.outputs.luci_version }} |
           | 构建时间 | ${{ needs.check-version.outputs.build_time }} CST |
           | UPX 压缩 | ${{ env.ENABLE_COMPRESSION == 'true' && '✅ 已启用' || '❌ 未启用' }} |
-          | init.d 来源 | LuCI 官方（自动同步） |
           
           ## 📥 安装说明
           
-          ⚠️ **重要：必须先安装 Tailscale，再安装 LuCI**
+          ⚠️ **必须先安装 Tailscale，再安装 LuCI**
           
-          ### 1. 安装 Tailscale（必需）
+          **APK:** `apk add --allow-untrusted tailscale-*.apk luci-app-tailscale-*.apk`
+          **IPK:** `opkg install tailscale_*_架构.ipk luci-app-tailscale_*_all.ipk`
           
-          根据你的架构选择对应的文件：
-          
-          **APK (OpenWrt 主线):**
-          ```bash
-          apk add --allow-untrusted tailscale-*.apk
-          ```
-          
-          **IPK (OpenWrt 24.10):**
-          ```bash
-          opkg install tailscale_*_架构.ipk
-          ```
-          
-          ### 2. 安装 LuCI 界面（可选）
-          
-          **APK:**
-          ```bash
-          apk add --allow-untrusted luci-app-tailscale-*.apk
-          apk add --allow-untrusted luci-i18n-tailscale-zh-cn-*.apk  # 中文
-          ```
-          
-          **IPK:**
-          ```bash
-          opkg install luci-app-tailscale_*_all.ipk
-          opkg install luci-i18n-tailscale-zh-cn_*_all.ipk  # 中文
-          ```
-          
-          ### 3. 刷新 LuCI（必需）
-          
-          ```bash
-          rm -f /tmp/luci-indexcache
-          /etc/init.d/uhttpd restart
-          ```
-          
-          然后访问 **服务 → Tailscale** 即可。
+          刷新 LuCI: `rm -f /tmp/luci-indexcache && /etc/init.d/uhttpd restart`
           
           ## 📋 支持的架构
           
-          - **ARM:** arm_cortex-a7, arm_cortex-a9, arm_cortex-a15, 等 14 个变体
-          - **ARM64:** aarch64_cortex-a53, aarch64_cortex-a72, aarch64_generic, 等
-          - **MIPS:** mips_24kc, mips_mips32, 等
-          - **MIPS64:** mips64_mips64r2, mips64_octeonplus
-          - **x86:** i386_pentium-mmx, i386_pentium4, i386_geode
-          - **x86_64:** x86_64
+          ARM (14), ARM64 (4), MIPS (3), MIPSle (4), MIPS64 (2), MIPS64le (1), x86 (2), x86_64 (1), Geode (1)
           
-          **查看设备架构：**
-          ```bash
-          opkg print-architecture
-          ```
+          查看架构: `opkg print-architecture`
           
-          ## 🔧 配置说明
+          ## 🔧 配置
           
-          - **二进制文件：** `/usr/sbin/tailscaled` (主程序) + `/usr/bin/tailscaled` (软链接)
-          - **配置文件：** `/etc/config/tailscale` (IMM 格式)
-          - **服务脚本：** `/etc/init.d/tailscale` (LuCI 官方版本，自动同步)
-          - **数据目录：** `/etc/config/tailscale_data/`
-          - **授权文件：** `/etc/config/tailscale_data/tailscaled.state`
-          
-          **特性：**
-          - ✅ **LuCI 完美支持**（显示 + 控制）
-          - ✅ **init.d 自动同步 LuCI 官方最新版**
-          - ✅ 固件升级保留配置
-          - ✅ 重新安装保留数据
-          - ✅ UPX 压缩减小体积 50-70%
-          - ✅ 无文件冲突
-          
-          ## 🆚 与其他构建对比
-          
-          | 特性 | IMM 官方包 | GuNanOvO 包 | 本构建 |
-          |------|-----------|------------|--------|
-          | 二进制位置 | /usr/sbin | /usr/bin | ✅ /usr/sbin |
-          | init.d 来源 | IMM 官方 | GuNanOvO | ✅ LuCI 官方 |
-          | LuCI 显示 | ✅ 正常 | ❌ 异常 | ✅ 正常 |
-          | LuCI 控制 | ⚠️ 需配合 LuCI 包 | ❌ 不可用 | ✅ 完美 |
-          | UPX 压缩 | ❌ 未压缩 | ✅ 已压缩 | ✅ 已压缩 |
-          | 包大小 | ~20MB | ~5-10MB | ~5-10MB |
-          | 自动更新 init.d | ❌ | ❌ | ✅ 跟随 LuCI |
+          - **二进制:** `/usr/sbin/tailscaled` + `/usr/bin/tailscaled` (软链接)
+          - **配置:** `/etc/config/tailscale`
+          - **数据:** `/etc/config/tailscale_data/`
+          - **服务:** `/etc/init.d/tailscale`
           
           ---
-          
-          **上游项目：**
-          - [tailscale/tailscale](https://github.com/${{ env.TAILSCALE_REPO }})
-          - [immortalwrt/packages](https://github.com/${{ env.IMM_PACKAGES_REPO }})
-          - [asvow/luci-app-tailscale](https://github.com/${{ env.LUCI_REPO }})
+          **上游:** [tailscale](${{ github.server_url }}/${{ env.TAILSCALE_REPO }}) | [immortalwrt](${{ github.server_url }}/${{ env.IMM_PACKAGES_REPO }}) | [luci](${{ github.server_url }}/${{ env.LUCI_REPO }})
           EOF
 
-      - name: "发布到 Release"
-        uses: ncipollo/release-action@v1
+      - uses: ncipollo/release-action@v1
         with:
           tag: ${{ needs.check-version.outputs.version }}
           name: "Tailscale + LuCI ${{ needs.check-version.outputs.version }}"
@@ -661,9 +310,6 @@ jobs:
           artifacts: "release/*"
           token: ${{ secrets.GITHUB_TOKEN }}
 
-  # ========================================
-  # 任务 5: 生成报告
-  # ========================================
   report:
     needs: [check-version, build-tailscale, build-luci]
     if: always()
@@ -674,38 +320,18 @@ jobs:
           if [ "${{ needs.check-version.outputs.skip }}" = "true" ]; then
             cat > $GITHUB_STEP_SUMMARY <<'EOF'
           # ⏭️ 构建跳过
-          
-          **上游版本 ${{ needs.check-version.outputs.version }} 与本地版本 ${{ needs.check-version.outputs.current_version }} 相同，无需编译**
-          
-          ---
-          
-          检查时间：${{ needs.check-version.outputs.build_time }} CST
+          版本 ${{ needs.check-version.outputs.version }} 已存在
           EOF
           else
-            TS_STATUS="${{ needs.build-tailscale.result == 'success' && '✅ 成功' || needs.build-tailscale.result == 'failure' && '❌ 失败' || '⏭️ 跳过' }}"
-            LUCI_STATUS="${{ needs.build-luci.result == 'success' && '✅ 成功' || needs.build-luci.result == 'failure' && '❌ 失败' || '⏭️ 跳过' }}"
-            COMPRESSION="${{ env.ENABLE_COMPRESSION == 'true' && '✅ 已启用' || '❌ 未启用' }}"
-            
             cat > $GITHUB_STEP_SUMMARY <<EOF
           # 🎯 构建报告
           
-          | 名称 | 上游版本 | 压缩状态 | 编译状态 |
-          |------|---------|---------|---------|
-          | Tailscale | ${{ needs.check-version.outputs.version }} | ${COMPRESSION} | ${TS_STATUS} |
-          | LuCI | ${{ needs.check-version.outputs.luci_version }} | 无需压缩 | ${LUCI_STATUS} |
+          | 组件 | 版本 | 状态 |
+          |------|------|------|
+          | Tailscale | ${{ needs.check-version.outputs.version }} | ${{ needs.build-tailscale.result == 'success' && '✅' || '❌' }} |
+          | LuCI | ${{ needs.check-version.outputs.luci_version }} | ${{ needs.build-luci.result == 'success' && '✅' || '❌' }} |
           
-          ---
-          
-          **构建时间：** ${{ needs.check-version.outputs.build_time }} CST
-          
-          **Release：** [${{ needs.check-version.outputs.version }}](${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ needs.check-version.outputs.version }})
-          
-          **关键特性：**
-          - 🔧 二进制位置：/usr/sbin (LuCI 兼容)
-          - 📝 init.d 来源：LuCI 官方（自动同步）
-          - 🎨 LuCI 控制：完美支持
-          - 🗜️ UPX 压缩：已启用
-          
-          **支持架构：** arm (14), arm64 (4), mips (3), mipsle (4), mips64 (2), mips64le (1), 386 (2), amd64 (1), geode (1)
+          **时间:** ${{ needs.check-version.outputs.build_time }} | **压缩:** ${{ env.ENABLE_COMPRESSION == 'true' && '✅' || '❌' }}
+          **Release:** [${{ needs.check-version.outputs.version }}](${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ needs.check-version.outputs.version }})
           EOF
           fi
