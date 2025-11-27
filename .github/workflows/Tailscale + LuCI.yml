@@ -1,4 +1,4 @@
-name: "构建 Tailscale + LuCI测试"
+name: "构建 Tailscale + LuCI"
 
 on:
   workflow_dispatch:
