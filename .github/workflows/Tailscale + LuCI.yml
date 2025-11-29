@@ -16,7 +16,6 @@ permissions:
 
 env:
   TAILSCALE_REPO: "tailscale/tailscale"
-  IMM_PACKAGES_REPO: "immortalwrt/packages"
   LUCI_REPO: "asvow/luci-app-tailscale"
   ENABLE_COMPRESSION: ${{ github.event_name == 'schedule' || inputs.enable_compression == true }}
 
@@ -122,13 +121,19 @@ jobs:
         run: |
           mkdir -p config_files
           git clone --depth=1 https://github.com/${{ env.LUCI_REPO }} /tmp/luci-source
+          
+          # init.d 脚本
           cp /tmp/luci-source/root/etc/init.d/tailscale config_files/tailscale.init || exit 1
           for cmd in tailscaled tailscale; do
             sed -i "s|/usr/bin/${cmd}|/usr/sbin/${cmd}|g" config_files/tailscale.init
             grep -q "/usr/sbin/${cmd}" config_files/tailscale.init || exit 1
           done
-          curl -fsSL -o config_files/tailscale.conf \
-            "https://raw.githubusercontent.com/${{ env.IMM_PACKAGES_REPO }}/master/net/tailscale/files/tailscale.conf"
+          
+          # 配置文件（从 LuCI 获取）
+          cp /tmp/luci-source/root/etc/config/tailscale config_files/tailscale.conf || exit 1
+          sed -i "s|'/etc/tailscale'|'/etc/config/tailscale_data'|g" config_files/tailscale.conf
+          grep -q "'/etc/config/tailscale_data'" config_files/tailscale.conf || exit 1
+          
           chmod +x config_files/tailscale.init
 
       - name: "打包"
@@ -144,7 +149,6 @@ jobs:
           install -m 0644 config_files/tailscale.conf ipk/etc/config/tailscale
           install -m 0755 config_files/tailscale.init ipk/etc/init.d/tailscale
           
-          # prerm: 升级前保存状态
           cat > ipk/CONTROL/prerm <<'EOF'
           #!/bin/sh
           [ "$PKG_UPGRADE" = "1" ] || exit 0
@@ -154,7 +158,6 @@ jobs:
           exit 0
           EOF
           
-          # postinst: 安装后恢复状态
           cat > ipk/CONTROL/postinst <<'EOF'
           #!/bin/sh
           [ -x /etc/init.d/tailscale ] || exit 0
@@ -236,7 +239,7 @@ jobs:
         run: |
           git clone https://github.com/${{ env.LUCI_REPO }} luci-app-tailscale
           cd luci-app-tailscale
-          rm -rf root/etc/init.d root/usr/bin root/usr/sbin root/etc/config/tailscale 2>/dev/null || true
+          rm -rf root/etc/init.d root/usr/bin root/usr/sbin root/etc/config 2>/dev/null || true
           grep -q "conffiles" Makefile || \
             sed -i '/^PKG_VERSION:=/a\\ndefine Package/luci-app-tailscale/conffiles\n/etc/config/tailscale_data/\nendef' Makefile
           while IFS= read -r f; do
