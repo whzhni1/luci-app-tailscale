@@ -122,7 +122,6 @@ jobs:
           mkdir -p config_files
           git clone --depth=1 https://github.com/${{ env.LUCI_REPO }} /tmp/luci-source
           
-          # 复制 LuCI 文件
           cp /tmp/luci-source/root/etc/init.d/tailscale config_files/tailscale.init || exit 1
           cp /tmp/luci-source/root/etc/config/tailscale config_files/tailscale.conf || exit 1
           cp /tmp/luci-source/root/usr/sbin/tailscale_helper config_files/tailscale_helper || exit 1
@@ -134,9 +133,17 @@ jobs:
             sed -i "s|/etc/tailscale|/etc/config/tailscale_data|g" "$f"
           done
           
-          # 验证替换
+          # 修改默认值：enabled=1，添加默认 access
+          sed -i "s|option enabled '0'|option enabled '1'|g" config_files/tailscale.conf
+          if ! grep -q "list access" config_files/tailscale.conf; then
+            echo "	list access 'lan_ac_ts'" >> config_files/tailscale.conf
+            echo "	list access 'wan_ac_ts'" >> config_files/tailscale.conf
+          fi
+          
+          # 验证
           grep -q "/usr/sbin/tailscaled" config_files/tailscale.init || exit 1
           grep -q "/etc/config/tailscale_data" config_files/tailscale.conf || exit 1
+          grep -q "option enabled '1'" config_files/tailscale.conf || exit 1
           
           chmod +x config_files/tailscale.init config_files/tailscale_helper
 
@@ -245,65 +252,71 @@ jobs:
           git clone https://github.com/${{ env.LUCI_REPO }} luci-app-tailscale
           cd luci-app-tailscale
           
-          # 删除由 tailscale 包提供的文件
           rm -rf root/etc/init.d root/usr/sbin root/etc/config 2>/dev/null || true
           
-          # 修改代码中的路径
           find . -type f \( -name "*.js" -o -name "*.lua" -o -name "*.sh" \) | while read f; do
             sed -i "s|'/etc/tailscale'|'/etc/config/tailscale_data'|g" "$f"
           done
           
-          # 读取 LuCI 原始文件用于嵌入脚本
           git clone --depth=1 https://github.com/${{ env.LUCI_REPO }} /tmp/luci-orig
           
-          INIT_SCRIPT=$(cat /tmp/luci-orig/root/etc/init.d/tailscale | sed "s|/usr/bin/tailscale|/usr/sbin/tailscale|g; s|'/etc/tailscale'|'/etc/config/tailscale_data'|g; s|/etc/tailscale|/etc/config/tailscale_data|g" | base64 -w0)
-          HELPER_SCRIPT=$(cat /tmp/luci-orig/root/usr/sbin/tailscale_helper | sed "s|/usr/bin/tailscale|/usr/sbin/tailscale|g; s|'/etc/tailscale'|'/etc/config/tailscale_data'|g; s|/etc/tailscale|/etc/config/tailscale_data|g" | base64 -w0)
-          CONFIG_FILE=$(cat /tmp/luci-orig/root/etc/config/tailscale | sed "s|'/etc/tailscale'|'/etc/config/tailscale_data'|g; s|/etc/tailscale|/etc/config/tailscale_data|g" | base64 -w0)
+          # 处理脚本内容并 base64 编码
+          INIT_SCRIPT=$(sed "s|/usr/bin/tailscale|/usr/sbin/tailscale|g; s|'/etc/tailscale'|'/etc/config/tailscale_data'|g; s|/etc/tailscale|/etc/config/tailscale_data|g" /tmp/luci-orig/root/etc/init.d/tailscale | base64 -w0)
+          HELPER_SCRIPT=$(sed "s|/usr/bin/tailscale|/usr/sbin/tailscale|g; s|'/etc/tailscale'|'/etc/config/tailscale_data'|g; s|/etc/tailscale|/etc/config/tailscale_data|g" /tmp/luci-orig/root/usr/sbin/tailscale_helper | base64 -w0)
+          CONFIG_FILE=$(sed "s|'/etc/tailscale'|'/etc/config/tailscale_data'|g; s|/etc/tailscale|/etc/config/tailscale_data|g; s|option enabled '0'|option enabled '1'|g" /tmp/luci-orig/root/etc/config/tailscale | base64 -w0)
           
-          # 生成 uci-defaults 脚本
           mkdir -p root/etc/uci-defaults
           cat > root/etc/uci-defaults/40_luci-tailscale <<EOFSCRIPT
           #!/bin/sh
           
           DATA_DIR="/etc/config/tailscale_data"
-          
-          # 创建数据目录
           mkdir -p "\$DATA_DIR"
           
           # ========================================
-          # 检测并修复配置文件（IMM 兼容）
+          # 修复配置文件
           # ========================================
           if [ -f /etc/config/tailscale ]; then
+            # IMM 格式转换
             if grep -q "^config settings" /etc/config/tailscale; then
-              echo "检测到 IMM 配置格式，转换中..."
               sed -i "s|^config settings|config tailscale|g" /etc/config/tailscale
               sed -i "/option state_file/d" /etc/config/tailscale
-              grep -q "option config_path" /etc/config/tailscale || \
-                sed -i "/option port/a\\	option config_path '\$DATA_DIR'" /etc/config/tailscale
-              grep -q "option enabled" /etc/config/tailscale || \
-                sed -i "/config tailscale/a\\	option enabled '0'" /etc/config/tailscale
             fi
+            # 路径修复
             sed -i "s|'/etc/tailscale'|'\$DATA_DIR'|g; s|/etc/tailscale|\$DATA_DIR|g" /etc/config/tailscale
+            # enabled 修复
+            if grep -q "option enabled '0'" /etc/config/tailscale; then
+              sed -i "s|option enabled '0'|option enabled '1'|g" /etc/config/tailscale
+            elif ! grep -q "option enabled" /etc/config/tailscale; then
+              sed -i "/config tailscale/a\\	option enabled '1'" /etc/config/tailscale
+            fi
+            # config_path 修复
+            grep -q "option config_path" /etc/config/tailscale || \
+              sed -i "/option port/a\\	option config_path '\$DATA_DIR'" /etc/config/tailscale
+            # access 修复
+            if ! grep -q "list access" /etc/config/tailscale; then
+              echo "	list access 'lan_ac_ts'" >> /etc/config/tailscale
+              echo "	list access 'wan_ac_ts'" >> /etc/config/tailscale
+            fi
           else
             echo "${CONFIG_FILE}" | base64 -d > /etc/config/tailscale
+            echo "	list access 'lan_ac_ts'" >> /etc/config/tailscale
+            echo "	list access 'wan_ac_ts'" >> /etc/config/tailscale
           fi
           
           # ========================================
-          # 检测并修复 init.d 脚本（IMM 兼容）
+          # 修复 init.d（检测 IMM 版本）
           # ========================================
           if [ -f /etc/init.d/tailscale ]; then
             if ! grep -q "section_enabled" /etc/init.d/tailscale; then
-              echo "检测到 IMM init.d，替换中..."
               echo "${INIT_SCRIPT}" | base64 -d > /etc/init.d/tailscale
               chmod +x /etc/init.d/tailscale
             fi
           fi
           
           # ========================================
-          # 检测并安装 tailscale_helper
+          # 安装 tailscale_helper
           # ========================================
           if [ ! -f /usr/sbin/tailscale_helper ]; then
-            echo "安装 tailscale_helper..."
             echo "${HELPER_SCRIPT}" | base64 -d > /usr/sbin/tailscale_helper
             chmod +x /usr/sbin/tailscale_helper
           fi
