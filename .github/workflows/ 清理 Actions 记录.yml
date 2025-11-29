@@ -1,8 +1,8 @@
 name: "🧹 清理 Actions 记录"
 
 on:
-  schedule:
-    - cron: "0 3 * * 0"  # 每周日凌晨 3 点
+  #schedule:
+    #- cron: "0 3 * * 0"  # 每周日凌晨 3 点
   workflow_dispatch:
 
 permissions:
