@@ -246,43 +246,62 @@ jobs:
           find . -type f \( -name "*.js" -o -name "*.lua" -o -name "*.sh" \) -exec \
             sed -i "s|/usr/bin/tailscale|/usr/sbin/tailscale|g; s|'/etc/tailscale'|'/etc/config/tailscale_data'|g; s|/etc/tailscale|/etc/config/tailscale_data|g" {} \;
           
-          # 准备 uci-defaults 脚本
+          # 创建备份文件
+          mkdir -p root/usr/share/tailscale
           git clone --depth=1 https://github.com/${{ env.LUCI_REPO }} /tmp/luci-orig
-          INIT_SCRIPT=$(sed "s|/usr/bin/tailscale|/usr/sbin/tailscale|g; s|'/etc/tailscale'|'/etc/config/tailscale_data'|g; s|/etc/tailscale|/etc/config/tailscale_data|g" /tmp/luci-orig/root/etc/init.d/tailscale | base64 -w0)
-          CONFIG_FILE=$(sed "s|'/etc/tailscale'|'/etc/config/tailscale_data'|g; s|/etc/tailscale|/etc/config/tailscale_data|g" /tmp/luci-orig/root/etc/config/tailscale | base64 -w0)
-          HELPER_SCRIPT=$(sed "s|/usr/bin/tailscale|/usr/sbin/tailscale|g; s|'/etc/tailscale'|'/etc/config/tailscale_data'|g; s|/etc/tailscale|/etc/config/tailscale_data|g" /tmp/luci-orig/root/usr/sbin/tailscale_helper | base64 -w0)
           
-          mkdir -p root/etc/uci-defaults
-          cat > root/etc/uci-defaults/40_luci-tailscale <<EOFSCRIPT
+          for src in /tmp/luci-orig/root/etc/init.d/tailscale:/tmp/luci-orig/root/etc/config/tailscale:/tmp/luci-orig/root/usr/sbin/tailscale_helper; do
+            [ -f "$src" ] && sed "s|/usr/bin/tailscale|/usr/sbin/tailscale|g; s|'/etc/tailscale'|'/etc/config/tailscale_data'|g; s|/etc/tailscale|/etc/config/tailscale_data|g" "$src" > "root/usr/share/tailscale/$(basename $src)"
+          done
+          chmod +x root/usr/share/tailscale/*
+          
+          # 在 Makefile 中添加 postinst
+          cat >> Makefile <<'POSTINST'
+          
+          define Package/luci-app-tailscale/postinst
           #!/bin/sh
-          mkdir -p /etc/config/tailscale_data
+          [ -n "$${IPKG_INSTROOT}" ] && exit 0
+          BACKUP="/usr/share/tailscale"
+          DATA="/etc/config/tailscale_data"
+          mkdir -p "$$DATA"
           
-          # 修复配置文件（IMM 兼容）
+          # 修复配置文件
           if [ -f /etc/config/tailscale ]; then
             grep -q "^config settings" /etc/config/tailscale && \
               sed -i "s|^config settings|config tailscale|g; /option state_file/d" /etc/config/tailscale
-            sed -i "s|'/etc/tailscale'|'/etc/config/tailscale_data'|g; s|/etc/tailscale|/etc/config/tailscale_data|g" /etc/config/tailscale
+            sed -i "s|'/etc/tailscale'|'$$DATA'|g; s|/etc/tailscale|$$DATA|g" /etc/config/tailscale
             grep -q "option config_path" /etc/config/tailscale || \
-              sed -i "/option port/a\\	option config_path '/etc/config/tailscale_data'" /etc/config/tailscale
+              sed -i "/option port/a\\	option config_path '$$DATA'" /etc/config/tailscale
             grep -q "option enabled" /etc/config/tailscale || \
               sed -i "/config tailscale/a\\	option enabled '0'" /etc/config/tailscale
-          else
-            echo "${CONFIG_FILE}" | base64 -d > /etc/config/tailscale
+          elif [ -f "$$BACKUP/tailscale" ]; then
+            cp "$$BACKUP/tailscale" /etc/config/tailscale
           fi
           
-          # 修复 init.d（IMM 版本检测）
+          # 修复 init.d
           [ -f /etc/init.d/tailscale ] && ! grep -q "section_enabled" /etc/init.d/tailscale && \
-            { echo "${INIT_SCRIPT}" | base64 -d > /etc/init.d/tailscale; chmod +x /etc/init.d/tailscale; }
+            [ -f "$$BACKUP/tailscale" ] && cp "$$BACKUP/tailscale" /etc/init.d/tailscale && chmod +x /etc/init.d/tailscale
           
-          # 创建 tailscale_helper（如果不存在）
-          [ ! -f /usr/sbin/tailscale_helper ] && \
-            { echo "${HELPER_SCRIPT}" | base64 -d > /usr/sbin/tailscale_helper; chmod +x /usr/sbin/tailscale_helper; }
+          # 创建 tailscale_helper
+          [ ! -f /usr/sbin/tailscale_helper ] && [ -f "$$BACKUP/tailscale_helper" ] && \
+            cp "$$BACKUP/tailscale_helper" /usr/sbin/tailscale_helper && chmod +x /usr/sbin/tailscale_helper
           
+          # 清理
+          rm -rf "$$BACKUP"
           uci -q delete ucitrack.@tailscale[-1] 2>/dev/null; uci commit ucitrack 2>/dev/null
           rm -f /tmp/luci-indexcache /tmp/luci-modulecache
           /etc/init.d/tailscale restart 2>/dev/null || true
           exit 0
-          EOFSCRIPT
+          endef
+          POSTINST
+          
+          mkdir -p root/etc/uci-defaults
+          cat > root/etc/uci-defaults/40_luci-tailscale <<'EOF'
+          #!/bin/sh
+          uci -q delete ucitrack.@tailscale[-1] 2>/dev/null; uci commit ucitrack 2>/dev/null
+          rm -f /tmp/luci-indexcache /tmp/luci-modulecache
+          exit 0
+          EOF
           chmod +x root/etc/uci-defaults/40_luci-tailscale
 
       - name: "编译"
