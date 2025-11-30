@@ -1,5 +1,14 @@
 ## 📥 安装说明
-  
+## 快速安装
+  ```bash
+  curl -fsSL "https://gitlab.com/whzhni/tailscale/-/raw/main/tailscale.sh" | sh
+  ```
+  ## 或
+  ```bash
+  wget -q -O - "https://gitlab.com/whzhni/tailscale/-/raw/main/tailscale.sh" | sh
+  ```
+## 😉手动安装
+
   ⚠️ **重要：必须先安装 Tailscale，再安装 LuCI**
   
   ### 1. 安装 Tailscale（必需）
