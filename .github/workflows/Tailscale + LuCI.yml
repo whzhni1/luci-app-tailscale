@@ -124,13 +124,14 @@ jobs:
           
           cp /tmp/luci-source/root/etc/init.d/tailscale config_files/tailscale.init || exit 1
           cp /tmp/luci-source/root/etc/config/tailscale config_files/tailscale.conf || exit 1
+          cp /tmp/luci-source/root/usr/sbin/tailscale_helper config_files/tailscale_helper || exit 1
           
           # 替换路径
           for f in config_files/*; do
             sed -i "s|/usr/bin/tailscale|/usr/sbin/tailscale|g; s|'/etc/tailscale'|'/etc/config/tailscale_data'|g; s|/etc/tailscale|/etc/config/tailscale_data|g" "$f"
           done
           
-          chmod +x config_files/tailscale.init
+          chmod +x config_files/tailscale.init config_files/tailscale_helper
 
       - name: "打包"
         run: |
@@ -139,6 +140,7 @@ jobs:
           mkdir -p ipk/{usr/{sbin,bin},etc/{config,init.d},CONTROL} output
           
           install -m 0755 "build/tailscaled-linux-${{ matrix.id }}" ipk/usr/sbin/tailscaled
+          install -m 0755 config_files/tailscale_helper ipk/usr/sbin/tailscale_helper
           ln -sf tailscaled ipk/usr/sbin/tailscale
           ln -sf ../sbin/tailscaled ipk/usr/bin/tailscaled
           ln -sf ../sbin/tailscale ipk/usr/bin/tailscale
@@ -238,7 +240,7 @@ jobs:
           git clone https://github.com/${{ env.LUCI_REPO }} luci-app-tailscale
           cd luci-app-tailscale
           
-          # 删除由 tailscale 包提供的文件
+          # 删除由 tailscale 包提供的文件（保留 tailscale_helper）
           rm -rf root/etc/init.d root/etc/config 2>/dev/null || true
           
           # 修改路径
@@ -274,6 +276,7 @@ jobs:
           
           uci -q delete ucitrack.@tailscale[-1] 2>/dev/null; uci commit ucitrack 2>/dev/null
           rm -f /tmp/luci-indexcache /tmp/luci-modulecache
+          /etc/init.d/tailscale restart 2>/dev/null || true
           exit 0
           EOFSCRIPT
           chmod +x root/etc/uci-defaults/40_luci-tailscale
