@@ -151,23 +151,19 @@ jobs:
           [ "$PKG_UPGRADE" = "1" ] || exit 0
           [ -x /etc/init.d/tailscale ] || exit 0
           /etc/init.d/tailscale enabled && touch /tmp/.tailscale_was_enabled
-          pgrep -x tailscaled >/dev/null && touch /tmp/.tailscale_was_running
           exit 0
           EOF
           
           cat > ipk/CONTROL/postinst <<'EOF'
           #!/bin/sh
           [ -x /etc/init.d/tailscale ] || exit 0
-          if [ -f /tmp/.tailscale_was_enabled ]; then
+          # 恢复 enabled 状态
+          if [ -f /tmp/.tailscale_was_enabled ] || [ -d /etc/config/tailscale_data ]; then
             /etc/init.d/tailscale enable
-            rm -f /tmp/.tailscale_was_enabled
-            [ -f /tmp/.tailscale_was_running ] && /etc/init.d/tailscale restart && rm -f /tmp/.tailscale_was_running
-          elif [ -d /etc/config/tailscale_data ]; then
-            /etc/init.d/tailscale enable
-            /etc/init.d/tailscale restart
-          else
-            /etc/init.d/tailscale restart 2>/dev/null || true
           fi
+          rm -f /tmp/.tailscale_was_enabled
+          # 始终 restart 让 procd 识别
+          /etc/init.d/tailscale restart 2>/dev/null || true
           exit 0
           EOF
           chmod +x ipk/CONTROL/prerm ipk/CONTROL/postinst
@@ -290,10 +286,11 @@ jobs:
           [ ! -f /usr/sbin/tailscale_helper ] && [ -f "$$BACKUP/tailscale_helper" ] && \
             cp "$$BACKUP/tailscale_helper" /usr/sbin/tailscale_helper && chmod +x /usr/sbin/tailscale_helper
 
-          # 清理
+          # 清理备份
           rm -rf "$$BACKUP"
           uci -q delete ucitrack.@tailscale[-1] 2>/dev/null; uci commit ucitrack 2>/dev/null
           rm -f /tmp/luci-indexcache /tmp/luci-modulecache
+          # 始终 restart
           /etc/init.d/tailscale restart 2>/dev/null || true
           exit 0
           endef
