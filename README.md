@@ -1,5 +1,5 @@
 ## 📥 安装说明
-## 快速自动下载安装自动识别架构
+## 终端执行以下命令，自动下载安装自动识别架构
   ```bash
   curl -fsSL "https://gitlab.com/whzhni/tailscale/-/raw/main/Auto_Install_Script.sh" | sh -s tailscale
   ```
