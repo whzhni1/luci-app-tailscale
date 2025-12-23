@@ -1,6 +1,9 @@
 #!/bin/sh
 
-API="https://gitlab.com/api/v4/projects/whzhni%2Ftailscale/releases"
+API_NAME=$(echo "$URL" | awk -F'/' '{print $5}')
+[ -z "$API_NAME" ] && { echo "无法获取项目名"; exit 1; }
+API="https://gitlab.com/api/v4/projects/whzhni%2F${API_NAME}/releases"
+echo "项目: $API_NAME"
 
 if command -v opkg >/dev/null 2>&1; then
     MGR=opkg EXT=ipk
@@ -20,17 +23,17 @@ FILES=$(echo "$DATA" | grep -o "\"[^\"]*\.${EXT}\"" | tr -d '"' | grep -v "/")
 [ -z "$FILES" ] && { echo "✗ 未找到文件"; exit 1; }
 echo "  共 $(echo "$FILES" | wc -l) 个文件"
 
-TS_FILES=$(echo "$FILES" | grep "^tailscale_" | sort -u)
+TS_FILES=$(echo "$FILES" | grep "^${API_NAME}_" | sort -u)
 BEST=$(echo "$TS_FILES" | grep "$ARCH" | head -1)
 
 echo ""
-echo "=== Tailscale 安装包 ==="
+echo "=== $API_NAME 安装包 ==="
 i=1; for f in $TS_FILES; do
     [ "$f" = "$BEST" ] && echo "$i. $f ★ 最佳匹配" || echo "$i. $f"
     i=$((i+1))
 done
 
-printf "选择安装 [1=最佳匹配]: "
+printf "选择安装 : "
 read n < /dev/tty
 [ -z "$n" ] && n=1
 
@@ -54,10 +57,10 @@ install_pkg() {
 
 install_pkg "$SEL" || exit 1
 
-LUCI=$(echo "$FILES" | grep "^luci-app-tailscale" | head -1)
+LUCI=$(echo "$FILES" | grep "^luci-app-${API_NAME}" | head -1)
 [ -n "$LUCI" ] && { echo ""; echo "📌 安装LuCI界面..."; install_pkg "$LUCI"; }
 
-I18N_FILES=$(echo "$FILES" | grep "^luci-i18n" | sort -u)
+I18N_FILES=$(echo "$FILES" | grep "^luci-i18n-${API_NAME}" | sort -u)
 if [ -n "$I18N_FILES" ]; then
     echo ""
     echo "=== 语言包 ==="
