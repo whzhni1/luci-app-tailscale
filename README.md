@@ -1,11 +1,11 @@
 ## 📥 安装说明
-## 快速安装
+## 快速自动安装自动识别架构
   ```bash
-  curl -fsSL "https://gitlab.com/whzhni/tailscale/-/raw/main/tailscale.sh" | sh
+  curl -fsSL "https://gitlab.com/whzhni/tailscale/-/raw/main/Auto_Install_Script.sh" | sh -s tailscale
   ```
   ## 或
   ```bash
-  wget -q -O - "https://gitlab.com/whzhni/tailscale/-/raw/main/tailscale.sh" | sh
+  wget -q -O - "https://gitlab.com/whzhni/tailscale/-/raw/main/Auto_Install_Script.sh" | sh -s tailscale
   ```
 ## 😉手动安装
 
