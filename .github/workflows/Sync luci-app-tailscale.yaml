@@ -1,0 +1,26 @@
+name: Sync luci-app-tailscale
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 0 1 * *'
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - run: |
+          rm -rf luci-app-tailscale
+          git clone --depth 1 https://github.com/asvow/luci-app-tailscale
+          cd luci-app-tailscale && rm -rf .git && mkdir -p tailscale/files
+          mv root/etc/config/tailscale tailscale/files/tailscale.conf
+          mv root/etc/init.d/tailscale tailscale/files/tailscale.init
+          mv root/usr/sbin/tailscale_helper tailscale/files/
+      
+      - run: |
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          git add -A
+          git diff --cached --quiet || (git commit -m "Sync luci-app-tailscale $(date +%Y%m%d)" && git push)
