@@ -1,4 +1,4 @@
-name: "构建 Tailscale + LuCI（完整版）"
+name: "构建 Tailscale + LuCI"
 
 on:
   workflow_dispatch:
@@ -8,6 +8,7 @@ on:
         required: true
         type: boolean
         default: true
+
   schedule:
     - cron: '0 16 * * *'
 
@@ -16,35 +17,50 @@ permissions:
 
 env:
   TAILSCALE_REPO: "tailscale/tailscale"
-  LUCI_REPO: "asvow/luci-app-tailscale"
   ENABLE_COMPRESSION: ${{ github.event_name == 'schedule' || inputs.enable_compression == true }}
+  PATCH_PATHS: ${{ github.event_name == 'schedule' || inputs.patch_paths == true }}
 
 jobs:
   check-version:
     runs-on: ubuntu-latest
     outputs:
-      skip: ${{ steps.check.outputs.skip }}
-      version: ${{ steps.check.outputs.version }}
-      current_version: ${{ steps.check.outputs.current_version }}
-      build_time: ${{ steps.time.outputs.time }}
+      version: ${{ steps.tailscale.outputs.version }}
+      skip: ${{ steps.tailscale.outputs.skip }}
       luci_version: ${{ steps.luci.outputs.version }}
+      build_time: ${{ steps.time.outputs.time }}
     steps:
-      - name: "检查版本"
-        id: check
+      - uses: actions/checkout@v4
+
+      - name: "检查 Tailscale 更新"
+        id: tailscale
         run: |
-          upstream=$(curl -s "https://api.github.com/repos/${{ env.TAILSCALE_REPO }}/releases/latest" | jq -r '.tag_name // "none"')
-          current=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            "https://api.github.com/repos/${{ github.repository }}/tags" | jq -r '.[0].name // "none"')
-          echo "上游: $upstream | 当前: $current"
-          cat >> $GITHUB_OUTPUT <<EOF
-          version=$upstream
-          current_version=$current
-          skip=$( [ "$upstream" = "$current" ] && echo true || echo false )
-          EOF
+          LATEST=$(curl -s https://api.github.com/repos/tailscale/tailscale/releases/latest \
+            | jq -r .tag_name | sed 's/^v//')
+          CURRENT=$(sed -n 's/^PKG_VERSION:=//p' tailscale/Makefile)
+          
+          echo "Latest: $LATEST | Current: $CURRENT"
+          echo "version=v$LATEST" >> $GITHUB_OUTPUT
+          
+          if [ "$LATEST" = "$CURRENT" ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+            
+            HASH=$(curl -sL "https://codeload.github.com/tailscale/tailscale/tar.gz/v${LATEST}" \
+              | sha256sum | cut -d' ' -f1)
+            sed -i "s/^PKG_VERSION:=.*/PKG_VERSION:=$LATEST/; s/^PKG_HASH:=.*/PKG_HASH:=$HASH/" tailscale/Makefile
+            
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -am "tailscale: update to $LATEST" || true
+            git push || true
+          fi
 
       - name: "获取 LuCI 版本"
         id: luci
-        run: echo "version=$(curl -s "https://api.github.com/repos/${{ env.LUCI_REPO }}/releases/latest" | jq -r '.tag_name // "none"')" >> $GITHUB_OUTPUT
+        run: |
+          version=$(grep -E '^PKG_VERSION:=' luci-app-tailscale/Makefile | cut -d= -f2)
+          echo "version=$version" >> $GITHUB_OUTPUT
 
       - name: "生成构建时间"
         id: time
@@ -73,7 +89,13 @@ jobs:
         if: matrix.setup
         run: ${{ matrix.setup }}
 
-      - name: "检出源码"
+      # 先 checkout 自己的仓库获取配置文件
+      - name: "检出主仓库"
+        uses: actions/checkout@v4
+        with:
+          path: main
+
+      - name: "检出 Tailscale 源码"
         uses: actions/checkout@v4
         with:
           repository: ${{ env.TAILSCALE_REPO }}
@@ -117,34 +139,18 @@ jobs:
           [[ "${{ matrix.id }}" =~ ^(mips64|mips64le)$ ]] && exit 0
           upx --lzma --best "$bin" || true
 
-      - name: "下载配置"
-        run: |
-          mkdir -p config_files
-          git clone --depth=1 https://github.com/${{ env.LUCI_REPO }} /tmp/luci-source
-          
-          cp /tmp/luci-source/root/etc/init.d/tailscale config_files/tailscale.init || exit 1
-          cp /tmp/luci-source/root/etc/config/tailscale config_files/tailscale.conf || exit 1
-          cp /tmp/luci-source/root/usr/sbin/tailscale_helper config_files/tailscale_helper || exit 1
-          
-          for f in config_files/*; do
-            sed -i "s|/usr/bin/tailscale|/usr/sbin/tailscale|g; s|'/etc/tailscale'|'/etc/config/tailscale_data'|g; s|/etc/tailscale|/etc/config/tailscale_data|g" "$f"
-          done
-          
-          chmod +x config_files/tailscale.init config_files/tailscale_helper
-
       - name: "打包"
         run: |
           set -e
           VERSION=$(echo "${{ needs.check-version.outputs.version }}" | sed 's/^v//')
           mkdir -p ipk/{usr/{sbin,bin},etc/{config,init.d},CONTROL} output
-          
           install -m 0755 "build/tailscaled-linux-${{ matrix.id }}" ipk/usr/sbin/tailscaled
-          install -m 0755 config_files/tailscale_helper ipk/usr/sbin/tailscale_helper
+          install -m 0755 main/tailscale/files/tailscale_helper ipk/usr/sbin/tailscale_helper
           ln -sf tailscaled ipk/usr/sbin/tailscale
           ln -sf ../sbin/tailscaled ipk/usr/bin/tailscaled
-          ln -sf ../sbin/tailscale ipk/usr/bin/tailscale
-          install -m 0644 config_files/tailscale.conf ipk/etc/config/tailscale
-          install -m 0755 config_files/tailscale.init ipk/etc/init.d/tailscale
+          # ln -sf ../sbin/tailscale ipk/usr/bin/tailscale
+          install -m 0644 main/tailscale/files/tailscale.conf ipk/etc/config/tailscale
+          install -m 0755 main/tailscale/files/tailscale.init ipk/etc/init.d/tailscale
           
           cat > ipk/CONTROL/prerm <<'EOF'
           #!/bin/sh
@@ -157,12 +163,7 @@ jobs:
           cat > ipk/CONTROL/postinst <<'EOF'
           #!/bin/sh
           [ -x /etc/init.d/tailscale ] || exit 0
-          # 恢复 enabled 状态
-          if [ -f /tmp/.tailscale_was_enabled ] || [ -d /etc/config/tailscale_data ]; then
-            /etc/init.d/tailscale enable
-          fi
-          rm -f /tmp/.tailscale_was_enabled
-          # 始终 restart 让 procd 识别
+          /etc/init.d/tailscale enable
           /etc/init.d/tailscale restart 2>/dev/null || true
           exit 0
           EOF
@@ -229,72 +230,6 @@ jobs:
     name: "LuCI-${{ matrix.pkg_type }}"
     steps:
       - uses: actions/checkout@v4
-
-      - name: "准备源码"
-        run: |
-          git clone https://github.com/${{ env.LUCI_REPO }} luci-app-tailscale
-          cd luci-app-tailscale
-          
-          # 删除由 tailscale 包提供的文件
-          rm -rf root/etc/init.d root/etc/config root/usr/sbin 2>/dev/null || true
-          
-          # 修改路径
-          find . -type f \( -name "*.js" -o -name "*.lua" -o -name "*.sh" \) -exec \
-            sed -i "s|/usr/bin/tailscale|/usr/sbin/tailscale|g; s|'/etc/tailscale'|'/etc/config/tailscale_data'|g; s|/etc/tailscale|/etc/config/tailscale_data|g" {} \;
-          
-          # 创建备份文件
-          mkdir -p root/usr/share/tailscale
-          git clone --depth=1 https://github.com/${{ env.LUCI_REPO }} /tmp/luci-orig
-          
-          sed "s|/usr/bin/tailscale|/usr/sbin/tailscale|g; s|'/etc/tailscale'|'/etc/config/tailscale_data'|g; s|/etc/tailscale|/etc/config/tailscale_data|g" \
-            /tmp/luci-orig/root/etc/init.d/tailscale > root/usr/share/tailscale/tailscale.init
-          sed "s|'/etc/tailscale'|'/etc/config/tailscale_data'|g; s|/etc/tailscale|/etc/config/tailscale_data|g" \
-            /tmp/luci-orig/root/etc/config/tailscale > root/usr/share/tailscale/tailscale.conf
-          sed "s|/usr/bin/tailscale|/usr/sbin/tailscale|g; s|'/etc/tailscale'|'/etc/config/tailscale_data'|g; s|/etc/tailscale|/etc/config/tailscale_data|g" \
-            /tmp/luci-orig/root/usr/sbin/tailscale_helper > root/usr/share/tailscale/tailscale_helper
-          
-          chmod +x root/usr/share/tailscale/tailscale.init root/usr/share/tailscale/tailscale_helper
-          
-          # 在 Makefile 中添加 postinst
-          cat >> Makefile <<'POSTINST'
-
-          define Package/luci-app-tailscale/postinst
-          #!/bin/sh
-          [ -n "$${IPKG_INSTROOT}" ] && exit 0
-          BACKUP="/usr/share/tailscale"
-          DATA="/etc/config/tailscale_data"
-          mkdir -p "$$DATA"
-
-          # 修复配置文件
-          if [ -f /etc/config/tailscale ]; then
-            grep -q "^config settings" /etc/config/tailscale && \
-              sed -i "s|^config settings|config tailscale|g; /option state_file/d" /etc/config/tailscale
-            sed -i "s|'/etc/tailscale'|'$$DATA'|g; s|/etc/tailscale|$$DATA|g" /etc/config/tailscale
-            grep -q "option config_path" /etc/config/tailscale || \
-              sed -i "/option port/a\\	option config_path '$$DATA'" /etc/config/tailscale
-            grep -q "option enabled" /etc/config/tailscale || \
-              sed -i "/config tailscale/a\\	option enabled '0'" /etc/config/tailscale
-          elif [ -f "$$BACKUP/tailscale.conf" ]; then
-            cp "$$BACKUP/tailscale.conf" /etc/config/tailscale
-          fi
-
-          # 修复 init.d
-          [ -f /etc/init.d/tailscale ] && ! grep -q "section_enabled" /etc/init.d/tailscale && \
-            [ -f "$$BACKUP/tailscale.init" ] && cp "$$BACKUP/tailscale.init" /etc/init.d/tailscale && chmod +x /etc/init.d/tailscale
-
-          # 创建 tailscale_helper
-          [ ! -f /usr/sbin/tailscale_helper ] && [ -f "$$BACKUP/tailscale_helper" ] && \
-            cp "$$BACKUP/tailscale_helper" /usr/sbin/tailscale_helper && chmod +x /usr/sbin/tailscale_helper
-
-          # 清理备份
-          rm -rf "$$BACKUP"
-          uci -q delete ucitrack.@tailscale[-1] 2>/dev/null; uci commit ucitrack 2>/dev/null
-          rm -f /tmp/luci-indexcache /tmp/luci-modulecache
-          # 始终 restart
-          /etc/init.d/tailscale restart 2>/dev/null || true
-          exit 0
-          endef
-          POSTINST
 
       - name: "编译"
         uses: sbwml/openwrt-gh-action-sdk@go1.25
@@ -367,7 +302,7 @@ jobs:
           | 组件 | 版本 | 状态 |
           |------|------|------|
           | Tailscale | ${{ needs.check-version.outputs.version }} | ${{ needs.build-tailscale.result == 'success' && '✅' || '❌' }} |
-          | LuCI | ${{ needs.check-version.outputs.luci_version }} | ${{ needs.build-luci.result == 'success' && '✅' || '❌' }} |
+          | LuCI | ${{ needs.check-version.outputs.luci_version }} | ${{ needs.build-luci.result == 'success' && '✅' || '❌' }}  |
           
           **时间:** ${{ needs.check-version.outputs.build_time }} CST | **压缩:** ${{ env.ENABLE_COMPRESSION == 'true' && '✅' || '❌' }}
           EOF
