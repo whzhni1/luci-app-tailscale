@@ -67,8 +67,6 @@
   - **二进制文件：** `/usr/sbin/tailscaled` (主程序) + `/usr/bin/tailscaled` (软链接)
   - **配置文件：** `/etc/config/tailscale` (IMM 格式)
   - **服务脚本：** `/etc/init.d/tailscale` (LuCI 官方版本，自动同步)
-  - **数据目录：** `/etc/config/tailscale_data/`
-  - **授权文件：** `/etc/config/tailscale_data/tailscaled.state`
   
   **特性：**
   - ✅ **LuCI 完美支持**（显示 + 控制）
