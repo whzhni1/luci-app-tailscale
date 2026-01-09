@@ -4,11 +4,14 @@
 
 include $(TOPDIR)/rules.mk
 
+PKG_NAME:=luci-app-tailscale
+PKG_VERSION:=1.2.6
+
 LUCI_TITLE:=LuCI for Tailscale
 LUCI_DEPENDS:=+tailscale
 LUCI_PKGARCH:=all
-
-PKG_VERSION:=1.2.6
+LUCI_CATEGORY:=3. Applications
+LUCI_SUBMENU:=VPN
 
 include $(TOPDIR)/feeds/luci/luci.mk
 
