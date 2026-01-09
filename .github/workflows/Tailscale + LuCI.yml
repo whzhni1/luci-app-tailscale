@@ -230,6 +230,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: "准备构建环境"
+        run: |
+          rm -rf tailscale/
+          sed -i 's/+tailscale//g' luci-app-tailscale/Makefile
+          
       - name: "编译"
         uses: sbwml/openwrt-gh-action-sdk@go1.25
         env:
