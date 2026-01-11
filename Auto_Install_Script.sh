@@ -36,7 +36,7 @@ install_pkg() {
 menu_install() {
     [ -z "$2" ] && return 0
     echo ""; echo "=== $1 ==="
-    local i=1 f; for f in $2; do [ "$f" = "$3" ] && echo "$i. $f ★" || echo "$i. $f"; i=$((i+1)); done
+    local i=1 f; for f in $2; do [ "$f" = "$3" ] && echo "$i. $f ★ 最佳匹配" || echo "$i. $f"; i=$((i+1)); done
     [ "$4" = "1" ] && echo "0. 跳过"
     while true; do
         printf "选择: "; read n < /dev/tty
