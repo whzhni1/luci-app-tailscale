@@ -11,6 +11,11 @@ else
     echo "✗ 未识别包管理器"; exit 1
 fi
 
+ensure_cmd() {
+    local pkg="${1:-$1}"
+    case "$MGR" in opkg) opkg install "$pkg";; apk) apk add "$pkg";; esac
+}
+
 ARCH_KEY=$(echo "$ARCH" | cut -d'_' -f1)
 case "$ARCH_KEY" in
     aarch64) ARCH_ALT=arm64;;
@@ -51,7 +56,7 @@ menu_install() {
 
 for API_NAME in "$@"; do
     echo ""; echo "═══════ $API_NAME ═══════"
-    DATA=$(curl -sL "https://gitlab.com/api/v4/projects/whzhni%2F${API_NAME}/releases") || { echo "✗ API失败"; continue; }
+    DATA=$(ensure_cmd curl -sL "https://gitlab.com/api/v4/projects/whzhni%2F${API_NAME}/releases") || { echo "✗ API失败"; continue; }
     FILES=$(echo "$DATA" | grep -o '"[^"]*\.'"${EXT}"'"' | tr -d '"' | grep -v "/" | sort -u)
     [ -z "$FILES" ] && { echo "✗ 无文件"; continue; }
     
