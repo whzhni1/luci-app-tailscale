@@ -12,8 +12,14 @@ else
 fi
 
 ensure_cmd() {
-    local pkg="${1:-$1}"
-    case "$MGR" in opkg) opkg install "$pkg";; apk) apk add "$pkg";; esac
+    cmd="$1"
+    shift
+    command -v "$cmd" >/dev/null 2>&1 || {
+        $MGR update >/dev/null 2>&1
+        echo "⚙️  安装 $cmd ..."
+        case "$MGR" in opkg) opkg install "$cmd";; apk) apk add "$cmd";; esac
+    }
+    [ $# -gt 0 ] && "$cmd" "$@"
 }
 
 ARCH_KEY=$(echo "$ARCH" | cut -d'_' -f1)
