@@ -54,11 +54,11 @@ jobs:
         id: time
         run: echo "time=$(TZ=Asia/Shanghai date +'%Y-%m-%d %H:%M:%S')" >> $GITHUB_OUTPUT
 
-  build:
+  build-tailscale:
     needs: check-version
     if: needs.check-version.outputs.skip == 'false'
     runs-on: ubuntu-latest
-    name: "${{ matrix.arch }}-${{ matrix.sdk }}"
+    name: "tailscale-${{ matrix.arch }}"
     strategy:
       fail-fast: false
       matrix:
@@ -95,48 +95,27 @@ jobs:
           - mips64_octeonplus
           - mips64el_mips64r2
           - x86_64
-        sdk:
-          - SNAPSHOT
-        package:
-          - tailscale
-          - luci
-
     steps:
       - uses: actions/checkout@v4
 
-      - name: "UPX 压缩"
+      - name: "注入 UPX"
         if: >
-          matrix.package == 'tailscale' &&
           (github.event_name == 'schedule' || inputs.enable_compression == true) &&
           !contains('mips64_mips64r2 mips64_octeonplus mips64el_mips64r2', matrix.arch)
         run: |
           sed -i '/tailscale.init/a \\t/usr/bin/upx --lzma --best $(1)\/usr\/sbin\/tailscaled || true' tailscale/Makefile
 
-      - name: "准备 LuCI"
-        if: matrix.package == 'luci'
-        run: |
-          rm -rf tailscale/
-          sed -i 's/+tailscale//g' luci-app-tailscale/Makefile
-
-      - name: "编译"
-        uses: sbwml/openwrt-gh-action-sdk@go1.25
+      - uses: sbwml/openwrt-gh-action-sdk@go1.25
         env:
-          ARCH: ${{ matrix.arch }}-${{ matrix.sdk }}
+          ARCH: ${{ matrix.arch }}-SNAPSHOT
           FEEDNAME: packages_ci
-          PACKAGES: ${{ matrix.package == 'tailscale' && 'tailscale' || 'luci-app-tailscale' }}
+          PACKAGES: tailscale
           NO_REFRESH_CHECK: true
 
-      - name: "打包"
+      - name: "打包上传"
         run: |
-          tar -zcf ${{ matrix.sdk }}-${{ matrix.arch }}-${{ matrix.package }}.tar.gz \
+          tar -zcf SNAPSHOT-${{ matrix.arch }}-tailscale.tar.gz \
             -C bin/packages/${{ matrix.arch }}/ packages_ci
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: "${{ matrix.arch }}-${{ matrix.sdk }}-${{ matrix.package }}"
-          path: "bin/packages/${{ matrix.arch }}/packages_ci/*.apk"
-          if-no-files-found: error
-          retention-days: 7
 
       - uses: ncipollo/release-action@v1
         with:
@@ -148,15 +127,63 @@ jobs:
             | Tailscale | ${{ needs.check-version.outputs.version }} |
             | LuCI | ${{ needs.check-version.outputs.luci_version }} |
             | 构建时间 | ${{ needs.check-version.outputs.build_time }} CST |
-            
+
             📖 **安装说明请查看 [README](https://github.com/${{ github.repository }}#readme)**
           token: ${{ secrets.GITHUB_TOKEN }}
           allowUpdates: true
           replacesArtifacts: true
-          artifacts: "${{ matrix.sdk }}-${{ matrix.arch }}-${{ matrix.package }}.tar.gz"
+          artifacts: "SNAPSHOT-${{ matrix.arch }}-tailscale.tar.gz"
+
+  build-luci:
+    needs: check-version
+    if: needs.check-version.outputs.skip == 'false'
+    runs-on: ubuntu-latest
+    name: "luci-${{ matrix.sdk }}"
+    strategy:
+      fail-fast: false
+      matrix:
+        sdk:
+          - SNAPSHOT
+          - openwrt-24.10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: "准备"
+        run: |
+          rm -rf tailscale/
+          sed -i 's/+tailscale//g' luci-app-tailscale/Makefile
+
+      - uses: sbwml/openwrt-gh-action-sdk@go1.25
+        env:
+          ARCH: x86_64-${{ matrix.sdk }}
+          FEEDNAME: packages_ci
+          PACKAGES: luci-app-tailscale
+          NO_REFRESH_CHECK: true
+
+      - name: "打包上传"
+        run: |
+          tar -zcf ${{ matrix.sdk }}-luci.tar.gz \
+            -C bin/packages/x86_64/ packages_ci
+
+      - uses: ncipollo/release-action@v1
+        with:
+          tag: ${{ needs.check-version.outputs.version }}
+          name: "Tailscale ${{ needs.check-version.outputs.version }} + LuCI ${{ needs.check-version.outputs.luci_version }}"
+          body: |
+            | 组件 | 版本 |
+            |------|------|
+            | Tailscale | ${{ needs.check-version.outputs.version }} |
+            | LuCI | ${{ needs.check-version.outputs.luci_version }} |
+            | 构建时间 | ${{ needs.check-version.outputs.build_time }} CST |
+
+            📖 **安装说明请查看 [README](https://github.com/${{ github.repository }}#readme)**
+          token: ${{ secrets.GITHUB_TOKEN }}
+          allowUpdates: true
+          replacesArtifacts: true
+          artifacts: "${{ matrix.sdk }}-luci.tar.gz"
 
   report:
-    needs: [check-version, build]
+    needs: [check-version, build-tailscale, build-luci]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -169,8 +196,8 @@ jobs:
           # 🎯 构建报告
           | 组件 | 版本 | 状态 |
           |------|------|------|
-          | Tailscale | ${{ needs.check-version.outputs.version }} | ${{ needs.build.result == 'success' && '✅' || '❌' }} |
-          | LuCI | ${{ needs.check-version.outputs.luci_version }} | ${{ needs.build.result == 'success' && '✅' || '❌' }} |
+          | Tailscale | ${{ needs.check-version.outputs.version }} | ${{ needs.build-tailscale.result == 'success' && '✅' || '❌' }} |
+          | LuCI | ${{ needs.check-version.outputs.luci_version }} | ${{ needs.build-luci.result == 'success' && '✅' || '❌' }} |
 
           **时间:** ${{ needs.check-version.outputs.build_time }} CST
           EOF
