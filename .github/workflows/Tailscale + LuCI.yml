@@ -22,10 +22,10 @@ jobs:
   check-version:
     runs-on: ubuntu-latest
     outputs:
-      version: ${{ steps.tailscale.outputs.version }}
-      skip: ${{ steps.tailscale.outputs.skip }}
+      version:      ${{ steps.tailscale.outputs.version }}
+      skip:         ${{ steps.tailscale.outputs.skip }}
       luci_version: ${{ steps.luci.outputs.version }}
-      build_time: ${{ steps.time.outputs.time }}
+      build_time:   ${{ steps.time.outputs.time }}
     steps:
       - uses: actions/checkout@v4
 
@@ -58,23 +58,82 @@ jobs:
         id: time
         run: echo "time=$(TZ=Asia/Shanghai date +'%Y-%m-%d %H:%M:%S')" >> $GITHUB_OUTPUT
 
-  build-tailscale:
+  setup-upx:
     needs: check-version
-    if: needs.check-version.outputs.skip == 'false'
+    if: needs.check-version.outputs.skip == 'false' && (github.event_name == 'schedule' || inputs.enable_compression == true)
+    runs-on: ubuntu-latest
+    outputs:
+      upx_version: ${{ steps.upx.outputs.version }}
+    steps:
+      - name: "获取 UPX 最新版本号"
+        id: upx
+        run: |
+          VER=$(curl -s https://api.github.com/repos/upx/upx/releases/latest | jq -r .tag_name)
+          echo "version=$VER" >> $GITHUB_OUTPUT
+
+      - name: "缓存 UPX"
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/upx/upx
+          key: upx-${{ steps.upx.outputs.version }}-amd64-linux
+
+      - name: "下载并解压 UPX（缓存未命中时）"
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          VER=${{ steps.upx.outputs.version }}
+          mkdir -p /tmp/upx
+          wget -q "https://github.com/upx/upx/releases/download/${VER}/upx-${VER#v}-amd64_linux.tar.xz"
+          tar -xf upx-*.tar.xz
+          mv upx-*/upx /tmp/upx/upx
+
+  build-tailscale:
+    needs: [check-version, setup-upx]
+    if: |
+      needs.check-version.outputs.skip == 'false' &&
+      (needs.setup-upx.result == 'success' || needs.setup-upx.result == 'skipped')
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { id: arm,      goarch: arm,     targets: '["arm_arm1176jzf-s_vfp","arm_arm926ej-s","arm_cortex-a15_neon-vfpv4","arm_cortex-a5_vfpv4","arm_cortex-a7","arm_cortex-a7_neon-vfpv4","arm_cortex-a7_vfpv4","arm_cortex-a8_vfpv3","arm_cortex-a9","arm_cortex-a9_neon","arm_cortex-a9_vfpv3-d16","arm_fa526","arm_xscale","arm_mpcore"]' }
-          - { id: arm64,    goarch: arm64,   targets: '["aarch64_cortex-a53","aarch64_cortex-a72","aarch64_cortex-a76","aarch64_generic"]' }
-          - { id: mips,     goarch: mips,    gomips: softfloat, targets: '["mips_24kc","mips_4kec","mips_mips32"]' }
-          - { id: mipsle,   goarch: mipsle,  gomips: softfloat, targets: '["mipsel_24kc","mipsel_24kc_24kf","mipsel_74kc","mipsel_mips32"]' }
-          - { id: mips64,   goarch: mips64,  gomips: softfloat, targets: '["mips64_mips64r2","mips64_octeonplus"]' }
-          - { id: mips64le, goarch: mips64le, gomips: softfloat, targets: '["mips64el_mips64r2"]' }
-          - { id: "386",    goarch: "386",   targets: '["i386_pentium-mmx","i386_pentium4"]' }
-          - { id: amd64,    goarch: amd64,   cgo: "1", cc: musl-gcc, setup: "sudo apt-get update && sudo apt-get install -y musl-tools", targets: '["x86_64"]' }
-          - { id: geode,    goarch: "386",   go386: softfloat, targets: '["i386_geode"]' }
+          - id: arm
+            goarch: arm
+            targets: arm_arm1176jzf-s_vfp,arm_arm926ej-s,arm_cortex-a15_neon-vfpv4,arm_cortex-a5_vfpv4,arm_cortex-a7,arm_cortex-a7_neon-vfpv4,arm_cortex-a7_vfpv4,arm_cortex-a8_vfpv3,arm_cortex-a9,arm_cortex-a9_neon,arm_cortex-a9_vfpv3-d16,arm_fa526,arm_xscale,arm_mpcore
+          - id: arm64
+            goarch: arm64
+            targets: aarch64_cortex-a53,aarch64_cortex-a72,aarch64_cortex-a76,aarch64_generic
+          - id: mips
+            goarch: mips
+            gomips: softfloat
+            targets: mips_24kc,mips_4kec,mips_mips32
+          - id: mipsle
+            goarch: mipsle
+            gomips: softfloat
+            targets: mipsel_24kc,mipsel_24kc_24kf,mipsel_74kc,mipsel_mips32
+          - id: mips64
+            goarch: mips64
+            gomips: softfloat
+            upx_skip: true
+            targets: mips64_mips64r2,mips64_octeonplus
+          - id: mips64le
+            goarch: mips64le
+            gomips: softfloat
+            upx_skip: true
+            targets: mips64el_mips64r2
+          - id: "386"
+            goarch: "386"
+            targets: i386_pentium-mmx,i386_pentium4
+          - id: amd64
+            goarch: amd64
+            cgo: "1"
+            cc: musl-gcc
+            setup: "sudo apt-get update && sudo apt-get install -y musl-tools"
+            targets: x86_64
+          - id: geode
+            goarch: "386"
+            go386: softfloat
+            targets: i386_geode
     name: "bin-${{ matrix.id }}"
     steps:
       - name: "环境准备"
@@ -97,12 +156,13 @@ jobs:
           cache: true
           cache-dependency-path: src/go.sum
 
-      - name: "安装 UPX"
-        if: env.ENABLE_COMPRESSION == 'true'
-        run: |
-          VER=$(curl -s https://api.github.com/repos/upx/upx/releases/latest | jq -r '.tag_name')
-          wget -q "https://github.com/upx/upx/releases/download/${VER}/upx-${VER#v}-amd64_linux.tar.xz"
-          tar -xf upx-*.tar.xz && sudo mv upx-*/upx /usr/local/bin/
+      - name: "恢复 UPX 缓存"
+        if: env.ENABLE_COMPRESSION == 'true' && !matrix.upx_skip
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/upx/upx
+          key: upx-${{ needs.setup-upx.outputs.upx_version }}-amd64-linux
+          fail-on-cache-miss: true
 
       - name: "编译"
         working-directory: src
@@ -122,8 +182,8 @@ jobs:
             -trimpath -o "../build/tailscaled-linux-${{ matrix.id }}" ./cmd/tailscaled
 
       - name: "压缩"
-        if: env.ENABLE_COMPRESSION == 'true' && !contains('mips64 mips64le', matrix.id)
-        run: upx --lzma --best "build/tailscaled-linux-${{ matrix.id }}" || true
+        if: env.ENABLE_COMPRESSION == 'true' && !matrix.upx_skip
+        run: /tmp/upx/upx --lzma --best "build/tailscaled-linux-${{ matrix.id }}" || true
 
       - uses: actions/upload-artifact@v4
         with:
@@ -140,15 +200,33 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { id: arm,      sdk_arch: arm_cortex-a7_neon-vfpv4 }
-          - { id: arm64,    sdk_arch: aarch64_cortex-a53 }
-          - { id: mips,     sdk_arch: mips_24kc }
-          - { id: mipsle,   sdk_arch: mipsel_24kc }
-          - { id: mips64,   sdk_arch: mips64_mips64r2 }
-          - { id: mips64le, sdk_arch: mips64el_mips64r2 }
-          - { id: "386",    sdk_arch: i386_pentium4 }
-          - { id: amd64,    sdk_arch: x86_64 }
-          - { id: geode,    sdk_arch: i386_pentium4 }
+          - id: arm
+            sdk_arch: arm_cortex-a7_neon-vfpv4
+            targets: arm_arm1176jzf-s_vfp,arm_arm926ej-s,arm_cortex-a15_neon-vfpv4,arm_cortex-a5_vfpv4,arm_cortex-a7,arm_cortex-a7_neon-vfpv4,arm_cortex-a7_vfpv4,arm_cortex-a8_vfpv3,arm_cortex-a9,arm_cortex-a9_neon,arm_cortex-a9_vfpv3-d16,arm_fa526,arm_xscale,arm_mpcore
+          - id: arm64
+            sdk_arch: aarch64_cortex-a53
+            targets: aarch64_cortex-a53,aarch64_cortex-a72,aarch64_cortex-a76,aarch64_generic
+          - id: mips
+            sdk_arch: mips_24kc
+            targets: mips_24kc,mips_4kec,mips_mips32
+          - id: mipsle
+            sdk_arch: mipsel_24kc
+            targets: mipsel_24kc,mipsel_24kc_24kf,mipsel_74kc,mipsel_mips32
+          - id: mips64
+            sdk_arch: mips64_mips64r2
+            targets: mips64_mips64r2,mips64_octeonplus
+          - id: mips64le
+            sdk_arch: mips64el_mips64r2
+            targets: mips64el_mips64r2
+          - id: "386"
+            sdk_arch: i386_pentium4
+            targets: i386_pentium-mmx,i386_pentium4
+          - id: amd64
+            sdk_arch: x86_64
+            targets: x86_64
+          - id: geode
+            sdk_arch: i386_pentium4
+            targets: i386_geode
     name: "apk-${{ matrix.id }}"
     steps:
       - uses: actions/checkout@v4
@@ -209,26 +287,15 @@ jobs:
           NO_REFRESH_CHECK: true
           IGNORE_ERRORS: true
 
-      - name: "收集"
+      - name: "收集并重命名"
         run: |
           VERSION=$(echo "${{ needs.check-version.outputs.version }}" | sed 's/^v//')
           mkdir -p output
           BASE=$(find bin/packages -name "tailscale_*.apk" | head -1)
           [ -z "$BASE" ] && echo "没找到 apk" && exit 1
-          # 从 build-tailscale 对应的 targets 列表重命名
-          TARGETS=$(grep -A1 "id: ${{ matrix.id }}" <<'TARGETS_EOF'
-          arm: '["arm_arm1176jzf-s_vfp","arm_arm926ej-s","arm_cortex-a15_neon-vfpv4","arm_cortex-a5_vfpv4","arm_cortex-a7","arm_cortex-a7_neon-vfpv4","arm_cortex-a7_vfpv4","arm_cortex-a8_vfpv3","arm_cortex-a9","arm_cortex-a9_neon","arm_cortex-a9_vfpv3-d16","arm_fa526","arm_xscale","arm_mpcore"]'
-          arm64: '["aarch64_cortex-a53","aarch64_cortex-a72","aarch64_cortex-a76","aarch64_generic"]'
-          mips: '["mips_24kc","mips_4kec","mips_mips32"]'
-          mipsle: '["mipsel_24kc","mipsel_24kc_24kf","mipsel_74kc","mipsel_mips32"]'
-          mips64: '["mips64_mips64r2","mips64_octeonplus"]'
-          mips64le: '["mips64el_mips64r2"]'
-          386: '["i386_pentium-mmx","i386_pentium4"]'
-          amd64: '["x86_64"]'
-          geode: '["i386_geode"]'
-          TARGETS_EOF
-          )
-          echo "$TARGETS" | jq -r '.[]' | while read ARCH; do
+          # targets 字段以逗号分隔，直接 split 即可，无需 jq
+          IFS=',' read -ra TARGETS <<< "${{ matrix.targets }}"
+          for ARCH in "${TARGETS[@]}"; do
             cp "$BASE" "output/tailscale-${VERSION}-r1.${ARCH}.apk"
           done
           ls -la output/
@@ -248,7 +315,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { sdk: SNAPSHOT,     pkg_type: apk }
+          - { sdk: SNAPSHOT,      pkg_type: apk }
           - { sdk: openwrt-24.10, pkg_type: ipk }
     name: "luci-${{ matrix.pkg_type }}"
     steps:
