@@ -22,6 +22,7 @@ jobs:
       skip: ${{ steps.tailscale.outputs.skip }}
       luci_version: ${{ steps.luci.outputs.version }}
       build_time: ${{ steps.time.outputs.time }}
+      sha: ${{ steps.push.outputs.sha }}
     steps:
       - uses: actions/checkout@v4
 
@@ -39,11 +40,16 @@ jobs:
             HASH=$(curl -sL "https://codeload.github.com/tailscale/tailscale/tar.gz/v${LATEST}" \
               | sha256sum | cut -d' ' -f1)
             sed -i "s/^PKG_VERSION:=.*/PKG_VERSION:=$LATEST/; s/^PKG_HASH:=.*/PKG_HASH:=$HASH/" tailscale/Makefile
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git commit -am "tailscale: update to $LATEST" || true
-            git push || true
           fi
+
+      - name: "推送"
+        id: push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "tailscale: update to $(sed -n 's/^PKG_VERSION:=//p' tailscale/Makefile)" || true
+          git push || true
+          echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
 
       - name: "获取 LuCI 版本"
         id: luci
@@ -97,6 +103,8 @@ jobs:
           - x86_64
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.check-version.outputs.sha }}
 
       - name: "注入 UPX"
         if: >
@@ -147,6 +155,8 @@ jobs:
           - openwrt-24.10
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.check-version.outputs.sha }}
 
       - name: "准备"
         run: |
