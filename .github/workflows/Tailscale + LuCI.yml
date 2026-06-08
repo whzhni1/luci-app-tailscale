@@ -241,12 +241,17 @@ jobs:
           VERSION=$(echo "${{ needs.check-version.outputs.version }}" | sed 's/^v//')
           chmod +x bin/tailscaled-linux-${{ matrix.id }}
           cp bin/tailscaled-linux-${{ matrix.id }} tailscale/files/tailscaled
+
           cat > tailscale/Makefile <<EOF
           include \$(TOPDIR)/rules.mk
+
           PKG_NAME:=tailscale
           PKG_VERSION:=${VERSION}
           PKG_RELEASE:=1
           PKG_FLAGS:=nonshared
+
+          PKG_BUILD_DIR:=\$(BUILD_DIR)/tailscale-${VERSION}
+
           include \$(INCLUDE_DIR)/package.mk
 
           define Package/tailscale
@@ -261,6 +266,10 @@ jobs:
           define Package/tailscale/conffiles
           /etc/config/tailscale
           /etc/tailscale/
+          endef
+
+          define Build/Prepare
+            mkdir -p \$(PKG_BUILD_DIR)
           endef
 
           define Build/Compile
