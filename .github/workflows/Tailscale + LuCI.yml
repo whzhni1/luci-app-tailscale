@@ -99,6 +99,9 @@ jobs:
           - mips64_octeonplus
           - mips64el_mips64r2
           - x86_64
+        sdk:
+          - SNAPSHOT
+          - openwrt-24.10
     steps:
       - uses: actions/checkout@v4
         with:
@@ -113,7 +116,7 @@ jobs:
 
       - uses: sbwml/openwrt-gh-action-sdk@go1.25
         env:
-          ARCH: ${{ matrix.arch }}-SNAPSHOT
+          ARCH: ${{ matrix.arch }}-${{ matrix.sdk }}
           FEEDNAME: packages_ci
           PACKAGES: tailscale
           NO_REFRESH_CHECK: true
@@ -122,7 +125,11 @@ jobs:
         run: |
           mkdir -p output
           find bin/packages/${{ matrix.arch }}/packages_ci/ \
-            -name "tailscale*.apk" -exec cp {} output/ \;
+            -name "tailscale_*" | while read f; do
+            EXT="${f##*.}"
+            BASENAME=$(basename "$f" ".$EXT")
+            cp "$f" "output/${BASENAME}_${{ matrix.arch }}.${EXT}"
+          done
 
       - uses: ncipollo/release-action@v1
         with:
