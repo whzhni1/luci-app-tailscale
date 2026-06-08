@@ -241,51 +241,19 @@ jobs:
           VERSION=$(echo "${{ needs.check-version.outputs.version }}" | sed 's/^v//')
           chmod +x bin/tailscaled-linux-${{ matrix.id }}
           cp bin/tailscaled-linux-${{ matrix.id }} tailscale/files/tailscaled
+          sed -i \
+            -e "s/^PKG_VERSION:=.*/PKG_VERSION:=${VERSION}/" \
+            -e "s/^PKG_RELEASE:=.*/PKG_RELEASE:=1/" \
+            -e "s/^PKG_SOURCE:=.*/PKG_SOURCE:=/" \
+            -e "s/^PKG_SOURCE_URL:=.*/PKG_SOURCE_URL:=/" \
+            -e "s/^PKG_HASH:=.*/PKG_HASH:=skip/" \
+            tailscale/Makefile
 
-          cat > tailscale/Makefile <<EOF
-          include \$(TOPDIR)/rules.mk
+          grep -q "define Build/Prepare" tailscale/Makefile || \
+            sed -i '/define Build\/Compile/i define Build/Prepare\n\tmkdir -p $(PKG_BUILD_DIR)\nendef\n' tailscale/Makefile
 
-          PKG_NAME:=tailscale
-          PKG_VERSION:=${VERSION}
-          PKG_RELEASE:=1
-          PKG_FLAGS:=nonshared
-
-          PKG_BUILD_DIR:=\$(BUILD_DIR)/tailscale-${VERSION}
-
-          include \$(INCLUDE_DIR)/package.mk
-
-          define Package/tailscale
-            SECTION:=net
-            CATEGORY:=Network
-            TITLE:=Zero config VPN
-            URL:=https://tailscale.com
-            DEPENDS:=+ca-bundle +kmod-tun
-            PROVIDES:=tailscaled
-          endef
-
-          define Package/tailscale/conffiles
-          /etc/config/tailscale
-          /etc/tailscale/
-          endef
-
-          define Build/Prepare
-            mkdir -p \$(PKG_BUILD_DIR)
-          endef
-
-          define Build/Compile
-          endef
-
-          define Package/tailscale/install
-            \$(INSTALL_DIR) \$(1)/usr/sbin \$(1)/etc/init.d \$(1)/etc/config
-            \$(INSTALL_BIN) \$(CURDIR)/files/tailscaled \$(1)/usr/sbin/tailscaled
-            \$(LN) tailscaled \$(1)/usr/sbin/tailscale
-            \$(INSTALL_BIN) \$(CURDIR)/files/tailscale.init \$(1)/etc/init.d/tailscale
-            \$(INSTALL_DATA) \$(CURDIR)/files/tailscale.conf \$(1)/etc/config/tailscale
-            \$(INSTALL_BIN) \$(CURDIR)/files/tailscale_helper \$(1)/usr/sbin/
-          endef
-
-          \$(eval \$(call BuildPackage,tailscale))
-          EOF
+          echo "=== 修改后的 Makefile ==="
+          cat tailscale/Makefile
 
       - name: "SDK 打包"
         uses: sbwml/openwrt-gh-action-sdk@go1.25
