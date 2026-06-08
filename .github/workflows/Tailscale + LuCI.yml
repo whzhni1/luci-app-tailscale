@@ -118,10 +118,11 @@ jobs:
           PACKAGES: tailscale
           NO_REFRESH_CHECK: true
 
-      - name: "打包上传"
+      - name: "收集"
         run: |
-          tar -zcf SNAPSHOT-${{ matrix.arch }}-tailscale.tar.gz \
-            -C bin/packages/${{ matrix.arch }}/ packages_ci
+          mkdir -p output
+          find bin/packages/${{ matrix.arch }}/packages_ci/ \
+            -name "tailscale*.apk" -exec cp {} output/ \;
 
       - uses: ncipollo/release-action@v1
         with:
@@ -138,8 +139,8 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           allowUpdates: true
           replacesArtifacts: true
-          artifacts: "SNAPSHOT-${{ matrix.arch }}-tailscale.tar.gz"
-
+          artifacts: "output/*.apk"
+          
   build-luci:
     needs: check-version
     if: needs.check-version.outputs.skip == 'false'
@@ -168,10 +169,11 @@ jobs:
           PACKAGES: luci-app-tailscale
           NO_REFRESH_CHECK: true
 
-      - name: "打包上传"
+      - name: "收集"
         run: |
-          tar -zcf ${{ matrix.sdk }}-luci.tar.gz \
-            -C bin/packages/x86_64/ packages_ci
+          mkdir -p output
+          find bin/packages/x86_64/packages_ci/ \
+            -name "*luci*tailscale*" -exec cp {} output/ \;
 
       - uses: ncipollo/release-action@v1
         with:
@@ -188,7 +190,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           allowUpdates: true
           replacesArtifacts: true
-          artifacts: "${{ matrix.sdk }}-luci.tar.gz"
+          artifacts: "output/*"
 
   report:
     needs: [check-version, build-tailscale, build-luci]
