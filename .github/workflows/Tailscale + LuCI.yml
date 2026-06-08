@@ -143,14 +143,14 @@ jobs:
           set -e
           VERSION=$(echo "${{ needs.check-version.outputs.version }}" | sed 's/^v//')
           mkdir -p ipk/{usr/{sbin,bin},etc/{config,init.d},CONTROL} output
+          
           install -m 0755 "build/tailscaled-linux-${{ matrix.id }}" ipk/usr/sbin/tailscaled
           install -m 0755 main/tailscale/files/tailscale_helper ipk/usr/sbin/tailscale_helper
           ln -sf tailscaled ipk/usr/sbin/tailscale
           ln -sf ../sbin/tailscaled ipk/usr/bin/tailscaled
-          # ln -sf ../sbin/tailscale ipk/usr/bin/tailscale
           install -m 0644 main/tailscale/files/tailscale.conf ipk/etc/config/tailscale
           install -m 0755 main/tailscale/files/tailscale.init ipk/etc/init.d/tailscale
-          
+
           cat > ipk/CONTROL/prerm <<'EOF'
           #!/bin/sh
           [ "$PKG_UPGRADE" = "1" ] || exit 0
@@ -158,7 +158,7 @@ jobs:
           /etc/init.d/tailscale enabled && touch /tmp/.tailscale_was_enabled
           exit 0
           EOF
-          
+
           cat > ipk/CONTROL/postinst <<'EOF'
           #!/bin/sh
           [ -x /etc/init.d/tailscale ] || exit 0
@@ -167,10 +167,10 @@ jobs:
           exit 0
           EOF
           chmod +x ipk/CONTROL/prerm ipk/CONTROL/postinst
-          
-          SIZE=$(stat -c%s ipk/usr/sbin/tailscaled)
+
+          SIZE=$(du -sk ipk/usr/sbin/tailscaled | cut -f1)
+          SIZE=$((SIZE * 1024))
           echo '2.0' > debian-binary
-          
           echo '${{ matrix.targets }}' | jq -r '.[]' | while read ARCH; do
             cat > ipk/CONTROL/control <<EOF
           Package: tailscale
@@ -186,26 +186,61 @@ jobs:
           Description: Tailscale VPN client (LuCI compatible)
           EOF
             echo "/etc/config/tailscale" > ipk/CONTROL/conffiles
-            
-            tar --format=gnu --numeric-owner --group=0 --owner=0 -czf control.tar.gz -C ipk/CONTROL .
-            tar --format=gnu --numeric-owner --group=0 --owner=0 -czf data.tar.gz -C ipk ./usr ./etc
-            tar --format=gnu --numeric-owner --group=0 --owner=0 -czf "output/tailscale_${VERSION}_${ARCH}.ipk" ./control.tar.gz ./data.tar.gz ./debian-binary
-            
-            mkdir -p apk-build && cp -r ipk/* apk-build/
-            cat > apk-build/.PKGINFO <<EOF
+
+            tar --format=gnu --numeric-owner --group=0 --owner=0 \
+              -czf control.tar.gz -C ipk/CONTROL .
+            tar --format=gnu --numeric-owner --group=0 --owner=0 \
+              -czf data.tar.gz -C ipk ./usr ./etc
+            tar --format=gnu --numeric-owner --group=0 --owner=0 \
+              -czf "output/tailscale_${VERSION}_${ARCH}.ipk" \
+              ./control.tar.gz ./data.tar.gz ./debian-binary
+            rm -f control.tar.gz data.tar.gz
+            APK_WORK=$(mktemp -d)
+            APK_ROOT="${APK_WORK}/root"
+            mkdir -p "${APK_ROOT}"
+            cp -a ipk/usr  "${APK_ROOT}/"
+            cp -a ipk/etc  "${APK_ROOT}/"
+            cat > "${APK_WORK}/.PKGINFO" <<EOF
           pkgname = tailscale
-          pkgver = ${VERSION}
+          pkgver = ${VERSION}-r1
           pkgdesc = Tailscale VPN client
           url = https://tailscale.com
+          builddate = $(date +%s)
+          packager = Automated Build
+          size = ${SIZE}
           arch = ${ARCH}
           license = BSD-3-Clause
-          size = ${SIZE}
           depend = ca-bundle
           depend = kmod-tun
-          provides = tailscaled
+          provides = tailscaled=1
           EOF
-            tar -czf "output/tailscale-${VERSION}-r1.${ARCH}.apk" -C apk-build .
-            rm -rf apk-build control.tar.gz data.tar.gz
+            cat > "${APK_WORK}/.post-install" <<'EOF'
+          #!/bin/sh
+          [ -x /etc/init.d/tailscale ] || exit 0
+          /etc/init.d/tailscale enable
+          /etc/init.d/tailscale restart 2>/dev/null || true
+          exit 0
+          EOF
+            cat > "${APK_WORK}/.pre-deinstall" <<'EOF'
+          #!/bin/sh
+          [ -x /etc/init.d/tailscale ] || exit 0
+          /etc/init.d/tailscale stop 2>/dev/null || true
+          /etc/init.d/tailscale disable 2>/dev/null || true
+          exit 0
+          EOF
+            chmod +x "${APK_WORK}/.post-install" "${APK_WORK}/.pre-deinstall"
+            tar -czf "${APK_WORK}/control.tar.gz" \
+              --numeric-owner --owner=0 --group=0 \
+              -C "${APK_WORK}" \
+              .PKGINFO .post-install .pre-deinstall
+            tar -czf "${APK_WORK}/data.tar.gz" \
+              --numeric-owner --owner=0 --group=0 \
+              -C "${APK_ROOT}" .
+            cat "${APK_WORK}/control.tar.gz" \
+                "${APK_WORK}/data.tar.gz" \
+              > "output/tailscale-${VERSION}-r1.${ARCH}.apk"
+
+            rm -rf "${APK_WORK}"
           done
 
       - name: "上传"
