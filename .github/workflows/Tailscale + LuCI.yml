@@ -25,6 +25,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: "验证 Makefile"
+        run: |
+          grep -E "PKG_VERSION|PKG_HASH|PKG_SOURCE_URL" tailscale/Makefile
+          VERSION=$(sed -n 's/^PKG_VERSION:=//p' tailscale/Makefile)
+          echo "测试下载..."
+          curl -sL "https://codeload.github.com/tailscale/tailscale/tar.gz/v${VERSION}" -o /tmp/test.tar.gz
+          HASH=$(sha256sum /tmp/test.tar.gz | cut -d' ' -f1)
+          echo "实际 hash: $HASH"
+          echo "Makefile hash: $(sed -n 's/^PKG_HASH:=//p' tailscale/Makefile)"
+
       - name: "检查 Tailscale 更新"
         id: tailscale
         run: |
