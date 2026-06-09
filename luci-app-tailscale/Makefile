@@ -9,7 +9,7 @@ LUCI_DEPENDS:=+tailscale
 LUCI_PKGARCH:=all
 
 PKG_VERSION:=1.2.6
-
+PKG_PO_VERSION:=$(PKG_VERSION)
 include $(TOPDIR)/feeds/luci/luci.mk
 
 # call BuildPackage - OpenWrt buildroot signature
