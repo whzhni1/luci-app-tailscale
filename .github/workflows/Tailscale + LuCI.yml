@@ -101,21 +101,29 @@ jobs:
         if: steps.build.outcome == 'success'
         run: |
           mkdir -p out
+
           echo "=== 产出文件 ==="
           find bin/packages/${{ matrix.arch }}/packages_ci/ -type f | sort
+
           find bin/packages/${{ matrix.arch }}/packages_ci/ \
             \( -name "*.apk" -o -name "*.ipk" \) \
             ! -name "*-dbgsym*" | \
           while read PKG; do
             BASENAME=$(basename "$PKG")
             EXT="${BASENAME##*.}"
-            NAME="${BASENAME%.*}_${{ matrix.arch }}_${{ matrix.sdk }}.${EXT}"
-            cp "$PKG" "out/${NAME}"
-            echo "准备发布: out/${NAME}"
+
+            if echo "$BASENAME" | grep -q "^tailscale"; then
+              NAME="${BASENAME%.*}_${{ matrix.arch }}.${EXT}"
+              cp "$PKG" "out/${NAME}"
+              echo "准备发布: out/${NAME}"
+            elif [ "${{ matrix.arch }}" = "x86_64" ]; then
+              cp "$PKG" "out/${BASENAME}"
+              echo "准备发布: out/${BASENAME}"
+            fi
           done
 
           [ -n "$(ls -A out/)" ] || { echo "没有找到任何包文件" && exit 1; }
-
+          
       - name: "发布"
         if: steps.build.outcome == 'success'
         uses: ncipollo/release-action@v1
