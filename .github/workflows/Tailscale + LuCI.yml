@@ -85,7 +85,7 @@ jobs:
           (github.event_name == 'schedule' || inputs.enable_compression == true) &&
           !contains('mips64_mips64r2 mips64_octeonplus mips64el_mips64r2', matrix.arch)
         run: |
-          sed -i '/GO_PKG_BUILD_BIN_DIR.*tailscaled/a \\t/usr/bin/upx --lzma --best $(1)\/usr\/sbin\/tailscaled || true' tailscale/Makefile
+          sed -i '/$(LN) tailscaled/i \\t/usr/bin/upx --lzma --best $(1)\/usr\/sbin\/tailscaled || true' tailscale/Makefile
           echo "=== 注入后的 install 段 ==="
           sed -n '/define Package\/tailscale\/install/,/^endef/p' tailscale/Makefile
           
