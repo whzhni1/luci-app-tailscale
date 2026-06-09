@@ -64,6 +64,7 @@ jobs:
     needs: check-version
     if: needs.check-version.outputs.skip == 'false'
     runs-on: ubuntu-latest
+    continue-on-error: true
     name: "tailscale-${{ matrix.arch }}-${{ matrix.sdk }}"
     strategy:
       fail-fast: false
@@ -126,19 +127,21 @@ jobs:
           NO_REFRESH_CHECK: true
 
       - name: "上传 artifacts"
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: tailscale-${{ matrix.arch }}-${{ matrix.sdk }}
           path: |
             bin/packages/${{ matrix.arch }}/packages_ci/*.apk
             bin/packages/${{ matrix.arch }}/packages_ci/*.ipk
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 1
 
   build-luci:
     needs: check-version
     if: needs.check-version.outputs.skip == 'false'
     runs-on: ubuntu-latest
+    continue-on-error: true
     name: "luci-${{ matrix.sdk }}"
     strategy:
       fail-fast: false
@@ -166,37 +169,48 @@ jobs:
           NO_REFRESH_CHECK: true
 
       - name: "上传 artifacts"
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: luci-${{ matrix.sdk }}
           path: |
             bin/packages/x86_64/packages_ci/*luci*tailscale*.apk
             bin/packages/x86_64/packages_ci/*luci*tailscale*.ipk
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 1
 
   release:
     needs: [check-version, build-tailscale, build-luci]
-    if: needs.check-version.outputs.skip == 'false'
+    if: needs.check-version.outputs.skip == 'false' && always()
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
           path: artifacts
           merge-multiple: false
           pattern: "{tailscale-*,luci-*}"
 
       - name: "整理文件"
+        id: collect
         run: |
           mkdir -p release
-          # 收集所有 apk 和 ipk 文件
-          find artifacts -type f \( -name "*.apk" -o -name "*.ipk" \) -exec cp {} release/ \;
+          find artifacts -type f \( -name "*.apk" -o -name "*.ipk" \) -exec cp {} release/ \; 2>/dev/null || true
+          COUNT=$(ls -1 release/ 2>/dev/null | wc -l)
+          echo "count=$COUNT" >> $GITHUB_OUTPUT
           
-          # 验证文件
-          ls -lh release/
-          [ -n "$(ls -A release/)" ] || (echo "没有找到文件" && exit 1)
+          if [ "$COUNT" -gt 0 ]; then
+            echo "✅ 找到 $COUNT 个包文件"
+            ls -lh release/
+            echo "success=true" >> $GITHUB_OUTPUT
+          else
+            echo "❌ 没有找到任何包文件"
+            echo "success=false" >> $GITHUB_OUTPUT
+          fi
 
-      - uses: ncipollo/release-action@v1
+      - name: "发布 Release"
+        if: steps.collect.outputs.success == 'true'
+        uses: ncipollo/release-action@v1
         with:
           tag: ${{ needs.check-version.outputs.version }}
           name: "Tailscale ${{ needs.check-version.outputs.version }} + LuCI ${{ needs.check-version.outputs.luci_version }}"
@@ -207,6 +221,9 @@ jobs:
             | LuCI | ${{ needs.check-version.outputs.luci_version }} |
             | 构建时间 | ${{ needs.check-version.outputs.build_time }} CST |
             | UPX 压缩 | ${{ (github.event_name == 'schedule' || inputs.enable_compression == true) && '✅' || '❌' }} |
+            | 包数量 | ${{ steps.collect.outputs.count }} |
+
+            > ⚠️ 部分架构可能构建失败，详见 [Actions](https://github.com/${{ github.repository }}/actions)
 
             📖 **安装说明请查看 [README](https://github.com/${{ github.repository }}#readme)**
           artifacts: "release/*"
@@ -214,8 +231,14 @@ jobs:
           allowUpdates: true
           replacesArtifacts: true
 
+      - name: "发布失败警告"
+        if: steps.collect.outputs.success == 'false'
+        run: |
+          echo "::error::所有构建都失败了，无法创建 Release"
+          exit 1
+
   report:
-    needs: [check-version, build-tailscale, build-luci]
+    needs: [check-version, build-tailscale, build-luci, release]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -224,13 +247,41 @@ jobs:
           if [ "${{ needs.check-version.outputs.skip }}" = "true" ]; then
             echo "# ⏭️ 跳过（版本相同: ${{ needs.check-version.outputs.version }}）" >> $GITHUB_STEP_SUMMARY
           else
+            # 统计构建结果
+            TAILSCALE_STATUS="${{ needs.build-tailscale.result }}"
+            LUCI_STATUS="${{ needs.build-luci.result }}"
+            RELEASE_STATUS="${{ needs.release.result }}"
+            
+            case "$TAILSCALE_STATUS" in
+              success) TS_ICON="✅" ;;
+              failure) TS_ICON="❌" ;;
+              *) TS_ICON="⚠️" ;;
+            esac
+            
+            case "$LUCI_STATUS" in
+              success) LUCI_ICON="✅" ;;
+              failure) LUCI_ICON="❌" ;;
+              *) LUCI_ICON="⚠️" ;;
+            esac
+            
+            case "$RELEASE_STATUS" in
+              success) REL_ICON="✅" ;;
+              failure) REL_ICON="❌" ;;
+              *) REL_ICON="⚠️" ;;
+            esac
+            
             cat >> $GITHUB_STEP_SUMMARY <<EOF
           # 🎯 构建报告
           | 组件 | 版本 | 状态 |
           |------|------|------|
-          | Tailscale | ${{ needs.check-version.outputs.version }} | ${{ needs.build-tailscale.result == 'success' && '✅' || '❌' }} |
-          | LuCI | ${{ needs.check-version.outputs.luci_version }} | ${{ needs.build-luci.result == 'success' && '✅' || '❌' }} |
+          | Tailscale | ${{ needs.check-version.outputs.version }} | ${TS_ICON} ${TAILSCALE_STATUS} |
+          | LuCI | ${{ needs.check-version.outputs.luci_version }} | ${LUCI_ICON} ${LUCI_STATUS} |
+          | Release | - | ${REL_ICON} ${RELEASE_STATUS} |
 
           **时间:** ${{ needs.check-version.outputs.build_time }} CST | **压缩:** ${{ (github.event_name == 'schedule' || inputs.enable_compression == true) && '✅' || '❌' }}
+          
+          ---
+          
+          💡 **提示:** 部分架构失败不影响其他架构的发布
           EOF
           fi
