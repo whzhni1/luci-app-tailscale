@@ -72,36 +72,8 @@ jobs:
         arch:
           - aarch64_cortex-a53
           - aarch64_cortex-a72
-          - aarch64_cortex-a76
-          - aarch64_generic
-          - arm_arm1176jzf-s_vfp
-          - arm_arm926ej-s
-          - arm_cortex-a15_neon-vfpv4
-          - arm_cortex-a5_vfpv4
-          - arm_cortex-a7
-          - arm_cortex-a7_neon-vfpv4
-          - arm_cortex-a7_vfpv4
-          - arm_cortex-a8_vfpv3
-          - arm_cortex-a9
-          - arm_cortex-a9_neon
-          - arm_cortex-a9_vfpv3-d16
-          - arm_fa526
-          - arm_xscale
-          - arm_mpcore
-          - i386_pentium-mmx
-          - i386_pentium4
-          - mips_24kc
-          - mips_mips32
-          - mipsel_24kc
-          - mipsel_24kc_24kf
-          - mipsel_74kc
-          - mipsel_mips32
-          - mips64_mips64r2
-          - mips64_octeonplus
-          - mips64el_mips64r2
-          - x86_64
         sdk:
-          - SNAPSHOT
+          - openwrt-25.12
           - openwrt-24.10
     steps:
       - uses: actions/checkout@v4
@@ -120,7 +92,7 @@ jobs:
       - name: "编译"
         id: build
         continue-on-error: true
-        uses: sbwml/openwrt-gh-action-sdk@go1.25
+        uses: sbwml/openwrt-gh-action-sdk@go1.26
         env:
           ARCH: ${{ matrix.arch }}-${{ matrix.sdk }}
           FEEDNAME: packages_ci
@@ -155,7 +127,7 @@ jobs:
                 NAME="${BASENAME%.*}_${{ matrix.arch }}.${EXT}"
                 cp "$PKG" "out/${NAME}"
                 echo "准备发布: out/${NAME}"
-              elif [ "${{ matrix.arch }}" = "x86_64" ]; then
+              elif
                 cp "$PKG" "out/${BASENAME}"
                 echo "准备发布: out/${BASENAME}"
               fi
