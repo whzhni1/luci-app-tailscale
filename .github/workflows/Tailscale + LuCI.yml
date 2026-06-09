@@ -60,11 +60,11 @@ jobs:
         id: time
         run: echo "time=$(TZ=Asia/Shanghai date +'%Y-%m-%d %H:%M:%S')" >> $GITHUB_OUTPUT
 
-  build-tailscale:
+  build:
     needs: check-version
     if: needs.check-version.outputs.skip == 'false'
     runs-on: ubuntu-latest
-    name: "tailscale-${{ matrix.arch }}-${{ matrix.sdk }}"
+    name: "${{ matrix.arch }}-${{ matrix.sdk }}"
     continue-on-error: true
     strategy:
       fail-fast: false
@@ -94,93 +94,30 @@ jobs:
         env:
           ARCH: ${{ matrix.arch }}-${{ matrix.sdk }}
           FEEDNAME: packages_ci
-          PACKAGES: tailscale
-          NO_REFRESH_CHECK: true
-
-      - name: "重命名"
-        if: steps.build.outcome == 'success'
-        id: rename
-        run: |
-          PKG=$(find bin/packages/${{ matrix.arch }}/packages_ci/ \
-            \( -name "tailscale_*.apk" -o -name "tailscale_*.ipk" \) \
-            ! -name "*-dbgsym*" | head -1)
-          if [ -z "$PKG" ]; then
-            echo "未找到包文件" && exit 1
-          fi
-          EXT="${PKG##*.}"
-          VERSION=$(echo "${{ needs.check-version.outputs.version }}" | sed 's/^v//')
-          DEST="tailscale_${VERSION}_${{ matrix.arch }}_${{ matrix.sdk }}.${EXT}"
-          cp "$PKG" "$DEST"
-          echo "file=$DEST" >> $GITHUB_OUTPUT
-
-      - name: "发布"
-        if: steps.rename.outcome == 'success'
-        uses: ncipollo/release-action@v1
-        with:
-          tag: ${{ needs.check-version.outputs.version }}
-          name: "Tailscale ${{ needs.check-version.outputs.version }} + LuCI ${{ needs.check-version.outputs.luci_version }}"
-          body: |
-            | 组件 | 版本 |
-            |------|------|
-            | Tailscale | ${{ needs.check-version.outputs.version }} |
-            | LuCI | ${{ needs.check-version.outputs.luci_version }} |
-            | 构建时间 | ${{ needs.check-version.outputs.build_time }} CST |
-            📖 **安装说明请查看 [README](https://github.com/${{ github.repository }}#readme)**
-          token: ${{ secrets.GITHUB_TOKEN }}
-          allowUpdates: true
-          replacesArtifacts: true
-          artifacts: "${{ steps.rename.outputs.file }}"
-
-  build-luci:
-    needs: check-version
-    if: needs.check-version.outputs.skip == 'false'
-    runs-on: ubuntu-latest
-    name: "luci-${{ matrix.sdk }}"
-    continue-on-error: true
-    strategy:
-      fail-fast: false
-      matrix:
-        sdk:
-          - SNAPSHOT
-          - openwrt-24.10
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.check-version.outputs.sha }}
-
-      - name: "准备"
-        run: |
-          rm -rf tailscale/
-          sed -i 's/+tailscale//g' luci-app-tailscale/Makefile
-
-      - name: "编译"
-        id: build
-        continue-on-error: true
-        uses: sbwml/openwrt-gh-action-sdk@go1.25
-        env:
-          ARCH: x86_64-${{ matrix.sdk }}
-          FEEDNAME: packages_ci
           PACKAGES: luci-app-tailscale
           NO_REFRESH_CHECK: true
 
-      - name: "重命名"
+      - name: "整理并发布"
         if: steps.build.outcome == 'success'
-        id: rename
         run: |
-          mkdir -p luci-out
-          find bin/packages/x86_64/packages_ci/ \
-            \( -name "*luci*tailscale*.apk" -o -name "*luci*tailscale*.ipk" \) \
+          mkdir -p out
+          echo "=== 产出文件 ==="
+          find bin/packages/${{ matrix.arch }}/packages_ci/ -type f | sort
+          find bin/packages/${{ matrix.arch }}/packages_ci/ \
+            \( -name "*.apk" -o -name "*.ipk" \) \
             ! -name "*-dbgsym*" | \
           while read PKG; do
             BASENAME=$(basename "$PKG")
             EXT="${BASENAME##*.}"
-            NAME="${BASENAME%.*}_${{ matrix.sdk }}.${EXT}"
-            cp "$PKG" "luci-out/${NAME}"
+            NAME="${BASENAME%.*}_${{ matrix.arch }}_${{ matrix.sdk }}.${EXT}"
+            cp "$PKG" "out/${NAME}"
+            echo "准备发布: out/${NAME}"
           done
-          [ -n "$(ls -A luci-out/)" ] || exit 1
+
+          [ -n "$(ls -A out/)" ] || { echo "没有找到任何包文件" && exit 1; }
 
       - name: "发布"
-        if: steps.rename.outcome == 'success'
+        if: steps.build.outcome == 'success'
         uses: ncipollo/release-action@v1
         with:
           tag: ${{ needs.check-version.outputs.version }}
@@ -195,10 +132,10 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           allowUpdates: true
           replacesArtifacts: true
-          artifacts: "luci-out/*"
+          artifacts: "out/*"
 
   report:
-    needs: [check-version, build-tailscale, build-luci]
+    needs: [check-version, build]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -211,8 +148,7 @@ jobs:
           # 🎯 构建报告
           | 组件 | 版本 | 状态 |
           |------|------|------|
-          | Tailscale | ${{ needs.check-version.outputs.version }} | ${{ needs.build-tailscale.result == 'success' && '✅' || '❌' }} |
-          | LuCI | ${{ needs.check-version.outputs.luci_version }} | ${{ needs.build-luci.result == 'success' && '✅' || '❌' }} |
+          | Tailscale + LuCI | ${{ needs.check-version.outputs.version }} | ${{ needs.build.result == 'success' && '✅' || '❌' }} |
           **时间:** ${{ needs.check-version.outputs.build_time }} CST
           EOF
           fi
