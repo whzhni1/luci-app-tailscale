@@ -127,7 +127,7 @@ jobs:
                 NAME="${BASENAME%.*}_${{ matrix.arch }}.${EXT}"
                 cp "$PKG" "out/${NAME}"
                 echo "准备发布: out/${NAME}"
-              elif
+              else
                 cp "$PKG" "out/${BASENAME}"
                 echo "准备发布: out/${BASENAME}"
               fi
