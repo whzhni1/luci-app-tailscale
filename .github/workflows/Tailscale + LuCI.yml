@@ -18,11 +18,11 @@ jobs:
   check-version:
     runs-on: ubuntu-latest
     outputs:
-      version: ${{ steps.tailscale.outputs.version }}
-      skip: ${{ steps.tailscale.outputs.skip }}
+      version:      ${{ steps.tailscale.outputs.version }}
+      skip:         ${{ steps.tailscale.outputs.skip }}
       luci_version: ${{ steps.luci.outputs.version }}
-      build_time: ${{ steps.time.outputs.time }}
-      sha: ${{ steps.push.outputs.sha }}
+      build_time:   ${{ steps.time.outputs.time }}
+      sha:          ${{ steps.push.outputs.sha }}
     steps:
       - uses: actions/checkout@v4
 
@@ -64,61 +64,32 @@ jobs:
     needs: check-version
     if: needs.check-version.outputs.skip == 'false'
     runs-on: ubuntu-latest
-    continue-on-error: true
     name: "tailscale-${{ matrix.arch }}-${{ matrix.sdk }}"
+    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
         arch:
           - aarch64_cortex-a53
           - aarch64_cortex-a72
-          - aarch64_cortex-a76
-          - aarch64_generic
-          - arm_arm1176jzf-s_vfp
-          - arm_arm926ej-s
-          - arm_cortex-a15_neon-vfpv4
-          - arm_cortex-a5_vfpv4
-          - arm_cortex-a7
-          - arm_cortex-a7_neon-vfpv4
-          - arm_cortex-a7_vfpv4
-          - arm_cortex-a8_vfpv3
-          - arm_cortex-a9
-          - arm_cortex-a9_neon
-          - arm_cortex-a9_vfpv3-d16
-          - arm_fa526
-          - arm_xscale
-          - arm_mpcore
-          - i386_pentium-mmx
-          - i386_pentium4
-          - i386_geode
-          - mips_24kc
-          - mips_4kec
-          - mips_mips32
-          - mipsel_24kc
-          - mipsel_24kc_24kf
-          - mipsel_74kc
-          - mipsel_mips32
-          - mips64_mips64r2
-          - mips64_octeonplus
-          - mips64el_mips64r2
-          - x86_64
         sdk:
           - SNAPSHOT
           - openwrt-24.10
-
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.check-version.outputs.sha }}
 
-      - name: "注入 UPX 压缩"
+      - name: "注入 UPX"
         if: >
           (github.event_name == 'schedule' || inputs.enable_compression == true) &&
           !contains('mips64_mips64r2 mips64_octeonplus mips64el_mips64r2', matrix.arch)
         run: |
           sed -i '/tailscale.init/a \\t/usr/bin/upx --lzma --best $(1)\/usr\/sbin\/tailscaled || true' tailscale/Makefile
 
-      - name: "构建包"
+      - name: "编译"
+        id: build
+        continue-on-error: true
         uses: sbwml/openwrt-gh-action-sdk@go1.25
         env:
           ARCH: ${{ matrix.arch }}-${{ matrix.sdk }}
@@ -126,90 +97,24 @@ jobs:
           PACKAGES: tailscale
           NO_REFRESH_CHECK: true
 
-      - name: "上传 artifacts"
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: tailscale-${{ matrix.arch }}-${{ matrix.sdk }}
-          path: |
-            bin/packages/${{ matrix.arch }}/packages_ci/*.apk
-            bin/packages/${{ matrix.arch }}/packages_ci/*.ipk
-          if-no-files-found: warn
-          retention-days: 1
-
-  build-luci:
-    needs: check-version
-    if: needs.check-version.outputs.skip == 'false'
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    name: "luci-${{ matrix.sdk }}"
-    strategy:
-      fail-fast: false
-      matrix:
-        sdk:
-          - SNAPSHOT
-          - openwrt-24.10
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.check-version.outputs.sha }}
-
-      - name: "准备"
+      - name: "重命名"
+        if: steps.build.outcome == 'success'
+        id: rename
         run: |
-          rm -rf tailscale/
-          sed -i 's/+tailscale//g' luci-app-tailscale/Makefile
-
-      - name: "构建包"
-        uses: sbwml/openwrt-gh-action-sdk@go1.25
-        env:
-          ARCH: x86_64-${{ matrix.sdk }}
-          FEEDNAME: packages_ci
-          PACKAGES: luci-app-tailscale
-          NO_REFRESH_CHECK: true
-
-      - name: "上传 artifacts"
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: luci-${{ matrix.sdk }}
-          path: |
-            bin/packages/x86_64/packages_ci/*luci*tailscale*.apk
-            bin/packages/x86_64/packages_ci/*luci*tailscale*.ipk
-          if-no-files-found: warn
-          retention-days: 1
-
-  release:
-    needs: [check-version, build-tailscale, build-luci]
-    if: needs.check-version.outputs.skip == 'false' && always()
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v4
-        continue-on-error: true
-        with:
-          path: artifacts
-          merge-multiple: false
-          pattern: "{tailscale-*,luci-*}"
-
-      - name: "整理文件"
-        id: collect
-        run: |
-          mkdir -p release
-          find artifacts -type f \( -name "*.apk" -o -name "*.ipk" \) -exec cp {} release/ \; 2>/dev/null || true
-          COUNT=$(ls -1 release/ 2>/dev/null | wc -l)
-          echo "count=$COUNT" >> $GITHUB_OUTPUT
-          
-          if [ "$COUNT" -gt 0 ]; then
-            echo "✅ 找到 $COUNT 个包文件"
-            ls -lh release/
-            echo "success=true" >> $GITHUB_OUTPUT
-          else
-            echo "❌ 没有找到任何包文件"
-            echo "success=false" >> $GITHUB_OUTPUT
+          PKG=$(find bin/packages/${{ matrix.arch }}/packages_ci/ \
+            \( -name "tailscale_*.apk" -o -name "tailscale_*.ipk" \) \
+            ! -name "*-dbgsym*" | head -1)
+          if [ -z "$PKG" ]; then
+            echo "未找到包文件" && exit 1
           fi
+          EXT="${PKG##*.}"
+          VERSION=$(echo "${{ needs.check-version.outputs.version }}" | sed 's/^v//')
+          DEST="tailscale_${VERSION}_${{ matrix.arch }}_${{ matrix.sdk }}.${EXT}"
+          cp "$PKG" "$DEST"
+          echo "file=$DEST" >> $GITHUB_OUTPUT
 
-      - name: "发布 Release"
-        if: steps.collect.outputs.success == 'true'
+      - name: "发布"
+        if: steps.rename.outcome == 'success'
         uses: ncipollo/release-action@v1
         with:
           tag: ${{ needs.check-version.outputs.version }}
@@ -220,25 +125,80 @@ jobs:
             | Tailscale | ${{ needs.check-version.outputs.version }} |
             | LuCI | ${{ needs.check-version.outputs.luci_version }} |
             | 构建时间 | ${{ needs.check-version.outputs.build_time }} CST |
-            | UPX 压缩 | ${{ (github.event_name == 'schedule' || inputs.enable_compression == true) && '✅' || '❌' }} |
-            | 包数量 | ${{ steps.collect.outputs.count }} |
-
-            > ⚠️ 部分架构可能构建失败，详见 [Actions](https://github.com/${{ github.repository }}/actions)
-
             📖 **安装说明请查看 [README](https://github.com/${{ github.repository }}#readme)**
-          artifacts: "release/*"
           token: ${{ secrets.GITHUB_TOKEN }}
           allowUpdates: true
           replacesArtifacts: true
+          artifacts: "${{ steps.rename.outputs.file }}"
 
-      - name: "发布失败警告"
-        if: steps.collect.outputs.success == 'false'
+  build-luci:
+    needs: check-version
+    if: needs.check-version.outputs.skip == 'false'
+    runs-on: ubuntu-latest
+    name: "luci-${{ matrix.sdk }}"
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        sdk:
+          - SNAPSHOT
+          - openwrt-24.10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.check-version.outputs.sha }}
+
+      - name: "准备"
         run: |
-          echo "::error::所有构建都失败了，无法创建 Release"
-          exit 1
+          rm -rf tailscale/
+          sed -i 's/+tailscale//g' luci-app-tailscale/Makefile
+
+      - name: "编译"
+        id: build
+        continue-on-error: true
+        uses: sbwml/openwrt-gh-action-sdk@go1.25
+        env:
+          ARCH: x86_64-${{ matrix.sdk }}
+          FEEDNAME: packages_ci
+          PACKAGES: luci-app-tailscale
+          NO_REFRESH_CHECK: true
+
+      - name: "重命名"
+        if: steps.build.outcome == 'success'
+        id: rename
+        run: |
+          mkdir -p luci-out
+          find bin/packages/x86_64/packages_ci/ \
+            \( -name "*luci*tailscale*.apk" -o -name "*luci*tailscale*.ipk" \) \
+            ! -name "*-dbgsym*" | \
+          while read PKG; do
+            BASENAME=$(basename "$PKG")
+            EXT="${BASENAME##*.}"
+            NAME="${BASENAME%.*}_${{ matrix.sdk }}.${EXT}"
+            cp "$PKG" "luci-out/${NAME}"
+          done
+          [ -n "$(ls -A luci-out/)" ] || exit 1
+
+      - name: "发布"
+        if: steps.rename.outcome == 'success'
+        uses: ncipollo/release-action@v1
+        with:
+          tag: ${{ needs.check-version.outputs.version }}
+          name: "Tailscale ${{ needs.check-version.outputs.version }} + LuCI ${{ needs.check-version.outputs.luci_version }}"
+          body: |
+            | 组件 | 版本 |
+            |------|------|
+            | Tailscale | ${{ needs.check-version.outputs.version }} |
+            | LuCI | ${{ needs.check-version.outputs.luci_version }} |
+            | 构建时间 | ${{ needs.check-version.outputs.build_time }} CST |
+            📖 **安装说明请查看 [README](https://github.com/${{ github.repository }}#readme)**
+          token: ${{ secrets.GITHUB_TOKEN }}
+          allowUpdates: true
+          replacesArtifacts: true
+          artifacts: "luci-out/*"
 
   report:
-    needs: [check-version, build-tailscale, build-luci, release]
+    needs: [check-version, build-tailscale, build-luci]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -247,41 +207,12 @@ jobs:
           if [ "${{ needs.check-version.outputs.skip }}" = "true" ]; then
             echo "# ⏭️ 跳过（版本相同: ${{ needs.check-version.outputs.version }}）" >> $GITHUB_STEP_SUMMARY
           else
-            # 统计构建结果
-            TAILSCALE_STATUS="${{ needs.build-tailscale.result }}"
-            LUCI_STATUS="${{ needs.build-luci.result }}"
-            RELEASE_STATUS="${{ needs.release.result }}"
-            
-            case "$TAILSCALE_STATUS" in
-              success) TS_ICON="✅" ;;
-              failure) TS_ICON="❌" ;;
-              *) TS_ICON="⚠️" ;;
-            esac
-            
-            case "$LUCI_STATUS" in
-              success) LUCI_ICON="✅" ;;
-              failure) LUCI_ICON="❌" ;;
-              *) LUCI_ICON="⚠️" ;;
-            esac
-            
-            case "$RELEASE_STATUS" in
-              success) REL_ICON="✅" ;;
-              failure) REL_ICON="❌" ;;
-              *) REL_ICON="⚠️" ;;
-            esac
-            
             cat >> $GITHUB_STEP_SUMMARY <<EOF
           # 🎯 构建报告
           | 组件 | 版本 | 状态 |
           |------|------|------|
-          | Tailscale | ${{ needs.check-version.outputs.version }} | ${TS_ICON} ${TAILSCALE_STATUS} |
-          | LuCI | ${{ needs.check-version.outputs.luci_version }} | ${LUCI_ICON} ${LUCI_STATUS} |
-          | Release | - | ${REL_ICON} ${RELEASE_STATUS} |
-
-          **时间:** ${{ needs.check-version.outputs.build_time }} CST | **压缩:** ${{ (github.event_name == 'schedule' || inputs.enable_compression == true) && '✅' || '❌' }}
-          
-          ---
-          
-          💡 **提示:** 部分架构失败不影响其他架构的发布
+          | Tailscale | ${{ needs.check-version.outputs.version }} | ${{ needs.build-tailscale.result == 'success' && '✅' || '❌' }} |
+          | LuCI | ${{ needs.check-version.outputs.luci_version }} | ${{ needs.build-luci.result == 'success' && '✅' || '❌' }} |
+          **时间:** ${{ needs.check-version.outputs.build_time }} CST
           EOF
           fi
