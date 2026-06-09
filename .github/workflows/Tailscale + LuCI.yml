@@ -118,7 +118,7 @@ jobs:
               if echo "$BASENAME" | grep -q "^tailscale_"; then
                 cp "$PKG" "out/${BASENAME}"
                 echo "准备发布: out/${BASENAME}"
-              elif [ "${{ matrix.arch }}" = "x86_64" ]; then
+              else
                 cp "$PKG" "out/${BASENAME}"
                 echo "准备发布: out/${BASENAME}"
               fi
