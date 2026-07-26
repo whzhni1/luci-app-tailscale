@@ -35,11 +35,15 @@ esac
 echo "📦 包管理器：$MGR | 架构：$ARCH → $ARCH_KEY → $ARCH_ALT"
 
 install_pkg() {
-    local file="$1" url
+    local file="$1" url sha256
     url=$(echo "$DATA" | grep -o "https://[^\"]*/${file}" | head -1)
     [ -z "$url" ] && { echo "✗ 未找到: $file"; return 1; }
     echo "⬇️  $file"
     curl -sL -o "/tmp/$file" "$url" || { echo "✗ 下载失败"; return 1; }
+    sha256=$(sha256sum "/tmp/$file" | cut -d' ' -f1)
+    echo "sha256: $sha256"
+    echo "$DATA" | grep -q "$sha256" || { echo "✗ 校验失败"; rm -f "/tmp/$file"; return 1; }
+    echo "✓ 校验通过"
     case "$MGR" in opkg) opkg install "/tmp/$file";; apk) apk add --allow-untrusted "/tmp/$file";; esac
     rm -f "/tmp/$file"
 }
@@ -54,10 +58,9 @@ menu_install() {
         [ -z "$n" ] && n=1
         [ "$n" = "0" ] && return 0
         f=$(echo "$2" | sed -n "${n}p")
-        [ -n "$f" ] && break
+        [ -n "$f" ] && install_pkg "$f" && break
         echo "✗ 无效选择，请重新输入"
     done
-    install_pkg "$f"
 }
 
 for API_NAME in "$@"; do
