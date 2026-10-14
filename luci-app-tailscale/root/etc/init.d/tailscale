@@ -1,4 +1,8 @@
 #!/bin/sh /etc/rc.common
+START=95
+STOP=01
+USE_PROCD=1
+
 TS_PKG=tailscale
 TS_DEF_TMP=/tmp/tailscale
 TS_DEF_BIN=/usr/sbin
@@ -12,9 +16,6 @@ TS_SELF_INIT=/etc/init.d/tailscale
 TS_FW_INIT=/etc/init.d/firewall
 TS_NET_INIT=/etc/init.d/network
 
-USE_PROCD=1
-START=95
-STOP=01
 EXTRA_COMMANDS="firewall_apply firewall_clear firewall_status"
 
 ts_uci_get() {
@@ -571,3 +572,4 @@ firewall_status() {
 service_triggers() {
 	procd_add_reload_trigger tailscale
 }
+
