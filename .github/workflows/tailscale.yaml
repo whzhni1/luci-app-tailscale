@@ -1,0 +1,45 @@
+name: Build luci-app-tailscale
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-26.04
+    strategy:
+      matrix:
+        sdk: [openwrt-24.10, openwrt-25.12]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: openwrt/gh-action-sdk@main
+        env:
+          ARCH: x86_64-${{ matrix.sdk }}
+          FEEDNAME: packages_ci
+          PACKAGES: luci-app-tailscale
+          NO_REFRESH_CHECK: true
+      - uses: actions/upload-artifact@v6
+        with:
+          name: ipk-${{ matrix.sdk }}
+          path: bin/packages/x86_64/packages_ci/*
+
+  release:
+    needs: build
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - id: ver
+        run: echo "tag=v$(awk -F':=' '/^PKG_VERSION:=/{print $2}' luci-app-tailscale/Makefile)" >> $GITHUB_OUTPUT
+      - uses: actions/download-artifact@v7
+        with:
+          path: ipks
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: luci-app-tailscale ${{ steps.ver.outputs.tag }}
+          files: ipks/*
+          make_latest: true
+
+

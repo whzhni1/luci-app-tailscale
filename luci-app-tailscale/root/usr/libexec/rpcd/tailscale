@@ -1,0 +1,1489 @@
+#!/usr/bin/ucode
+import { cursor } from 'uci';
+import { popen, readfile, writefile, stdin, unlink, glob, stat } from 'fs';
+
+const WL = {
+	main: ['enabled', 'bin_dir', 'state_dir', 'socket', 'tun', 'mode', 'port', 'socks5', 'http_proxy', 'start_delay', 'respawn_threshold', 'respawn_timeout', 'respawn_retry', 'log_enabled', 'log_limit_kb', 'log_errors_only', 'theme', 'tmp_dir', 'derp_preferred_region'],
+	up: ['hostname', 'auth_key', 'accept_dns', 'accept_routes', 'advertise_routes', 'advertise_exit_node', 'exit_node', 'exit_node_allow_lan', 'shields_up', 'snat_subnet_routes', 'ssh', 'operator', 'login_server', 'netfilter_mode', 'stateful_filtering'],
+	network: ['iface_enabled', 'iface_name', 'device', 'zone_enabled', 'zone_name', 'masq', 'mss', 'fwd_ts_lan', 'fwd_lan_ts', 'fwd_ts_wan', 'fwd_wan_ts', 'conflicts'],
+	update: ['channel', 'source_order', 'arch', 'version', 'file', 'auto_update', 'auto_rollback', 'every_days', 'at_time', 'keep_backup', 'timeout', 'retry', 'cache_ttl', 'dl_timeout', 'jitter']
+};
+
+const SOCKET_WAITS = 5;
+const UP_TIMEOUT = 600;
+
+function getenv2(k, dflt) {
+	let v = getenv(k);
+	if (v == null || v == '') return dflt;
+	return v;
+}
+
+function new_cursor() {
+	let d = getenv2('TS_UCI_DIR', '');
+	if (d != '')
+		return cursor(d, getenv2('TS_UCI_DELTA', '/tmp/.uci-test'));
+	return cursor();
+}
+
+let _C = null;
+function U() {
+	if (_C == null) {
+		try { _C = new_cursor(); } catch (e) { _C = null; }
+	}
+	return _C;
+}
+
+function cfg(sec, opt, dflt) {
+	let v = null;
+	try { v = U().get('tailscale', sec, opt); } catch (e) { v = null; }
+	if (v == null || v == '') return dflt;
+	return v;
+}
+
+function libdir() { return getenv2('TS_LIBDIR', '/usr/libexec/tailscale'); }
+function initd() { return getenv2('TS_SELF_INIT', '/etc/init.d/tailscale'); }
+function tmpdir() { return cfg('main', 'tmp_dir', '/tmp/tailscale'); }
+function bindir() { return cfg('main', 'bin_dir', '/usr/sbin'); }
+function sockpath() { return cfg('main', 'socket', '/var/run/tailscale/tailscaled.sock'); }
+
+function sh(cmd) {
+	let p = null;
+	try { p = popen(cmd, 'r'); } catch (e) { return { rc: 127, out: '' }; }
+	if (p == null) return { rc: 127, out: '' };
+	let out = '';
+	try { out = p.read('all'); } catch (e) { out = ''; }
+	if (out == null) out = '';
+	let rc = 1;
+	try { rc = p.close(); } catch (e) { rc = 1; }
+	return { rc: rc, out: out };
+}
+
+function jread(path) {
+	let txt = null;
+	try { txt = readfile(path); } catch (e) { return null; }
+	if (txt == null || trim(txt) == '') return null;
+	try { return json(txt); } catch (e) { return null; }
+}
+
+function sq(s) {
+	return "'" + join("'\\''", split(s || '', "'")) + "'";
+}
+
+function diskSpace(path) {
+	let r = sh('df -Pk ' + sq(path) + " 2>/dev/null | awk 'NR==2 { printf \"%.0f %.0f\\n\", $2 * 1024, $4 * 1024 }'");
+	if (r.rc != 0) return { path: path, total_bytes: 0, free_bytes: 0 };
+	let fields = split(trim(r.out), ' ');
+	if (length(fields) < 2) return { path: path, total_bytes: 0, free_bytes: 0 };
+	let total = int(fields[0]) || 0, free = int(fields[1]) || 0;
+	return { path: path, total_bytes: total, free_bytes: free };
+}
+
+function diskSpaces() {
+	let home = getenv2('HOME', '/root');
+	let cache = getenv2('XDG_CACHE_HOME', home + '/.cache');
+	if (sh('test -d ' + sq(cache) + ' 2>/dev/null').rc != 0) cache = home;
+	return { install: diskSpace(bindir()), temporary: diskSpace(tmpdir()), cache: diskSpace(cache) };
+}
+
+function updateSpaceSummary(spaces, channel) {
+	let names = ['install', 'temporary'];
+	if (channel == 'official') names[length(names)] = 'cache';
+	let location = names[0];
+	let selected = spaces[location] || { path: '', total_bytes: 0, free_bytes: 0 };
+	for (let i = 1; i < length(names); i++) {
+		let current = spaces[names[i]] || { path: '', total_bytes: 0, free_bytes: 0 };
+		if (current.free_bytes < selected.free_bytes) {
+			selected = current;
+			location = names[i];
+		}
+	}
+	return { path: selected.path, location: location, total_bytes: selected.total_bytes, free_bytes: selected.free_bytes };
+}
+
+function requiredUpdateSpace(channel, rollback) {
+	if (channel == 'official') return (rollback == '1' ? 200 : 130) * 1048576;
+	return (rollback == '1' ? 30 : 10) * 1048576;
+}
+
+function updateSpaceAllowed(spaces, channel, rollback) {
+	return updateSpaceSummary(spaces, channel).free_bytes >= requiredUpdateSpace(channel, rollback);
+}
+
+
+function redactLogText(text) {
+	text = '' + (text || '');
+	text = replace(text, /--auth-key=[^' \t\r\n]+/g, '--auth-key=[redacted]');
+	text = replace(text, /tskey-[A-Za-z0-9_-]+/g, '[auth-key redacted]');
+	return replace(text, /https?:\/\/[^ \t\r\n]+/g, '[URL redacted]');
+}
+
+function logTailscale(cmd, rc, output) {
+	if (cfg('main', 'log_enabled', '1') != '1') return;
+	let td = tmpdir(), file = td + '/backend.log';
+	let stamp = trim(sh("date '+%Y-%m-%d %H:%M:%S' 2>/dev/null").out);
+	let text = '[' + stamp + '] $ ' + redactLogText(cmd) + ' (result=' + rc + ')\n';
+	let clean = redactLogText(output);
+	let wrote = false;
+	for (let line in split(clean, '\n')) {
+		if (trim(line) == '') continue;
+		text = text + '>> ' + line + '\n';
+		wrote = true;
+	}
+	if (!wrote) text = text + '>> (no output)\n';
+	if (sh('mkdir -p ' + sq(td) + ' && printf %s ' + sq(text) + ' >> ' + sq(file)).rc != 0) return;
+	let limitKb = int(cfg('main', 'log_limit_kb', '300')) || 300;
+	if (limitKb < 16) limitKb = 16;
+	if (limitKb > 4096) limitKb = 4096;
+	let size = int(trim(sh('wc -c < ' + sq(file) + ' 2>/dev/null').out)) || 0;
+	if (size > limitKb * 1024) {
+		let keep = int(limitKb * 512);
+		sh('tail -c ' + keep + ' ' + sq(file) + ' > ' + sq(file + '.tmp') + ' && mv -f ' + sq(file + '.tmp') + ' ' + sq(file));
+	}
+}
+
+function sh_bounded(cmd, seconds) {
+	let td = tmpdir();
+	let stamp = clock();
+	let id = sprintf('rpc-%d-%d', stamp[0], stamp[1]);
+	let outFile = td + '/' + id + '.out';
+	let rcFile = td + '/' + id + '.rc';
+	let pidFile = td + '/' + id + '.pid';
+	if (sh('mkdir -p ' + sq(td)).rc != 0)
+		return { rc: 127, out: '' };
+	let launch = '( sh -c ' + sq(cmd) + ' > ' + sq(outFile) + ' 2>&1; echo $? > ' + sq(rcFile) + ' ) >/dev/null 2>&1 & echo $! > ' + sq(pidFile);
+	if (sh(launch).rc != 0)
+		return { rc: 127, out: '' };
+	let limit = int(seconds) || 1;
+	for (let i = 0; i <= limit; i++) {
+		let rc = null;
+		try { rc = readfile(rcFile); } catch (e) { rc = null; }
+		if (rc != null && trim(rc) != '') {
+			let output = '';
+			try { output = readfile(outFile) || ''; } catch (e) {}
+			sh('rm -f ' + sq(outFile) + ' ' + sq(rcFile) + ' ' + sq(pidFile));
+			return { rc: int(trim(rc)) || 0, out: output };
+		}
+		if (i < limit)
+			sh('sleep 1');
+	}
+	let pid = null;
+	try { pid = trim(readfile(pidFile)); } catch (e) { pid = null; }
+	if (pid != null && pid != '') {
+		let tree = descendants(pid);
+		for (let child in tree) sh('kill ' + child + ' 2>/dev/null');
+		sh('kill ' + pid + ' 2>/dev/null');
+		sh('sleep 1');
+		for (let child in tree) sh('kill -9 ' + child + ' 2>/dev/null');
+		sh('kill -9 ' + pid + ' 2>/dev/null');
+	}
+	let output = '';
+	try { output = readfile(outFile) || ''; } catch (e) {}
+	sh('rm -f ' + sq(outFile) + ' ' + sq(rcFile) + ' ' + sq(pidFile));
+	return { rc: 124, out: output };
+}
+
+function clean_id(id) {
+	if (id == null) return null;
+	let s = '' + id;
+	if (s == '') return null;
+	for (let i = 0; i < length(s); i++) {
+		if (index('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-', substr(s, i, 1)) < 0)
+			return null;
+	}
+	return s;
+}
+
+function clean_int(v, dflt, lo, hi) {
+	let n = null;
+	try { n = int(v); } catch (e) { n = null; }
+	if (n == null || !(n >= lo)) n = dflt;
+	if (n < lo) n = lo;
+	if (n > hi) n = hi;
+	return n;
+}
+
+function src_list(single) {
+	if (single != null && single != '' && single != 'auto') {
+		if (index(['gitlab', 'r2', 'github', 'official'], single) < 0)
+			return null;
+		return [single];
+	}
+	return filter(split(cfg('update', 'source_order', 'gitlab r2 github'), ' '), (x) => x != '');
+}
+
+function proj_of(p) {
+	if (p.proj == 'luci-app-tailscale') return 'luci-app-tailscale';
+	return 'tailscale';
+}
+
+function local_route_candidates() {
+	let result = sh('ip -4 route show table main 2>/dev/null');
+	if (result.rc != 0) return [];
+	let candidates = [], seen = {};
+	let tailscaleTun = cfg('main', 'tun', 'tailscale0');
+	for (let line in split(result.out, '\n')) {
+		let fields = filter(split(trim(line), ' '), (x) => x != '');
+		if (length(fields) < 3) continue;
+		let cidr = fields[0];
+		if (cidr == 'default') continue;
+		let parts = split(cidr, '/');
+		if (length(parts) != 2) continue;
+		let octets = split(parts[0], '.');
+		if (length(octets) != 4) continue;
+		let valid = true;
+		for (let i = 0; i < 4; i++) {
+			if (octets[i] == '') {
+				valid = false;
+				break;
+			}
+			for (let j = 0; j < length(octets[i]); j++)
+				if (index('0123456789', substr(octets[i], j, 1)) < 0) valid = false;
+			let octet = int(octets[i]);
+			if (octet == null || octet < 0 || octet > 255) valid = false;
+		}
+		if (parts[1] == '') valid = false;
+		for (let j = 0; j < length(parts[1]); j++)
+			if (index('0123456789', substr(parts[1], j, 1)) < 0) valid = false;
+		let prefix = int(parts[1]);
+		if (prefix == null || prefix < 1 || prefix > 31) valid = false;
+		if (!valid) continue;
+		let device = '', direct = false, via = false;
+		for (let i = 1; i < length(fields); i++) {
+			if (fields[i] == 'dev' && i + 1 < length(fields)) device = fields[i + 1];
+			else if (fields[i] == 'scope' && i + 1 < length(fields) && fields[i + 1] == 'link') direct = true;
+			else if (fields[i] == 'proto' && i + 1 < length(fields) && fields[i + 1] == 'kernel') direct = true;
+			else if (fields[i] == 'via') via = true;
+		}
+		let tunnel = device == tailscaleTun || substr(device, 0, 9) == 'tailscale' || substr(device, 0, 3) == 'tun' || substr(device, 0, 3) == 'tap' || substr(device, 0, 2) == 'wg' || substr(device, 0, 3) == 'ppp' || substr(device, 0, 3) == 'gre' || substr(device, 0, 3) == 'sit' || substr(device, 0, 3) == 'vti' || substr(device, 0, 2) == 'zt' || substr(device, 0, 6) == 'docker' || substr(device, 0, 5) == 'virbr';
+		if (!direct || via || device == '' || device == 'lo' || tunnel) continue;
+		if (seen[cidr] == true) continue;
+		seen[cidr] = true;
+		candidates[length(candidates)] = { cidr: cidr, device: device };
+		if (length(candidates) >= 64) break;
+	}
+	return candidates;
+}
+
+function getConfig(p) {
+	let sec = p.section;
+	let single = (sec != null && sec != '');
+	if (single && WL[sec] == null)
+		return { ok: false, error: 'bad_section' };
+	let secs = single ? [sec] : ['main', 'up', 'network', 'update'];
+	let out = {};
+	for (let s in secs) {
+		let o = {};
+		let all = null;
+		try { all = U().get_all('tailscale', s); } catch (e) { all = null; }
+		if (all == null) all = {};
+		for (let k, v in all) {
+			if (substr(k, 0, 1) == '.') continue;
+			if (s == 'up' && k == 'auth_key') {
+				o[k] = (v != null && v != '') ? true : false;
+				continue;
+			}
+			o[k] = v;
+		}
+		out[s] = o;
+	}
+	if (single) return { ok: true, config: out[sec] };
+	return { ok: true, config: out, local_routes: local_route_candidates() };
+}
+
+function normalize_derp_region(v) {
+	if (v == null || v == '' || v == 'auto' || v == 0 || v == '0') return '0';
+	let s = '' + v;
+	if (length(s) > 9) return null;
+	for (let i = 0; i < length(s); i++) {
+		if (index('0123456789', substr(s, i, 1)) < 0) return null;
+	}
+	let n = int(s);
+	if (n == null || n < 1 || n > 2147483647) return null;
+	return '' + n;
+}
+
+function read_derp_map() {
+	let r = sh(sq(bindir() + '/tailscale') + ' --socket=' + sq(sockpath()) + ' debug derp-map 2>/dev/null');
+	if (r.rc != 0) return { available: false, regions: [] };
+	let data = null;
+	try { data = json(r.out); } catch (e) { data = null; }
+	if (data == null || data.Regions == null || type(data.Regions) != 'object')
+		return { available: false, regions: [] };
+	let regions = [];
+	for (let k, item in data.Regions) {
+		if (item == null || item.RegionID == null || item.Nodes == null || length(item.Nodes) == 0)
+			continue;
+		let id = int(item.RegionID);
+		if (id < 1) continue;
+		let code = item.RegionCode == null ? '' : trim('' + item.RegionCode);
+		let name = item.RegionName == null ? '' : trim('' + item.RegionName);
+		if (name == '') name = code != '' ? code : 'Region ' + id;
+		regions[length(regions)] = { id: id, code: code, name: name };
+	}
+	return { available: true, regions: regions };
+}
+
+function force_derp_region(region) {
+	return sh(sq(bindir() + '/tailscale') + ' --socket=' + sq(sockpath()) + ' debug force-prefer-derp ' + region + ' 2>/dev/null').rc == 0;
+}
+
+function setConfig(p) {
+	let sec = p.section;
+	if (sec == null || WL[sec] == null)
+		return { ok: false, error: 'bad_section' };
+	let vals = p.values;
+	if (vals == null) vals = {};
+	if (type(vals) != 'object')
+		return { ok: false, error: 'bad_values' };
+	for (let k, v in vals) {
+		if (index(WL[sec], k) < 0)
+			return { ok: false, error: 'bad_option' };
+	}
+	if (sec == 'update') {
+		let previousChannel = cfg('update', 'channel', 'custom');
+		let channel = vals.channel != null ? '' + vals.channel : previousChannel;
+		let rollback = vals.auto_rollback != null ? '' + vals.auto_rollback : cfg('update', 'auto_rollback', '1');
+		let auto = vals.auto_update != null ? '' + vals.auto_update : cfg('update', 'auto_update', '0');
+		let channelChanged = vals.channel != null && channel != previousChannel;
+		let autoEnabled = vals.auto_update != null && auto == '1';
+		let rollbackEnabled = vals.auto_rollback != null && rollback == '1' && cfg('update', 'auto_rollback', '1') != '1';
+		if (channelChanged || autoEnabled || rollbackEnabled) {
+			if (channel != 'official') channel = 'custom';
+			let spaces = diskSpaces();
+			if (!updateSpaceAllowed(spaces, channel, rollback)) {
+				let summary = updateSpaceSummary(spaces, channel);
+				return { ok: false, error: 'space_insufficient', free_bytes: summary.free_bytes, required_bytes: requiredUpdateSpace(channel, rollback) };
+			}
+		}
+	}
+	let derpRegion = null;
+	if (sec == 'main' && vals.derp_preferred_region != null) {
+		derpRegion = normalize_derp_region(vals.derp_preferred_region);
+		if (derpRegion == null)
+			return { ok: false, error: 'bad_derp_region' };
+	}
+	let applyNow = p.apply == true || p.apply == 1 || p.apply == '1';
+	try {
+		for (let k, v in vals) {
+			let s = v;
+			if (sec == 'main' && k == 'derp_preferred_region') s = derpRegion;
+			else if (s == true) s = '1';
+			else if (s == false) s = '0';
+			else s = '' + s;
+			U().set('tailscale', sec, k, s);
+		}
+		if (U().commit('tailscale') != true)
+			return { ok: false, error: 'commit_fail' };
+	} catch (e) {
+		return { ok: false, error: 'commit_fail' };
+	}
+	if (derpRegion == null || !applyNow)
+		return { ok: true };
+	if (sh('test -S ' + sq(sockpath()) + ' 2>/dev/null').rc != 0)
+		return { ok: true, applied: derpRegion == '0', deferred: derpRegion != '0', derp_preferred_region: derpRegion };
+	let validRegion = derpRegion == '0';
+	if (!validRegion) {
+		let map = read_derp_map();
+		if (map.available) {
+			for (let region in map.regions) {
+				if ('' + region.id == derpRegion) {
+					validRegion = true;
+					break;
+				}
+			}
+		}
+	}
+	if (validRegion && force_derp_region(derpRegion))
+		return { ok: true, applied: true, derp_preferred_region: derpRegion };
+	if (derpRegion == '0')
+		return { ok: true, applied: false, deferred: true, derp_preferred_region: '0' };
+	let cleared = force_derp_region('0');
+	let reverted = false;
+	try {
+		U().set('tailscale', 'main', 'derp_preferred_region', '0');
+		reverted = U().commit('tailscale') == true;
+	} catch (e) {}
+	if (!reverted)
+		return { ok: false, error: 'commit_fail', applied: cleared, derp_preferred_region: derpRegion };
+	return { ok: true, applied: cleared, deferred: !cleared, fallback_auto: true, derp_preferred_region: '0' };
+}
+
+function getStatus(p) {
+	let bin = bindir();
+	let channel = cfg('update', 'channel', 'custom');
+	let rollback = cfg('update', 'auto_rollback', '1');
+	let spaces = diskSpaces();
+	let res = { running: false, logged_in: false, binary_ok: false, tailscaled_ok: false, tailscale_cli_ok: false, enabled: false, version: '', tail_ips: [], hostname: '', router_model: '', arch: '', tailnet: '', key_expiry: '', peers: [], uptime: 0, rx_bytes: 0, tx_bytes: 0, tailscale_cpu_pct: null, tailscale_proc_ticks: 0, tailscale_pid: '', tailscale_start_ticks: 0, backend_state: '', cpu_total_ticks: 0, cpu_cores: 1, tailscale_mem_kb: 0, cpu_stat: '', mem_total: 0, mem_avail: 0, load1: '', derp_ms: {}, fw_driver: 'none', fw_zone: false, fw_iface: false, fw_apply: null };
+	res.update_channel = channel;
+	res.auto_rollback = rollback == '1';
+	res.disk_spaces = spaces;
+	res.update_space = updateSpaceSummary(spaces, channel);
+	res.update_space_required_bytes = requiredUpdateSpace(channel, rollback);
+	res.enabled = cfg('main', 'enabled', '0') == '1';
+	res.tailscaled_ok = sh('test -x ' + sq(bin + '/tailscaled') + ' 2>/dev/null').rc == 0;
+	res.tailscale_cli_ok = sh('test -x ' + sq(bin + '/tailscale') + ' 2>/dev/null').rc == 0;
+	res.binary_ok = res.tailscaled_ok && res.tailscale_cli_ok;
+	if (res.tailscale_cli_ok) {
+		let v = sh(sq(bin + '/tailscale') + ' version 2>/dev/null');
+		if (v.rc == 0) {
+			let vl = split(trim(v.out), '\n');
+			if (length(vl) > 0) res.version = trim(vl[0]);
+		}
+	}
+	let s = sh_bounded(sq(bin + '/tailscale') + ' --socket=' + sq(sockpath()) + ' status --json 2>/dev/null', 8);
+	let st = null;
+	if (s.rc == 0) {
+		try { st = json(s.out); } catch (e) { st = null; }
+	}
+	if (st != null) {
+		res.running = true;
+		if (st.BackendState != null) res.backend_state = '' + st.BackendState;
+		if (st.BackendState == 'Running') res.logged_in = true;
+		let self = st.Self;
+		if (self == null) self = {};
+		if (self.TailscaleIPs != null) res.tail_ips = self.TailscaleIPs;
+		if (self.HostName != null) res.hostname = self.HostName;
+		if (self.KeyExpiry != null) res.key_expiry = self.KeyExpiry;
+		if (self.DNSName != null) {
+			let dp = split(self.DNSName, '.');
+			if (length(dp) >= 3) res.tailnet = dp[1];
+		}
+		let peers = st.Peer;
+		if (peers == null) peers = {};
+		for (let nk, pr in peers) {
+			let pip = '';
+			if (pr.TailscaleIPs != null && length(pr.TailscaleIPs) > 0) pip = pr.TailscaleIPs[0];
+			if (pip == null) pip = '';
+			let own = {};
+			if (pr.TailscaleIPs != null) {
+				for (let oip in pr.TailscaleIPs) own[oip] = true;
+			}
+			let adv = [];
+			if (pr.AllowedIPs != null) {
+				for (let a in pr.AllowedIPs) {
+					if (a == '0.0.0.0/0' || a == '::/0') continue;
+					let bare = split(a, '/')[0];
+					if (own[bare] == true) continue;
+					adv[length(adv)] = a;
+				}
+			}
+			let appr = [];
+			if (pr.PrimaryRoutes != null) {
+				for (let a in pr.PrimaryRoutes) appr[length(appr)] = a;
+			}
+			let pend = [];
+			for (let a in adv) {
+				if (index(appr, a) < 0) pend[length(pend)] = a;
+			}
+			let ls = '';
+			if (pr.LastSeen != null) ls = pr.LastSeen;
+			res.peers[length(res.peers)] = { key: nk, name: pr.HostName || '', dns: pr.DNSName || '', ip: pip, os: pr.OS || '', online: pr.Online == true, active: pr.Active == true, direct: (pr.Online == true && pr.CurAddr != null && pr.CurAddr != ''), lastseen: ls, exit_option: pr.ExitNodeOption == true, exit_active: pr.ExitNode == true, approved: appr, pending: pend, rx_bytes: pr.RxBytes || 0, tx_bytes: pr.TxBytes || 0 };
+		}
+	}
+	let dev = cfg('network', 'device', 'tailscale0');
+	let nd = null;
+	try { nd = readfile('/proc/net/dev'); } catch (e) { nd = null; }
+	if (nd != null) {
+		for (let ln in split(nd, '\n')) {
+			let t = trim(ln);
+			if (substr(t, 0, length(dev) + 1) == dev + ':') {
+				let f = filter(split(t, ' '), (x) => x != '');
+				if (length(f) >= 10) {
+					res.rx_bytes = int(f[1]) || 0;
+					res.tx_bytes = int(f[9]) || 0;
+				}
+			}
+		}
+	}
+	let mi = null;
+	try { mi = readfile('/proc/meminfo'); } catch (e) { mi = null; }
+	if (mi != null) {
+		for (let ln in split(mi, '\n')) {
+			let f = filter(split(trim(ln), ' '), (x) => x != '');
+			if (length(f) >= 2) {
+				if (f[0] == 'MemTotal:') res.mem_total = int(f[1]) || 0;
+				if (f[0] == 'MemAvailable:') res.mem_avail = int(f[1]) || 0;
+			}
+		}
+	}
+	let la = null;
+	try { la = readfile('/proc/loadavg'); } catch (e) { la = null; }
+	if (la != null) {
+		let f = filter(split(trim(la), ' '), (x) => x != '');
+		if (length(f) > 0) res.load1 = f[0];
+	}
+
+	let arch = sh('uname -m 2>/dev/null');
+	if (arch.rc == 0) res.arch = trim(arch.out);
+	let model = null;
+	try { model = readfile('/tmp/sysinfo/model'); } catch (e) { model = null; }
+	if (model != null) res.router_model = trim(model);
+	if (res.router_model == '') {
+		let br = sh('ubus call system board 2>/dev/null');
+		if (br.rc == 0) {
+			let board = null;
+			try { board = json(br.out); } catch (e) { board = null; }
+			if (board != null && board.model != null) res.router_model = '' + board.model;
+		}
+	}
+	let pstat = null;
+	try { pstat = readfile('/proc/stat'); } catch (e) { pstat = null; }
+	let totalTicks = 0, cpuCount = 0;
+	if (pstat != null) {
+		for (let ln in split(pstat, '\n')) {
+			let f = filter(split(trim(ln), ' '), (x) => x != '');
+			if (length(f) == 0) continue;
+			if (f[0] == 'cpu') {
+				res.cpu_stat = trim(ln);
+				for (let i = 1; i < length(f); i++) totalTicks += int(f[i]) || 0;
+			}
+			else if (substr(f[0], 0, 3) == 'cpu') {
+				cpuCount++;
+			}
+		}
+	}
+	res.cpu_total_ticks = totalTicks;
+	res.cpu_cores = cpuCount > 0 ? cpuCount : 1;
+	let pidout = sh('pidof tailscaled 2>/dev/null');
+	let pid = '';
+	if (pidout.rc == 0) {
+		let pids = filter(split(trim(pidout.out), ' '), (x) => x != '');
+		if (length(pids) > 0) pid = pids[0];
+	}
+	let procTicks = 0, procStartTicks = 0;
+	let procStat = null;
+	if (pid != '') {
+		if (!res.running && sh('test -S ' + sq(sockpath()) + ' 2>/dev/null').rc == 0) res.running = true;
+		try { procStat = readfile('/proc/' + pid + '/stat'); } catch (e) { procStat = null; }
+		if (procStat != null) {
+			let close = index(procStat, ') ');
+			if (close >= 0) {
+				let f = filter(split(trim(substr(procStat, close + 2)), ' '), (x) => x != '');
+				if (length(f) > 12) {
+					procTicks = (int(f[11]) || 0) + (int(f[12]) || 0);
+					res.tailscale_pid = pid;
+					res.tailscale_proc_ticks = procTicks;
+					if (length(f) > 19)
+						procStartTicks = int(f[19]) || 0;
+					res.tailscale_start_ticks = procStartTicks;
+				}
+			}
+		}
+		let pst = null;
+		try { pst = readfile('/proc/' + pid + '/status'); } catch (e) { pst = null; }
+		if (pst != null) {
+			for (let ln in split(pst, '\n')) {
+				let f = filter(split(replace(trim(ln), /[ \t]+/g, ' '), ' '), (x) => x != '');
+				if (length(f) >= 2 && f[0] == 'VmRSS:') res.tailscale_mem_kb = int(f[1]) || 0;
+			}
+		}
+		if (procStat != null && totalTicks > 0 && cpuCount > 0) {
+			let td = tmpdir();
+			sh('mkdir -p ' + sq(td) + ' 2>/dev/null');
+			let prev = jread(td + '/tailscale-cpu.json');
+			if (prev != null && prev.pid == pid && totalTicks > prev.total && procTicks >= prev.proc) {
+				let pcpu = (procTicks - prev.proc) * cpuCount * 100 / (totalTicks - prev.total);
+				if (pcpu >= 0) res.tailscale_cpu_pct = pcpu;
+			}
+			try { writefile(td + '/tailscale-cpu.json', sprintf('%J', { pid: pid, proc: procTicks, total: totalTicks })); } catch (e) {}
+		}
+	}
+	let procUptime = -1;
+	if (procStartTicks > 0) {
+		let bootTime = null;
+		try { bootTime = readfile('/proc/uptime'); } catch (e) {}
+		if (bootTime != null) {
+			let fields = filter(split(trim(bootTime), ' '), (x) => x != '');
+			if (length(fields) > 0) {
+				let hz = 100;
+				let hzout = sh('getconf CLK_TCK 2>/dev/null');
+				if (hzout.rc == 0) hz = int(trim(hzout.out)) || 100;
+				let bootUptime = int(split(fields[0], '.')[0]) || 0;
+				procUptime = bootUptime - int(procStartTicks / hz);
+			}
+		}
+	}
+	if (procUptime >= 0) res.uptime = procUptime;
+	let td = tmpdir();
+	let pc = jread(td + '/ping.json');
+	if (pc != null && pc.latency != null) res.derp_ms = pc.latency;
+	let fw = sh(sq(initd()) + ' firewall_status 2>/dev/null');
+	if (fw.rc == 0) {
+		let f = null;
+		try { f = json(fw.out); } catch (e) { f = null; }
+		if (f != null) {
+			if (f.driver != null) res.fw_driver = f.driver;
+			if (f.zone == true) res.fw_zone = true;
+			if (f.iface == true) res.fw_iface = true;
+		}
+	}
+	let fst = null;
+	try { fst = readfile(td + '/fw-apply.stamp'); } catch (e) { fst = null; }
+	if (fst != null) {
+		let fl = split(trim(fst), '\n');
+		if (length(fl) >= 2) {
+			let fo = '';
+			let id = '';
+			if (length(fl) > 2) id = fl[2];
+			if (length(fl) > 3) fo = fl[3];
+			res.fw_apply = { rc: fl[0], at: fl[1], id: id, out: fo };
+		}
+	}
+	if (p.include_derp_map == true || p.include_derp_map == 1 || p.include_derp_map == '1') {
+		let map = read_derp_map();
+		res.derp_map_available = map.available;
+		res.derp_regions = map.regions;
+	}
+	return res;
+}
+
+function getSources(p) {
+	let proj = proj_of(p);
+	let td = tmpdir();
+	let source = p.source == null || p.source == '' ? null : '' + p.source;
+	let order = source == null ? src_list(null) : src_list(source);
+	if (order == null || (source == 'official' && proj != 'tailscale')) return { ok: false, error: 'bad_source', sources: [] };
+	let out = [];
+	for (let src in order) {
+		let r = sh('TS_METADATA_TIMEOUT=10 TS_METADATA_RETRIES=0 ' + sq(libdir() + '/update.sh') + ' list ' + sq(proj) + ' ' + sq(src) + ' 2>/dev/null');
+		if (r.rc != 0) continue;
+		let data = null;
+		try { data = json(r.out); } catch (e) { data = null; }
+		if (data == null || data.tags == null || length(data.tags) == 0) continue;
+		let bp = td + '/rel-' + src + '-' + proj + '.json';
+		let cat = 0;
+		let check = null;
+		let m = sh('stat -c %Y ' + sq(bp) + ' 2>/dev/null');
+		if (m.rc == 0) cat = int(trim(m.out)) || 0;
+		if (proj == 'tailscale') {
+			let cr = sh(sq(libdir() + '/update.sh') + ' check tailscale ' + sq(src) + ' 2>/dev/null');
+			if (cr.rc == 0) {
+				try { check = json(cr.out); } catch (e) { check = null; }
+			}
+		}
+		out[length(out)] = { name: src, tags: data.tags, files: data.files || {}, info: data.info || null, check: check, cached_at: cat };
+	}
+	let result = { sources: out };
+	if (proj == 'luci-app-tailscale') {
+		let iv = sh(sq(libdir() + '/update.sh') + ' installed ' + sq(proj) + ' 2>/dev/null');
+		if (iv.rc == 0) result.installed_version = trim(iv.out);
+	}
+	return result;
+}
+
+function refreshSources(p) {
+	let td = tmpdir();
+	let srcs = src_list(p.source);
+	if (srcs == null) return { ok: false, error: 'bad_source' };
+	let projs = [];
+	if (p.proj == null || p.proj == '')
+		projs = ['tailscale', 'luci-app-tailscale'];
+	else if (p.proj == 'tailscale' || p.proj == 'luci-app-tailscale')
+		projs = [p.proj];
+	else
+		return { ok: false, error: 'bad_project' };
+	for (let src in srcs) {
+		for (let proj in projs) {
+			try { unlink(td + '/rel-' + src + '-' + proj + '.json'); } catch (e) {}
+		}
+	}
+	return { ok: true };
+}
+
+function resolveFile(p) {
+	let proj = proj_of(p);
+	let td = tmpdir();
+	let srcs = src_list(p.source);
+	if (srcs == null || (p.source == 'official' && proj != 'tailscale')) return { ok: false, error: 'bad_source' };
+	let ver = (p.version == null || p.version == '') ? 'latest' : '' + p.version;
+	let want = (p.file == null || p.file == '') ? 'auto' : '' + p.file;
+	let arch = (p.arch == null || p.arch == '') ? 'auto' : '' + p.arch;
+	for (let src in srcs) {
+		sh('TS_METADATA_TIMEOUT=10 TS_METADATA_RETRIES=0 ' + sq(libdir() + '/update.sh') + ' check ' + sq(proj) + ' ' + sq(src) + ' >/dev/null 2>&1');
+		let bp = td + '/rel-' + src + '-' + proj + '.json';
+		let r = sh(sq(libdir() + '/update.sh') + ' resolve ' + sq(proj) + ' ' + sq(bp) + ' ' + sq(ver) + ' ' + sq(want) + ' ' + sq(arch) + ' 2>/dev/null');
+		if (r.rc != 0) continue;
+		let file = '';
+		for (let ln in split(trim(r.out), '
+')) {
+			if (trim(ln) != '') { file = trim(ln); break; }
+		}
+		if (file == '') continue;
+		let tag = ver;
+		if (ver == 'latest') {
+			let vr = sh(sq(libdir() + '/update.sh') + ' list ' + sq(proj) + ' ' + sq(src) + ' 2>/dev/null');
+			if (vr.rc == 0) {
+				let data = null;
+				try { data = json(vr.out); } catch (e) { data = null; }
+				if (data != null && data.tags != null && length(data.tags) > 0) tag = data.tags[0];
+			}
+		}
+		let uh = sh(sq(libdir() + '/update.sh') + ' urlhash ' + sq(bp) + ' ' + sq(file) + ' 2>/dev/null');
+		let url = '', sha = '';
+		if (uh.rc == 0) {
+			let ujo = null;
+			try { ujo = json(uh.out); } catch (e) { ujo = null; }
+			if (ujo != null) {
+				if (ujo.url != null) url = ujo.url;
+				if (ujo.sha256 != null) sha = ujo.sha256;
+			}
+		}
+		if (src == 'official')
+			return { ok: true, source: src, tag: tag, file: file, native: true };
+		if (url == '' || sha == '') continue;
+		return { ok: true, source: src, tag: tag, file: file, url: url, sha256: sha };
+	}
+	return { ok: false, error: 'no_match' };
+}
+
+function manual_upload_root() { return '/tmp/tailscale/manual'; }
+function manual_upload_lock() { return '/tmp/tailscale/manual-upload.lock'; }
+function manual_upload_stage(id) { return manual_upload_root() + '/' + id + '.tailscaled'; }
+function manual_upload_backup(id) { return manual_upload_root() + '/' + id + '.tailscaled.old'; }
+function manual_upload_meta(id) { return tmpdir() + '/task-' + id + '.manual.json'; }
+
+function manual_upload_status(id, step, percent, error) {
+	let msg = '';
+	if (error != null) msg = error;
+	try { writefile(tmpdir() + '/task-' + id + '.json', sprintf('%J', { step: step, percent: percent, msg: msg, done: false, error: '' })); } catch (e) {}
+}
+
+function manual_upload_clear(id) {
+	let lock = manual_upload_lock(), owner = '';
+	try { owner = trim(readfile(lock + '/id')); } catch (e) {}
+	if (owner == id)
+		sh('rm -f ' + sq(manual_upload_stage(id)) + ' ' + sq(manual_upload_backup(id)) + ' ' + sq(manual_upload_meta(id)) + ' && rm -rf ' + sq(lock));
+	else
+		sh('rm -f ' + sq(manual_upload_stage(id)) + ' ' + sq(manual_upload_backup(id)) + ' ' + sq(manual_upload_meta(id)));
+}
+
+function beginManualUpload(p) {
+	let name = p.name == null ? '' : '' + p.name;
+	let size = null;
+	try { size = int(p.size); } catch (e) { size = null; }
+	if (name != 'tailscaled' || size == null || size < 1 || size > 33554432) return { ok: false, error: 'invalid_upload' };
+	let mount = sh("awk '$2 == \"/tmp\" { print $3; exit }' /proc/mounts");
+	if (trim(mount.out) != 'tmpfs') return { ok: false, error: 'tmpfs_unavailable' };
+	let space = diskSpace('/tmp');
+	if (space.free_bytes < size + 1048576) return { ok: false, error: 'memory_low', free_bytes: space.free_bytes, required_bytes: size + 1048576 };
+	let root = manual_upload_root(), lock = manual_upload_lock();
+	if (sh('mkdir -p ' + sq(root)).rc != 0) return { ok: false, error: 'tmpfs_unavailable' };
+	if (sh('mkdir ' + sq(lock) + ' 2>/dev/null').rc != 0) {
+		let owner = '';
+		try { owner = trim(readfile(lock + '/id')); } catch (e) {}
+		let safeOwner = clean_id(owner), now = sh('date +%s 2>/dev/null');
+		if (safeOwner == null) {
+			let lockStamp = sh('stat -c %Y ' + sq(lock) + ' 2>/dev/null');
+			if (lockStamp.rc != 0 || (int(trim(now.out)) || 0) - (int(trim(lockStamp.out)) || 0) > 60) sh('rm -rf ' + sq(lock));
+		}
+		else {
+			let stamp = sh('stat -c %Y ' + sq(manual_upload_stage(safeOwner)) + ' 2>/dev/null');
+			if (stamp.rc != 0) {
+				let lockStamp = sh('stat -c %Y ' + sq(lock) + ' 2>/dev/null');
+				if (lockStamp.rc != 0 || (int(trim(now.out)) || 0) - (int(trim(lockStamp.out)) || 0) > 60) manual_upload_clear(safeOwner);
+			}
+			else if ((int(trim(now.out)) || 0) - (int(trim(stamp.out)) || 0) > 1800) manual_upload_clear(safeOwner);
+		}
+		if (sh('mkdir ' + sq(lock) + ' 2>/dev/null').rc != 0) return { ok: false, error: 'busy' };
+	}
+	let tc = clock(), id = sprintf('m%d%d', tc[0], tc[1]);
+	if (sh('mkdir -p ' + sq(tmpdir())).rc != 0) {
+		sh('rm -rf ' + sq(lock));
+		return { ok: false, error: 'tmpfs_unavailable' };
+	}
+	if (sh('umask 077; : > ' + sq(manual_upload_stage(id)) + ' && chmod 600 ' + sq(manual_upload_stage(id))).rc != 0) {
+		sh('rm -rf ' + sq(lock));
+		return { ok: false, error: 'tmpfs_unavailable' };
+	}
+	try {
+		writefile(lock + '/id', id);
+		writefile(manual_upload_meta(id), sprintf('%J', { size: size, name: name }));
+		writefile(tmpdir() + '/task-' + id + '.proj', 'tailscale');
+		writefile(tmpdir() + '/task-' + id + '.log', '');
+		manual_upload_status(id, 'upload', 0, '');
+	} catch (e) {
+		manual_upload_clear(id);
+		let currentOwner = '';
+		try { currentOwner = trim(readfile(lock + '/id')); } catch (e) {}
+		if (currentOwner == '') sh('rm -rf ' + sq(lock));
+		return { ok: false, error: 'tmpfs_unavailable' };
+	}
+	return { ok: true, task_id: id, upload_path: manual_upload_stage(id) };
+}
+
+function finishManualUpload(p) {
+	let id = clean_id(p.task_id);
+	if (id == null) return { ok: false, error: 'bad_task' };
+	let owner = '';
+	try { owner = trim(readfile(manual_upload_lock() + '/id')); } catch (e) {}
+	let meta = jread(manual_upload_meta(id));
+	if (owner != id || meta == null) return { ok: false, error: 'upload_incomplete', reason: 'task_state_missing', expected_bytes: meta != null ? meta.size : -1, received_bytes: -1 };
+	let file = manual_upload_stage(id), actual = null;
+	try { actual = stat(file); } catch (e) { actual = null; }
+	let received = actual != null ? (int(actual.size) || 0) : -1;
+	if (received != meta.size) return { ok: false, error: 'upload_incomplete', reason: actual != null ? 'size_mismatch' : 'stage_file_missing', expected_bytes: meta.size, received_bytes: received };
+	manual_upload_status(id, 'verify', 72, '');
+	let td = tmpdir(), cmd = sq(libdir() + '/update.sh') + ' manual-install ' + sq(id);
+	if (sh(cmd + ' >/dev/null 2>&1 & echo $! > ' + sq(td + '/task-' + id + '.pid')).rc != 0) {
+		manual_upload_clear(id);
+		return { ok: false, error: 'install_fail' };
+	}
+	return { ok: true, task_id: id };
+}
+
+function download(p) {
+	let proj = proj_of(p);
+	let td = tmpdir();
+	let src = 'auto';
+	if (p.source != null && p.source != '') {
+		if (index(['gitlab', 'r2', 'github', 'official', 'auto'], p.source) < 0)
+			return { ok: false, error: 'bad_source' };
+		src = '' + p.source;
+	}
+	if (src == 'official' && proj != 'tailscale') return { ok: false, error: 'bad_source' };
+	let ver = (p.version == null || p.version == '') ? 'latest' : '' + p.version;
+	let want = (p.file == null || p.file == '') ? 'auto' : '' + p.file;
+	let arch = (p.arch == null || p.arch == '') ? 'auto' : '' + p.arch;
+	if (proj != 'tailscale') arch = 'auto';
+	let tc = clock();
+	let id = sprintf('t%d%d', tc[0], tc[1]);
+	sh('mkdir -p ' + sq(td));
+	try { writefile(td + '/task-' + id + '.proj', proj); } catch (e) {}
+	let cmd = sq(libdir() + '/update.sh') + ' download ' + sq(proj) + ' ' + sq(id) + ' ' + sq(ver) + ' ' + sq(want) + ' ' + sq(src) + ' ' + sq(arch);
+	sh(cmd + ' >/dev/null 2>&1 & echo $! > ' + sq(td + '/task-' + id + '.pid'));
+	return { task_id: id };
+}
+
+function progress(p) {
+	let id = clean_id(p.task_id);
+	if (id == null) return { error: 'bad_task' };
+	let t = jread(tmpdir() + '/task-' + id + '.json');
+	if (t == null) return { error: 'not_found' };
+	let log = '';
+	try {
+		let txt = readfile(tmpdir() + '/task-' + id + '.log');
+		if (txt != null) {
+			let lines = split(txt, '\n');
+			let n = length(lines);
+			let from = (n > 50) ? n - 50 : 0;
+			for (let i = from; i < n; i++) log = log + lines[i] + '\n';
+		}
+	} catch (e) {}
+
+	t.log = log;
+	let proj = '';
+	try { proj = trim(readfile(tmpdir() + '/task-' + id + '.proj')); } catch (e) { proj = ''; }
+	if (proj != '') t.proj = proj;
+	if (t.done == true && (t.error == null || t.error == '')) {
+		let vr = sh(sq(libdir() + '/update.sh') + ' installed ' + sq(proj || 'tailscale') + ' 2>/dev/null');
+		if (vr.rc == 0) t.installed_version = trim(vr.out);
+	}
+	return t;
+}
+
+function descendants(pid) {
+	let out = [];
+	let seen = {};
+	let work = [pid];
+	seen[pid] = true;
+	for (let i = 0; i < length(work); i++) {
+		let files = null;
+		try { files = glob('/proc/' + work[i] + '/task/*/children'); } catch (e) { files = null; }
+		if (files == null) continue;
+		for (let f in files) {
+			let txt = null;
+			try { txt = readfile(f); } catch (e) { txt = null; }
+			if (txt == null) continue;
+			for (let c in filter(split(trim(txt), ' '), (x) => x != '')) {
+				if (seen[c] == true) continue;
+				seen[c] = true;
+				work[length(work)] = c;
+				out[length(out)] = c;
+			}
+		}
+	}
+	return out;
+}
+function cancelTask(p) {
+	let id = clean_id(p.task_id);
+	if (id == null) return { ok: false, error: 'bad_task' };
+	let td = tmpdir();
+	let manualOwner = '';
+	try { manualOwner = trim(readfile(manual_upload_lock() + '/id')); } catch (e) {}
+	if (manualOwner == id) {
+		let manualStatus = jread(td + '/task-' + id + '.json');
+		if (manualStatus != null && manualStatus.step != 'upload') return { ok: false, error: 'cancel_too_late' };
+	}
+	let pid = null;
+	try { pid = readfile(td + '/task-' + id + '.pid'); } catch (e) { pid = null; }
+	if (pid != null) {
+		pid = trim(pid);
+		let ok = (pid != '');
+		for (let i = 0; i < length(pid); i++) {
+			if (index('0123456789', substr(pid, i, 1)) < 0) ok = false;
+		}
+		if (ok) {
+			let tree = descendants(pid);
+			tree[length(tree)] = pid;
+			for (let p in tree) sh('kill ' + p + ' 2>/dev/null');
+			for (let i = 0; i < 20; i++) {
+				let alive = false;
+				for (let p in tree) {
+					if (sh('kill -0 ' + p + ' 2>/dev/null').rc == 0) alive = true;
+				}
+				if (!alive) break;
+				sh('sleep 0.1');
+			}
+			for (let p in tree) sh('kill -9 ' + p + ' 2>/dev/null');
+		}
+		try { unlink(td + '/task-' + id + '.pid'); } catch (e) {}
+	}
+	if (manualOwner == id) manual_upload_clear(id);
+	try {
+		writefile(td + '/task-' + id + '.json', '{"step":"cancelled","percent":0,"msg":"","done":true,"error":"cancelled"}');
+	} catch (e) {
+		return { ok: false, error: 'mark_fail' };
+	}
+	return { ok: true };
+}
+
+function applyNetwork(p) {
+	let token = replace('' + (p.token || ''), /[^a-zA-Z0-9_-]/g, '');
+	if (token == '') return { accepted: false, error: 'bad_token' };
+	let td = tmpdir();
+	let lock = td + '/operation.lock';
+	let inner = "out=$(" + sq(initd()) + " firewall_apply 2>&1); rc=$?; { echo $rc; date +%s; printf '%s\\n' " + sq(token) + "; printf '%s\\n' \"$out\"; } > " + sq(td + "/fw-apply.stamp");
+	if (sh('mkdir -p ' + sq(td) + ' && mkdir ' + sq(lock) + ' 2>/dev/null').rc != 0)
+		return { accepted: false, busy: true };
+	let cmd = '( ' + inner + '; rmdir ' + sq(lock) + ' 2>/dev/null ) >/dev/null 2>&1 &';
+	if (sh(cmd).rc != 0) {
+		sh('rmdir ' + sq(lock) + ' 2>/dev/null');
+		return { accepted: false, error: 'action_fail' };
+	}
+	return { accepted: true };
+}
+
+function applyCron(p) {
+	let auto = cfg('update', 'auto_update', '0');
+	if (auto == '1') {
+		let channel = cfg('update', 'channel', 'custom');
+		if (channel != 'official') channel = 'custom';
+		let rollback = cfg('update', 'auto_rollback', '1');
+		let spaces = diskSpaces();
+		if (!updateSpaceAllowed(spaces, channel, rollback)) {
+			let summary = updateSpaceSummary(spaces, channel);
+			return { ok: false, error: 'space_insufficient', free_bytes: summary.free_bytes, required_bytes: requiredUpdateSpace(channel, rollback) };
+		}
+	}
+	let days = clean_int(cfg('update', 'every_days', '7'), 7, 1, 30);
+	let jit = clean_int(cfg('update', 'jitter', '600'), 600, 0, 3600);
+	let att = cfg('update', 'at_time', '03:30');
+	let hh = 3, mm = 30;
+	let ap = split(att, ':');
+	if (length(ap) == 2) {
+		hh = clean_int(ap[0], 3, 0, 23);
+		mm = clean_int(ap[1], 30, 0, 59);
+	}
+	let cronf = getenv2('TS_CRON_FILE', '/etc/crontabs/root');
+	let cur = '';
+	try { cur = readfile(cronf); } catch (e) { cur = ''; }
+	if (cur == null) cur = '';
+	let keep = '';
+	for (let ln in split(cur, '\n')) {
+		if (substr(ln, 0, 16) == '# tailscale-auto') continue;
+		if (index(ln, 'update.sh --auto') >= 0 || index(ln, 'update.sh auto') >= 0 || index(ln, 'wrapper.sh auto-update') >= 0) continue;
+		keep = keep + ln + '\n';
+	}
+	if (auto == '1') {
+		let cmd = sq(libdir() + '/update.sh') + ' auto';
+		let line = sprintf('%d %d */%d * * %s\n', mm, hh, days, cmd);
+		if (jit > 0)
+			line = sprintf('%d %d */%d * * sleep $((RANDOM %% %d)); %s\n', mm, hh, days, jit, cmd);
+		keep = keep + '# tailscale-auto-begin\n' + line + '# tailscale-auto-end\n';
+	}
+	try {
+		writefile(cronf, keep);
+	} catch (e) {
+		return { ok: false, error: 'cron_write_fail' };
+	}
+	let cr = sh(sq(getenv2('TS_CRON_INIT', '/etc/init.d/cron')) + ' restart >/dev/null 2>&1');
+	if (cr.rc != 0) return { ok: false, error: 'cron_restart_fail' };
+	return { ok: true };
+}
+
+function routerModel() {
+	let model = '';
+	try { model = trim(readfile('/tmp/sysinfo/model')); } catch (e) { model = ''; }
+	if (model == '') {
+		let br = sh('ubus call system board 2>/dev/null');
+		if (br.rc == 0) {
+			let board = null;
+			try { board = json(br.out); } catch (e) { board = null; }
+			if (board != null && board.model != null) model = '' + board.model;
+		}
+	}
+	if (model == '') {
+		let hn = sh('uname -n 2>/dev/null');
+		if (hn.rc == 0) model = trim(hn.out);
+	}
+	if (model == '') return '';
+	return sh('printf %s ' + sq(model) + " | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g; s/--*/-/g; s/^-//; s/-$//").out;
+}
+
+function currentTailHostname() {
+	let cmd = sq(bindir() + '/tailscale') + ' --socket=' + sq(sockpath()) + ' status --json 2>/dev/null';
+	let r = sh(cmd);
+	if (r.rc != 0) return '';
+	let st = null;
+	try { st = json(r.out); } catch (e) { st = null; }
+	return st != null && st.Self != null && st.Self.HostName != null ? '' + st.Self.HostName : '';
+}
+
+function upCommand(force, useAuthKey) {
+	let args = [sq(bindir() + '/tailscale'), '--socket=' + sq(sockpath()), 'up', '--reset'];
+	let stringOps = [['hostname', '--hostname'], ['operator', '--operator'], ['exit_node', '--exit-node'], ['advertise_routes', '--advertise-routes'], ['login_server', '--login-server'], ['netfilter_mode', '--netfilter-mode'], ['auth_key', '--auth-key']];
+	for (let item in stringOps) {
+		let opt = item[0], flag = item[1];
+		if (force && !useAuthKey && opt == 'auth_key') continue;
+		let val = cfg('up', opt, '');
+		if (opt == 'hostname' && val == '') {
+			val = currentTailHostname();
+			if (val == '') val = routerModel();
+		}
+		val = replace('' + val, /[ \t]/g, '');
+		if (val != '') args[length(args)] = sq(flag + '=' + val);
+		else if (opt == 'advertise_routes') args[length(args)] = sq(flag + '=');
+	}
+	let boolOps = [['accept_dns', '--accept-dns'], ['accept_routes', '--accept-routes'], ['advertise_exit_node', '--advertise-exit-node'], ['exit_node_allow_lan', '--exit-node-allow-lan-access'], ['shields_up', '--shields-up'], ['snat_subnet_routes', '--snat-subnet-routes'], ['ssh', '--ssh'], ['stateful_filtering', '--stateful-filtering']];
+	for (let item in boolOps) {
+		if (item[0] == 'exit_node_allow_lan') {
+			let exitNode = cfg('up', 'exit_node', '');
+			if (exitNode == '' || exitNode == '0') continue;
+		}
+		let val = cfg('up', item[0], '');
+		if (val == '1') args[length(args)] = sq(item[1]);
+		else if (val == '0') args[length(args)] = sq(item[1] + '=false');
+	}
+	if (force) args[length(args)] = '--force-reauth';
+	return join(' ', args);
+}
+
+function upSetCommand() {
+	let args = [sq(bindir() + '/tailscale'), '--socket=' + sq(sockpath()), 'set'];
+	let stringOps = [['hostname', '--hostname'], ['operator', '--operator'], ['exit_node', '--exit-node'], ['advertise_routes', '--advertise-routes'], ['netfilter_mode', '--netfilter-mode']];
+	for (let item in stringOps) {
+		let opt = item[0], flag = item[1];
+		let val = cfg('up', opt, '');
+		val = replace('' + val, /[ \t]/g, '');
+		if (val != '') args[length(args)] = sq(flag + '=' + val);
+		else if (opt == 'advertise_routes') args[length(args)] = sq(flag + '=');
+	}
+	let boolOps = [['accept_dns', '--accept-dns'], ['accept_routes', '--accept-routes'], ['advertise_exit_node', '--advertise-exit-node'], ['exit_node_allow_lan', '--exit-node-allow-lan-access'], ['shields_up', '--shields-up'], ['snat_subnet_routes', '--snat-subnet-routes'], ['ssh', '--ssh'], ['stateful_filtering', '--stateful-filtering']];
+	for (let item in boolOps) {
+		if (item[0] == 'exit_node_allow_lan') {
+			let exitNode = cfg('up', 'exit_node', '');
+			if (exitNode == '' || exitNode == '0') continue;
+		}
+		let val = cfg('up', item[0], '');
+		if (val == '1') args[length(args)] = sq(item[1]);
+		else if (val == '0') args[length(args)] = sq(item[1] + '=false');
+	}
+	return join(' ', args);
+}
+
+function loginUrlCandidate(token) {
+	token = trim('' + (token || ''));
+	while (length(token) > 0 && index('.,;:!?)]}', substr(token, length(token) - 1, 1)) >= 0)
+		token = substr(token, 0, length(token) - 1);
+	if (substr(token, 0, 8) != 'https://' && substr(token, 0, 7) != 'http://')
+		return '';
+	if (index(token, 'tailscale.com/s/') >= 0)
+		return '';
+	return token;
+}
+
+function extractLoginUrl(text) {
+	text = '' + (text || '');
+	let lines = split(text, '\n');
+	let authContext = 0;
+	for (let line in lines) {
+		if (index(line, 'authenticate') >= 0 || index(line, 'authentication') >= 0 || index(line, 'login URL') >= 0 || index(line, 'login link') >= 0)
+			authContext = 3;
+		let tokens = split(replace(line, /[\t\r]+/g, ' '), ' ');
+		for (let token in tokens) {
+			let candidate = loginUrlCandidate(token);
+			if (candidate != '' && authContext > 0)
+				return candidate;
+		}
+		if (authContext > 0)
+			authContext--;
+	}
+	for (let line in lines) {
+		for (let token in split(replace(line, /[\t\r]+/g, ' '), ' ')) {
+			let candidate = loginUrlCandidate(token);
+			if (candidate == '')
+				continue;
+			if (index(candidate, 'login.tailscale.com/a/') >= 0)
+				return candidate;
+			let loginServer = cfg('up', 'login_server', '');
+			if (loginServer != '' && substr(candidate, 0, length(loginServer)) == loginServer)
+				return candidate;
+		}
+	}
+	return '';
+}
+
+function upWaitSocket() {
+	for (let i = 0; i <= SOCKET_WAITS; i++) {
+		if (sh('test -S ' + sq(sockpath()) + ' 2>/dev/null').rc == 0)
+			return true;
+		if (i < SOCKET_WAITS) sh('sleep 1');
+	}
+	return false;
+}
+
+function upLoggedIn() {
+	let cmd = sq(bindir() + '/tailscale') + ' --socket=' + sq(sockpath()) + ' status --json 2>/dev/null';
+	let r = sh_bounded(cmd, 5);
+	let st = null;
+	if (r.rc == 0) {
+		try { st = json(r.out); } catch (e) { st = null; }
+	}
+	let logged = st != null && st.BackendState == 'Running';
+	let output = st != null ? 'BackendState=' + (st.BackendState || 'unknown') : (r.rc == 0 ? '[backend] status output was not valid JSON' : r.out);
+	logTailscale(cmd, r.rc, output);
+	return logged;
+}
+
+function upPidAlive(td) {
+	let pid = null;
+	try { pid = trim(readfile(td + '/up.pid')); } catch (e) { pid = null; }
+	if (pid == null || pid == '') return false;
+	for (let i = 0; i < length(pid); i++) {
+		if (index('0123456789', substr(pid, i, 1)) < 0) return false;
+	}
+	return sh('kill -0 ' + pid + ' 2>/dev/null').rc == 0;
+}
+
+function upCurrentOutput(td) {
+	let log = null;
+	try { log = readfile(td + '/up-url.log'); } catch (e) { log = null; }
+	return log == null ? '' : log;
+}
+
+function upCurrentUrl(td) {
+	return extractLoginUrl(upCurrentOutput(td));
+}
+
+function upSpawn(td, force, useAuthKey) {
+	let log = td + '/up-url.log', pid = td + '/up.pid', lock = td + '/up-spawn';
+	if (sh('mkdir -p ' + sq(td)).rc != 0) return false;
+	if (upPidAlive(td)) return true;
+	if (sh('mkdir ' + sq(lock) + ' 2>/dev/null').rc != 0)
+		return upPidAlive(td) || (sh('test -d ' + sq(lock) + ' 2>/dev/null').rc == 0);
+	let started = false;
+	if (upPidAlive(td)) {
+		started = true;
+	}
+	else {
+		try { unlink(pid); } catch (e) {}
+		try { writefile(log, ''); } catch (e) {}
+		let cmd = upCommand(force ? true : false, useAuthKey ? true : false) + ' ' + sq('--timeout=' + UP_TIMEOUT + 's');
+		if (sh('command -v timeout >/dev/null 2>&1').rc == 0)
+			cmd = 'timeout ' + (UP_TIMEOUT + 60) + ' ' + cmd;
+		let r = sh(cmd + ' > ' + sq(log) + ' 2>&1 & echo $! > ' + sq(pid));
+		started = r.rc == 0;
+	}
+	sh('rmdir ' + sq(lock) + ' 2>/dev/null');
+	return started;
+}
+
+function getLogin(p) {
+	if (sh('test -x ' + sq(bindir() + '/tailscale') + ' 2>/dev/null').rc != 0)
+		return { ok: false, error: 'up_nobin' };
+	if (sh('test -S ' + sq(sockpath()) + ' 2>/dev/null').rc != 0)
+		return { ok: true, pending: true };
+	let statusCmd = sq(bindir() + '/tailscale') + ' --socket=' + sq(sockpath()) + ' status 2>&1';
+	let status = sh(statusCmd);
+	let url = extractLoginUrl(status.out);
+	if (url != '') {
+		logTailscale(statusCmd, status.rc, status.out);
+		return { ok: true, url: url };
+	}
+	let td = tmpdir();
+	let cmd = upCommand(false) + ' ' + sq('--timeout=' + UP_TIMEOUT + 's');
+	if (sh('command -v timeout >/dev/null 2>&1').rc == 0)
+		cmd = 'timeout ' + (UP_TIMEOUT + 60) + ' ' + cmd;
+	if (!upSpawn(td)) {
+		logTailscale(cmd, 'up_spawn', '[backend] Unable to start login command');
+		return { ok: false, error: 'up_spawn' };
+	}
+	let output = upCurrentOutput(td);
+	url = extractLoginUrl(output);
+	if (url != '') {
+		logTailscale(cmd, 'url', output);
+		return { ok: true, url: url };
+	}
+	status = sh(statusCmd);
+	url = extractLoginUrl(status.out);
+	if (url != '') {
+		logTailscale(statusCmd, status.rc, status.out);
+		return { ok: true, url: url };
+	}
+	output = upCurrentOutput(td);
+	url = extractLoginUrl(output);
+	if (url != '') {
+		logTailscale(cmd, 'url', output);
+		return { ok: true, url: url };
+	}
+	if (upPidAlive(td))
+		return { ok: true, pending: true };
+	if (output == '') output = '[backend] Login command exited without a URL; see ' + td + '/up-url.log';
+	logTailscale(cmd, 'up_url', output);
+	return { ok: false, error: 'up_url' };
+}
+
+function logout(p) {
+	let cmd = sq(bindir() + '/tailscale') + ' --socket=' + sq(sockpath()) + ' logout 2>&1';
+	let r = sh(cmd);
+	logTailscale(cmd, r.rc, r.out);
+	if (r.rc == 0) return { ok: true };
+	return { ok: false, error: 'logout_fail' };
+}
+
+function reauth(p) {
+	if (sh('test -x ' + sq(bindir() + '/tailscale') + ' 2>/dev/null').rc != 0)
+		return { ok: false, error: 'up_nobin' };
+	if (!upWaitSocket())
+		return { ok: false, error: 'up_socket' };
+	let td = tmpdir();
+	let useAuthKey = p != null && p.use_auth_key == '1';
+	let cmd = upCommand(true, useAuthKey) + ' ' + sq('--timeout=' + UP_TIMEOUT + 's');
+	if (sh('command -v timeout >/dev/null 2>&1').rc == 0)
+		cmd = 'timeout ' + (UP_TIMEOUT + 60) + ' ' + cmd;
+	if (!upSpawn(td, true, useAuthKey)) {
+		logTailscale(cmd, 'up_spawn', '[backend] Unable to start re-authentication command');
+		return { ok: false, error: 'reauth_spawn' };
+	}
+	let output = upCurrentOutput(td);
+	let url = extractLoginUrl(output);
+	if (url != '') {
+		logTailscale(cmd, 'url', output);
+		return { ok: true, url: url };
+	}
+	let statusCmd = sq(bindir() + '/tailscale') + ' --socket=' + sq(sockpath()) + ' status 2>&1';
+	let status = sh(statusCmd);
+	url = extractLoginUrl(status.out);
+	if (url != '') {
+		logTailscale(statusCmd, status.rc, status.out);
+		return { ok: true, url: url };
+	}
+	output = upCurrentOutput(td);
+	url = extractLoginUrl(output);
+	if (url != '') {
+		logTailscale(cmd, 'url', output);
+		return { ok: true, url: url };
+	}
+	if (upPidAlive(td))
+		return { ok: true, pending: true };
+	if (upLoggedIn())
+		return { ok: true, pending: true };
+	logTailscale(cmd, 'reauth_exit', output || status.out || '[backend] Re-authentication command exited without a login URL');
+	return { ok: false, error: 'reauth_fail' };
+}
+
+function applyUp(p) {
+	if (sh('test -x ' + sq(bindir() + '/tailscale') + ' 2>/dev/null').rc != 0)
+		return { ok: false, error: 'up_nobin' };
+	if (!upWaitSocket())
+		return { ok: false, error: 'up_socket' };
+	let td = tmpdir();
+	sh('mkdir -p ' + sq(td));
+	let cmd;
+	if (cfg('up', 'login_server', '') != '') {
+		cmd = upCommand(false) + ' ' + sq('--timeout=60s') + ' 2>&1';
+		if (sh('command -v timeout >/dev/null 2>&1').rc == 0)
+			cmd = 'timeout 90 ' + cmd;
+	}
+	else {
+		cmd = upSetCommand() + ' 2>&1';
+	}
+	let r = sh(cmd);
+	try { writefile(td + '/last-up.log', r.out); } catch (e) {}
+	logTailscale(cmd, r.rc, r.out);
+	return r.rc == 0 ? { ok: true, applied: true } : { ok: false, error: 'up_apply_fail' };
+}
+function parse_sec(ds) {
+	let parts = split(ds, '.');
+	let sec = int(parts[0]) || 0;
+	let msec = 0;
+	if (length(parts) > 1) {
+		let fr = parts[1];
+		while (length(fr) < 3) fr = fr + '0';
+		msec = int(substr(fr, 0, 3)) || 0;
+	}
+	return sec * 1000 + msec;
+}
+
+function pingPeers(p) {
+	let max = clean_int(p.max, 4, 1, 8);
+	let tmo = clean_int(p.timeout_s, 3, 1, 5);
+	let bin = bindir();
+	let s = sh(sq(bin + '/tailscale') + ' --socket=' + sq(sockpath()) + ' status --json 2>/dev/null');
+	let st = null;
+	if (s.rc == 0) {
+		try { st = json(s.out); } catch (e) { st = null; }
+	}
+	let ips = [];
+	if (st != null && st.Peer != null) {
+		for (let nk, pr in st.Peer) {
+			if (length(ips) >= max) break;
+			if (pr.TailscaleIPs != null && length(pr.TailscaleIPs) > 0) {
+				let pip = pr.TailscaleIPs[0];
+				if (pip != null && pip != '') ips[length(ips)] = pip;
+			}
+		}
+	}
+	let lat = {};
+	for (let ip in ips) {
+		let cmd = sq(bin + '/tailscale') + ' --socket=' + sq(sockpath()) + ' ping --timeout=' + tmo + 's -c 1 ' + sq(ip) + ' 2>&1';
+		let r = sh(cmd);
+		logTailscale(cmd, r.rc, r.out);
+		let ms = null, via = '';
+		for (let ln in split(r.out, '\n')) {
+			let t = trim(ln);
+			if (index(t, 'direct connection not established') >= 0) {
+				if (via == '') via = 'derp';
+				continue;
+			}
+			if (index(t, 'pong from ') < 0) continue;
+			let vi = index(t, ' via ');
+			let ini = index(t, ' in ');
+			if (vi < 0 || ini < 0 || ini < vi) continue;
+			let vs = trim(substr(t, vi + 5, ini - vi - 5));
+			if (length(vs) > 6 && substr(vs, 0, 5) == 'DERP(' && substr(vs, length(vs) - 1, 1) == ')')
+				via = substr(vs, 5, length(vs) - 6);
+			else
+				via = 'direct';
+			let ds = trim(substr(t, ini + 4, length(t) - ini - 4));
+			if (length(ds) >= 2) {
+				if (length(ds) >= 3 && substr(ds, length(ds) - 2, 2) == 'ms')
+					ms = int(substr(ds, 0, length(ds) - 2)) || 0;
+				else if (substr(ds, length(ds) - 1, 1) == 's')
+					ms = parse_sec(substr(ds, 0, length(ds) - 1));
+			}
+		}
+		lat[ip] = { ms: ms, via: via };
+	}
+	try { writefile(tmpdir() + '/ping.json', sprintf('%J', { at: clock()[0], latency: lat })); } catch (e) {}
+	return { latency: lat };
+}
+
+function serviceAction(p) {
+	let act = p.action;
+	if (index(['start', 'stop', 'restart', 'enable', 'disable'], act) < 0)
+		return { accepted: false, error: 'bad_action' };
+	let init = initd();
+	if (act == 'enable' || act == 'disable') {
+		let r = sh(sq(init) + ' ' + act + ' 2>&1');
+		if (r.rc == 0) return { accepted: true };
+		return { accepted: false, error: 'action_fail' };
+	}
+	let td = tmpdir();
+	let lock = td + '/operation.lock';
+	if (sh('mkdir -p ' + sq(td) + ' && mkdir ' + sq(lock) + ' 2>/dev/null').rc != 0)
+		return { accepted: false, busy: true };
+	let cmd = '( ' + sq(init) + ' ' + act + ' >/dev/null 2>&1; rmdir ' + sq(lock) + ' 2>/dev/null ) >/dev/null 2>&1 &';
+	if (sh(cmd).rc != 0) {
+		sh('rmdir ' + sq(lock) + ' 2>/dev/null');
+		return { accepted: false, error: 'action_fail' };
+	}
+	return { accepted: true };
+}
+
+function clearLogs(p) {
+	let td = tmpdir();
+	if (sh('mkdir -p ' + sq(td)).rc != 0)
+		return { ok: false, error: 'log_dir' };
+	let files = ['daemon.log', 'backend.log', 'backend.log.tmp', 'last-up.log'];
+	if (!upPidAlive(td)) files[length(files)] = 'up-url.log';
+	for (let name in files) {
+		if (sh(': > ' + sq(td + '/' + name)).rc != 0)
+			return { ok: false, error: 'log_clear' };
+	}
+	return { ok: true };
+}
+
+function getLogs(p) {
+	let n = clean_int(p.lines, 50, 5, 500);
+	let bin = bindir(), td = tmpdir();
+	let lr = sh('tail -n ' + n + ' ' + sq(td + '/daemon.log') + ' 2>/dev/null');
+	let br = sh('tail -n ' + n + ' ' + sq(td + '/backend.log') + ' 2>/dev/null');
+	let st = sh(sq(bin + '/tailscale') + ' --socket=' + sq(sockpath()) + ' status 2>&1');
+	let vs = sh(sq(bin + '/tailscale') + ' version 2>/dev/null');
+	return { logread: lr.out, backend_log: br.out, status: st.out, version: trim(vs.out) };
+}
+
+function diag(p) {
+	let g = getStatus({});
+	let c = getConfig({});
+	let t = '== tailscale diag ==\n';
+	t = t + sprintf('binary: %s version: %s running: %s logged_in: %s enabled: %s\n', g.binary_ok ? 'ok' : 'MISSING', g.version, g.running ? 'yes' : 'no', g.logged_in ? 'yes' : 'no', g.enabled ? 'yes' : 'no');
+	t = t + 'tail_ips: ' + join(',', g.tail_ips) + '\n';
+	t = t + sprintf('hostname: %s tailnet: %s key_expiry: %s uptime: %d rx: %d tx: %d\n', g.hostname, g.tailnet, g.key_expiry, g.uptime, g.rx_bytes, g.tx_bytes);
+	for (let pr in g.peers)
+		t = t + sprintf('peer %s %s online=%s direct=%s exit=%s approved=%d pending=%d\n', pr.name, pr.ip, pr.online ? 'yes' : 'no', pr.direct ? 'yes' : 'no', pr.exit_active ? 'active' : (pr.exit_option ? 'option' : 'no'), length(pr.approved), length(pr.pending));
+	t = t + sprintf('config: %J\n', c.config);
+	t = t + sprintf('fw: %s zone=%s iface=%s apply=%J\n', g.fw_driver, g.fw_zone ? 'yes' : 'no', g.fw_iface ? 'yes' : 'no', g.fw_apply);
+	let cronf = getenv2('TS_CRON_FILE', '/etc/crontabs/root');
+	let cur = '';
+	try { cur = readfile(cronf); } catch (e) { cur = ''; }
+	if (cur != null) {
+		for (let ln in split(cur, '\n')) {
+			if (index(ln, 'tailscale-auto') >= 0 || index(ln, 'update.sh --auto') >= 0 || index(ln, 'update.sh auto') >= 0 || index(ln, 'wrapper.sh auto-update') >= 0)
+				t = t + 'cron: ' + ln + '\n';
+		}
+	}
+	let rt = sh('ip route show 2>/dev/null');
+	let rn = 0;
+	for (let ln in split(rt.out, '\n')) {
+		if (rn >= 20) break;
+		if (trim(ln) != '') {
+			t = t + 'route: ' + trim(ln) + '\n';
+			rn++;
+		}
+	}
+	return { text: t };
+}
+
+const DISPATCH = { getStatus: getStatus, getConfig: getConfig, setConfig: setConfig, getSources: getSources, refreshSources: refreshSources, resolveFile: resolveFile, download: download, progress: progress, cancelTask: cancelTask, beginManualUpload: beginManualUpload, finishManualUpload: finishManualUpload, applyNetwork: applyNetwork, applyCron: applyCron, getLogin: getLogin, logout: logout, reauth: reauth, applyUp: applyUp, pingPeers: pingPeers, serviceAction: serviceAction, getLogs: getLogs, clearLogs: clearLogs, diag: diag };
+
+if (ARGV[0] == 'list') {
+	let t = {};
+	for (let k in DISPATCH) t[k] = {};
+	printf('%J\n', t);
+	exit(0);
+}
+if (ARGV[0] != 'call') {
+	printf('%J\n', { error: 'bad_verb' });
+	exit(1);
+}
+let m = null;
+if (length(ARGV) > 1) m = ARGV[1];
+let params = {};
+let raw = '';
+try { raw = stdin.read('all'); } catch (e) { raw = ''; }
+if (raw != null && trim(raw) != '') {
+	try { params = json(raw); } catch (e) { params = {}; }
+}
+if (type(params) != 'object') params = {};
+let fn = null;
+if (m != null) fn = DISPATCH[m];
+if (fn == null) {
+	printf('%J\n', { error: 'no_method' });
+	exit(1);
+}
+let res = null;
+try { res = fn(params); } catch (e) { res = { error: 'exception' }; }
+printf('%J\n', res);
+exit(0);

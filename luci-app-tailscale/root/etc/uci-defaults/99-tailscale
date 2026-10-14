@@ -1,0 +1,6 @@
+#!/bin/sh
+
+[ -x /etc/init.d/tailscale ] || exit 0
+/etc/init.d/tailscale enable
+
+exit 0

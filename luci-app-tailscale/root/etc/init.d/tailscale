@@ -1,0 +1,573 @@
+#!/bin/sh /etc/rc.common
+TS_PKG=tailscale
+TS_DEF_TMP=/tmp/tailscale
+TS_DEF_BIN=/usr/sbin
+TS_DEF_STATE=/etc/tailscale
+TS_DEF_SOCKET=/var/run/tailscale/tailscaled.sock
+TS_DEF_TUN=tailscale0
+TS_DEF_LAN=lan
+TS_DEF_WAN=wan
+TS_DEF_BOOTWAIT=30
+TS_SELF_INIT=/etc/init.d/tailscale
+TS_FW_INIT=/etc/init.d/firewall
+TS_NET_INIT=/etc/init.d/network
+
+USE_PROCD=1
+START=95
+STOP=01
+EXTRA_COMMANDS="firewall_apply firewall_clear firewall_status"
+
+ts_uci_get() {
+	local value
+	value="$(uci -q get "${TS_PKG}.$1.$2" 2>/dev/null)"
+	if [ -z "$value" ]; then
+		printf '%s' "$3"
+	else
+		printf '%s' "$value"
+	fi
+}
+
+ts_tmpdir() {
+	local dir
+	dir="$(ts_uci_get main tmp_dir "$TS_DEF_TMP")"
+	mkdir -p "$dir" "$dir/dl" 2>/dev/null
+	printf '%s' "$dir"
+}
+
+ts_effective_tun() {
+	local mode tun
+	mode="$(ts_uci_get main mode 'tun')"
+	if [ "$mode" = "userspace" ]; then
+		printf 'userspace-networking'
+	else
+		printf '%s' "$(ts_uci_get main tun "$TS_DEF_TUN")"
+	fi
+}
+
+ts_running_tun() {
+	local pid tun
+	for pid in $(pidof tailscaled 2>/dev/null); do
+		[ -r "/proc/$pid/cmdline" ] || continue
+		tun="$(tr '\000' '\n' <"/proc/$pid/cmdline" 2>/dev/null | sed -n 's/^--tun=//p' | head -n 1)"
+		if [ -n "$tun" ]; then
+			printf '%s' "$tun"
+			return 0
+		fi
+	done
+	return 1
+}
+
+ts_config_hash() {
+	uci -q show "tailscale.$1" 2>/dev/null | md5sum | awk '{print $1}'
+}
+
+ts_hash_file() {
+	printf '%s/%s.hash' "$(ts_tmpdir)" "$1"
+}
+
+ts_save_hash() {
+	ts_config_hash "$1" >"$(ts_hash_file "$1")"
+}
+
+ts_running() {
+	local state
+	state="$(ts_uci_get main state_dir "$TS_DEF_STATE")"
+	if command -v pgrep >/dev/null 2>&1; then
+		pgrep -f "(^|/)tailscaled --state=$state" >/dev/null 2>&1
+	else
+		pidof tailscaled >/dev/null 2>&1
+	fi
+}
+
+ts_router_model() {
+	local model
+	model="$(cat /tmp/sysinfo/model 2>/dev/null)"
+	if [ -z "$model" ]; then
+		model="$(ubus call system board 2>/dev/null | jsonfilter -e '@.model' 2>/dev/null | head -n 1)"
+	fi
+	if [ -z "$model" ]; then
+		model="$(uname -n 2>/dev/null)"
+	fi
+	printf '%s' "$model"
+}
+
+fw_driver() {
+	if command -v fw4 >/dev/null 2>&1; then
+		printf 'fw4'
+	elif command -v fw3 >/dev/null 2>&1; then
+		printf 'fw3'
+	else
+		printf 'none'
+	fi
+}
+
+fw_forward() {
+	if [ "$4" = "1" ]; then
+		uci -q set "firewall.$1=forwarding"
+		uci -q set "firewall.$1.src=$2"
+		uci -q set "firewall.$1.dest=$3"
+	else
+		uci -q delete "firewall.$1"
+	fi
+}
+
+fw_reload() {
+	if ! "${TS_FW_INIT:-/etc/init.d/firewall}" reload >/dev/null 2>&1; then
+		printf 'reload_fw_fail'
+		return 1
+	fi
+	if ! "${TS_NET_INIT:-/etc/init.d/network}" reload >/dev/null 2>&1; then
+		printf 'reload_net_fail'
+		return 1
+	fi
+	return 0
+}
+
+fw_apply() {
+	local driver iface device zone masq mss iface_en zone_en conflicts zone_go zone_skip reload_mode
+	reload_mode="${1:-full}"
+	driver="$(fw_driver)"
+	if [ "$driver" = "none" ]; then
+		printf 'no_firewall'
+		return 1
+	fi
+	iface="$(ts_uci_get network iface_name 'tailscale')"
+	device="$(ts_uci_get network device 'tailscale0')"
+	zone="$(ts_uci_get network zone_name 'tailscale')"
+	masq="$(ts_uci_get network masq '1')"
+	mss="$(ts_uci_get network mss '1')"
+	iface_en="$(ts_uci_get network iface_enabled '1')"
+	zone_en="$(ts_uci_get network zone_enabled '1')"
+	conflicts="$(ts_uci_get network conflicts 'overwrite')"
+	if [ "$iface_en" = "1" ]; then
+		if uci -q get "network.$iface" >/dev/null 2>&1; then
+			if [ "$(uci -q get "network.$iface.ts_managed")" != "1" ] && [ "$conflicts" = "skip" ]; then
+				iface_en='skipped'
+			fi
+		fi
+		if [ "$iface_en" != "skipped" ]; then
+			uci -q set "network.$iface=interface"
+			uci -q set "network.$iface.proto=none"
+			uci -q set "network.$iface.device=$device"
+			uci -q set "network.$iface.ts_managed=1"
+			uci -q commit network
+		fi
+	else
+		if [ "$(uci -q get "network.$iface.ts_managed")" = "1" ]; then
+			uci -q delete "network.$iface"
+			uci -q commit network
+		fi
+	fi
+	zone_go=''
+	zone_skip=''
+	if [ "$zone_en" = "1" ] && { [ "$iface_en" = "1" ] || [ "$iface_en" = "skipped" ]; }; then
+		zone_go='1'
+		if [ "$conflicts" = "skip" ] && uci -q get firewall.tailscale_zone >/dev/null 2>&1; then
+			zone_go=''
+			zone_skip='1'
+		fi
+	fi
+	if [ "$zone_go" = "1" ]; then
+		uci -q set "firewall.tailscale_zone=zone"
+		uci -q set "firewall.tailscale_zone.name=$zone"
+		uci -q set "firewall.tailscale_zone.network=$iface"
+		uci -q set "firewall.tailscale_zone.input=ACCEPT"
+		uci -q set "firewall.tailscale_zone.output=ACCEPT"
+		uci -q set "firewall.tailscale_zone.forward=REJECT"
+		uci -q set "firewall.tailscale_zone.masq=$masq"
+		uci -q set "firewall.tailscale_zone.mtu_fix=$mss"
+		fw_forward tailscale_fwd_ts_lan "$zone" "$TS_DEF_LAN" "$(ts_uci_get network fwd_ts_lan '1')"
+		fw_forward tailscale_fwd_lan_ts "$TS_DEF_LAN" "$zone" "$(ts_uci_get network fwd_lan_ts '1')"
+		fw_forward tailscale_fwd_ts_wan "$zone" "$TS_DEF_WAN" "$(ts_uci_get network fwd_ts_wan '0')"
+		fw_forward tailscale_fwd_wan_ts "$TS_DEF_WAN" "$zone" "$(ts_uci_get network fwd_wan_ts '0')"
+	elif [ "$zone_skip" != "1" ]; then
+		uci -q delete firewall.tailscale_zone
+		uci -q delete firewall.tailscale_fwd_ts_lan
+		uci -q delete firewall.tailscale_fwd_lan_ts
+		uci -q delete firewall.tailscale_fwd_ts_wan
+		uci -q delete firewall.tailscale_fwd_wan_ts
+	fi
+	uci -q commit firewall
+	if [ "$reload_mode" = "service-start" ]; then
+		if ! "${TS_FW_INIT:-/etc/init.d/firewall}" reload >/dev/null 2>&1; then
+			printf 'reload_fw_fail'
+			return 1
+		fi
+		return 0
+	fi
+	fw_reload
+}
+
+fw_ensure() {
+	local iface iface_en zone_en conflicts needed
+	[ "$(fw_driver)" != "none" ] || return 0
+	iface="$(ts_uci_get network iface_name 'tailscale')"
+	iface_en="$(ts_uci_get network iface_enabled '1')"
+	zone_en="$(ts_uci_get network zone_enabled '1')"
+	conflicts="$(ts_uci_get network conflicts 'overwrite')"
+	needed='0'
+	if [ "$iface_en" = "1" ]; then
+		if ! uci -q get "network.$iface" >/dev/null 2>&1; then
+			needed='1'
+		elif [ "$(uci -q get "network.$iface.ts_managed" 2>/dev/null)" != "1" ]; then
+			if [ "$conflicts" = "skip" ]; then
+				iface_en='skipped'
+			else
+				needed='1'
+			fi
+		fi
+	fi
+	if [ "$zone_en" = "1" ] && { [ "$iface_en" = "1" ] || [ "$iface_en" = "skipped" ]; } && ! uci -q get firewall.tailscale_zone >/dev/null 2>&1; then
+		needed='1'
+	fi
+	if [ "$needed" = "1" ]; then
+		fw_apply service-start
+		return $?
+	fi
+	return 0
+}
+
+fw_attach() {
+	local iface
+	[ "$(ts_uci_get network iface_enabled '1')" = "1" ] || return 0
+	[ "$(ts_uci_get main mode 'tun')" != "userspace" ] || return 0
+	iface="$(ts_uci_get network iface_name 'tailscale')"
+	if command -v ifup >/dev/null 2>&1; then
+		ifup "$iface" >/dev/null 2>&1 || :
+	fi
+}
+
+fw_clear() {
+	local iface
+	iface="$(ts_uci_get network iface_name 'tailscale')"
+	uci -q delete firewall.tailscale_zone
+	uci -q delete firewall.tailscale_fwd_ts_lan
+	uci -q delete firewall.tailscale_fwd_lan_ts
+	uci -q delete firewall.tailscale_fwd_ts_wan
+	uci -q delete firewall.tailscale_fwd_wan_ts
+	uci -q commit firewall
+	if [ "$(uci -q get "network.$iface.ts_managed")" = "1" ]; then
+		uci -q delete "network.$iface"
+		uci -q commit network
+	fi
+	fw_reload
+}
+
+fw_status() {
+	local driver zone iface iface_name
+	driver="$(fw_driver)"
+	iface_name="$(ts_uci_get network iface_name 'tailscale')"
+	zone='false'
+	iface='false'
+	if uci -q get firewall.tailscale_zone >/dev/null 2>&1; then
+		zone='true'
+	fi
+	if [ "$(uci -q get "network.$iface_name.ts_managed")" = "1" ] && [ "$(uci -q get "network.$iface_name.proto")" = "none" ]; then
+		iface='true'
+	fi
+	printf '{"driver":"%s","zone":%s,"iface":%s}' "$driver" "$zone" "$iface"
+}
+up_wait_socket() {
+	local socket="$1" limit="$2" waits=0
+	while [ ! -S "$socket" ]; do
+		if [ "$waits" -ge "$limit" ]; then
+			return 1
+		fi
+		sleep 1
+		waits=$((waits + 1))
+	done
+	return 0
+}
+
+up_logged_in() {
+	"$1/tailscale" --socket="$2" status --json 2>/dev/null | grep -q '"BackendState"[[:space:]]*:[[:space:]]*"Running"'
+}
+
+up_set_service() {
+	local bin="$1" socket="$2" display out rc dir spec opt flag val
+	set -- "$bin/tailscale" "--socket=$socket" set
+	display="tailscale --socket=$socket set"
+	for spec in 'hostname:--hostname' 'operator:--operator' 'exit_node:--exit-node' 'advertise_routes:--advertise-routes' 'netfilter_mode:--netfilter-mode'; do
+		opt="${spec%%:*}"
+		flag="${spec#*:}"
+		val="$(ts_uci_get up "$opt" '')"
+		val="$(printf '%s' "$val" | tr -d ' \t')"
+		if [ -n "$val" ]; then
+			set -- "$@" "$flag=$val"
+			display="$display $flag=$val"
+		fi
+	done
+	for spec in 'accept_dns:--accept-dns' 'accept_routes:--accept-routes' 'advertise_exit_node:--advertise-exit-node' 'exit_node_allow_lan:--exit-node-allow-lan-access' 'shields_up:--shields-up' 'snat_subnet_routes:--snat-subnet-routes' 'ssh:--ssh' 'stateful_filtering:--stateful-filtering'; do
+		opt="${spec%%:*}"
+		flag="${spec#*:}"
+		val="$(ts_uci_get up "$opt" '')"
+		if [ "$val" = "1" ]; then
+			set -- "$@" "$flag"
+			display="$display $flag"
+		elif [ "$val" = "0" ]; then
+			set -- "$@" "$flag=false"
+			display="$display $flag=false"
+		fi
+	done
+	out="$("$@" 2>&1)"
+	rc="$?"
+	dir="$(ts_tmpdir)"
+	printf '%s' "$out" >"$dir/last-up.log"
+	ts_log_tailscale "$display" "$rc" "$out"
+	return "$rc"
+}
+
+ts_log_tailscale() {
+	local command="$1" rc="$2" output="$3" enabled limit_kb limit_bytes size keep tmp dir file
+	enabled="$(ts_uci_get main log_enabled '1')"
+	[ "$enabled" = "1" ] || return 0
+	dir="$(ts_tmpdir)"
+	file="$dir/backend.log"
+	command="$(printf '%s' "$command" | sed 's#https://[^[:space:]]*#[URL redacted]#g; s#http://[^[:space:]]*#[URL redacted]#g; s/tskey-[A-Za-z0-9_-]*/[auth-key redacted]/g')"
+	printf '[%s] $ %s (rc=%s)\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$command" "$rc" >>"$file"
+	if [ -n "$output" ]; then
+		printf '%s\n' "$output" | sed 's#https://[^[:space:]]*#[URL redacted]#g; s#http://[^[:space:]]*#[URL redacted]#g; s/tskey-[A-Za-z0-9_-]*/[auth-key redacted]/g; s/^/>> /' >>"$file"
+	else
+		printf '>> (no output)\n' >>"$file"
+	fi
+	limit_kb="$(ts_uci_get main log_limit_kb '300')"
+	case "$limit_kb" in ''|*[!0-9]*) limit_kb=300 ;; esac
+	[ "$limit_kb" -ge 16 ] 2>/dev/null || limit_kb=16
+	[ "$limit_kb" -le 4096 ] 2>/dev/null || limit_kb=4096
+	limit_bytes=$((limit_kb * 1024))
+	size="$(wc -c <"$file" 2>/dev/null | tr -d ' ')"
+	case "$size" in ''|*[!0-9]*) size=0 ;; esac
+	if [ "$size" -ge "$limit_bytes" ]; then
+		keep=$((limit_bytes / 2))
+		tmp="$file.tmp"
+		tail -c "$keep" "$file" >"$tmp" 2>/dev/null && mv -f "$tmp" "$file"
+	fi
+}
+
+up_service() {
+	local bin="$1" socket="$2" waits="$3" key login_server out model spec opt flag val kind dir display
+	if [ ! -x "$bin/tailscale" ] || ! up_wait_socket "$socket" "$waits"; then
+		return 1
+	fi
+	fw_attach
+	key="$(ts_uci_get up auth_key '')"
+	login_server="$(ts_uci_get up login_server '')"
+	if [ -z "$login_server" ]; then
+		if up_logged_in "$bin" "$socket"; then
+			up_set_service "$bin" "$socket"
+			return $?
+		fi
+		up_set_service "$bin" "$socket" || :
+		if [ -z "$key" ]; then
+			return 0
+		fi
+	fi
+	set -- "$bin/tailscale" "--socket=$socket" up
+	display="tailscale --socket=$socket up"
+	for spec in 'hostname:--hostname' 'operator:--operator' 'exit_node:--exit-node' 'advertise_routes:--advertise-routes' 'login_server:--login-server' 'netfilter_mode:--netfilter-mode' 'auth_key:--auth-key'; do
+		opt="${spec%%:*}"
+		flag="${spec#*:}"
+		val="$(ts_uci_get up "$opt" '')"
+		if [ "$opt" = "hostname" ] && [ -z "$val" ]; then
+			val="$(ts_router_model | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g; s/--*/-/g; s/^-//; s/-$//')"
+		fi
+		val="$(printf '%s' "$val" | tr -d ' \t')"
+		if [ -n "$val" ]; then
+			set -- "$@" "$flag=$val"
+			if [ "$opt" = "auth_key" ]; then
+				display="$display $flag=[redacted]"
+			else
+				display="$display $flag=$val"
+			fi
+		fi
+	done
+	for spec in 'accept_dns:--accept-dns' 'accept_routes:--accept-routes' 'advertise_exit_node:--advertise-exit-node' 'exit_node_allow_lan:--exit-node-allow-lan-access' 'shields_up:--shields-up' 'snat_subnet_routes:--snat-subnet-routes' 'ssh:--ssh' 'stateful_filtering:--stateful-filtering'; do
+		opt="${spec%%:*}"
+		flag="${spec#*:}"
+		val="$(ts_uci_get up "$opt" '')"
+		if [ "$val" = "1" ]; then
+			set -- "$@" "$flag"
+			display="$display $flag"
+		elif [ "$val" = "0" ]; then
+			set -- "$@" "$flag=false"
+			display="$display $flag=false"
+		fi
+	done
+	out="$("$@" 2>&1)"
+	val="$?"
+	dir="$(ts_tmpdir)"
+	printf '%s' "$out" >"$dir/last-up.log"
+	ts_log_tailscale "$display" "$val" "$out"
+	return "$val"
+}
+
+running() {
+	ts_running
+}
+
+apply_derp_preference() {
+	local bin="$1" socket="$2" region attempt
+	region="$(ts_uci_get main derp_preferred_region '0')"
+	case "$region" in
+		''|*[!0-9]*)
+			uci -q set tailscale.main.derp_preferred_region='0'
+			uci -q commit tailscale
+			return 0
+			;;
+		0) return 0 ;;
+	esac
+	if [ ! -x "$bin/tailscale" ]; then
+		uci -q set tailscale.main.derp_preferred_region='0'
+		uci -q commit tailscale
+		return 0
+	fi
+	up_wait_socket "$socket" "$TS_DEF_BOOTWAIT" || return 0
+	for attempt in 1 2 3 4 5; do
+		if "$bin/tailscale" --socket="$socket" debug force-prefer-derp "$region" >/dev/null 2>&1; then
+			return 0
+		fi
+		sleep 1
+	done
+	uci -q set tailscale.main.derp_preferred_region='0'
+	uci -q commit tailscale
+}
+
+install_cli_dispatcher() {
+	local bin="$1" lib="$2" path=/usr/bin/tailscale target
+	[ -x "$lib/cli-dispatch.sh" ] || return 0
+	if [ -L "$path" ]; then
+		target="$(readlink "$path" 2>/dev/null)"
+		case "$target" in
+			"$lib/cli-dispatch.sh") return 0 ;;
+			/usr/sbin/tailscale|"$bin/tailscale") ln -sfn "$lib/cli-dispatch.sh" "$path" 2>/dev/null || : ;;
+			*) return 0 ;;
+		esac
+	elif [ ! -e "$path" ]; then
+		ln -s "$lib/cli-dispatch.sh" "$path" 2>/dev/null || :
+	fi
+}
+
+start_service() {
+	local bin state socket tun port delay socks proxy mode lib uptime
+	if [ "$(ts_uci_get main enabled '0')" != "1" ]; then
+		return 1
+	fi
+	bin="$(ts_uci_get main bin_dir "$TS_DEF_BIN")"
+	state="$(ts_uci_get main state_dir "$TS_DEF_STATE")"
+	socket="$(ts_uci_get main socket "$TS_DEF_SOCKET")"
+	tun="$(ts_uci_get main tun "$TS_DEF_TUN")"
+	port="$(ts_uci_get main port '0')"
+	delay="$(ts_uci_get main start_delay '0')"
+	lib="${TS_LIBDIR:-/usr/libexec/tailscale}"
+	install_cli_dispatcher "$bin" "$lib"
+	if [ ! -x "$bin/tailscaled" ] || [ ! -x "$bin/tailscale" ]; then
+		(
+			"$lib/update.sh" ensure-core && "${TS_SELF_INIT:-/etc/init.d/tailscale}" start
+		) </dev/null >/dev/null 2>&1 &
+		return 0
+	fi
+	if ! ts_running; then
+		"$bin/tailscaled" --cleanup >/dev/null 2>&1 || :
+	fi
+	fw_ensure >/dev/null 2>&1 || :
+	mkdir -p "$state" "$(dirname "$socket")" 2>/dev/null
+	mode="$(ts_uci_get main mode 'tun')"
+	if [ "$mode" = "userspace" ]; then
+		tun='userspace-networking'
+	else
+		mode='tun'
+		if [ ! -c /dev/net/tun ]; then
+			echo "tailscale: no /dev/net/tun"
+			return 1
+		fi
+	fi
+	if [ -z "$TS_NODELAY" ] && [ "$delay" -gt 0 ] 2>/dev/null; then
+		uptime="$(cut -d. -f1 /proc/uptime 2>/dev/null)"
+		case "$uptime" in
+			''|*[!0-9]*) uptime=120 ;;
+		esac
+		if [ "$uptime" -lt 120 ]; then
+			( sleep "$delay"; TS_NODELAY=1 "${TS_SELF_INIT:-/etc/init.d/tailscale}" start ) >/dev/null 2>&1 &
+			return 0
+		fi
+	fi
+	procd_open_instance tailscale
+	procd_set_param command "$lib/wrapper.sh" daemon "$bin/tailscaled" "--state=$state/tailscaled.state" "--statedir=$state" "--socket=$socket" "--tun=$tun" "--port=$port"
+	socks="$(ts_uci_get main socks5 '')"
+	if [ -n "$socks" ]; then
+		procd_append_param command "--socks5-server=$socks"
+	fi
+	proxy="$(ts_uci_get main http_proxy '')"
+	if [ -n "$proxy" ]; then
+		procd_append_param command "--outbound-http-proxy-listen=$proxy"
+	fi
+	procd_set_param stdout 0
+	procd_set_param stderr 0
+	procd_set_param respawn "$(ts_uci_get main respawn_threshold '3600')" "$(ts_uci_get main respawn_timeout '5')" "$(ts_uci_get main respawn_retry '5')"
+	procd_close_instance
+	printf '%s\n' "$tun" >"$(ts_tmpdir)/applied-tun" 2>/dev/null
+	ts_save_hash network
+	ts_save_hash up
+	( up_service "$bin" "$socket" "$TS_DEF_BOOTWAIT"; apply_derp_preference "$bin" "$socket" ) >/dev/null 2>&1 &
+	return 0
+}
+
+reload_service() {
+	local enabled rc running_tun current_tun applied_tun tun_changed network_hash saved_network_hash up_hash saved_up_hash
+	enabled="$(ts_uci_get main enabled '0')"
+	rc=0
+	tun_changed=0
+	current_tun="$(ts_effective_tun)"
+	if ts_running; then
+		applied_tun="$(cat "$(ts_tmpdir)/applied-tun" 2>/dev/null)"
+		if [ -n "$applied_tun" ]; then
+			running_tun="$applied_tun"
+		else
+			running_tun="$(ts_running_tun)"
+		fi
+		if [ -n "$running_tun" ] && [ "$running_tun" != "$current_tun" ]; then
+			tun_changed=1
+			stop >/dev/null 2>&1 || :
+		fi
+	fi
+	network_hash="$(ts_config_hash network)"
+	saved_network_hash="$(cat "$(ts_hash_file network)" 2>/dev/null)"
+	if [ "$tun_changed" = "1" ] || [ -z "$saved_network_hash" ] || [ "$network_hash" != "$saved_network_hash" ]; then
+		firewall_apply >/dev/null 2>&1 || rc=1
+	fi
+	up_hash="$(ts_config_hash up)"
+	saved_up_hash="$(cat "$(ts_hash_file up)" 2>/dev/null)"
+	if [ "$tun_changed" = "1" ]; then
+		printf '{}' | /usr/libexec/rpcd/tailscale call applyCron >/dev/null 2>&1 || rc=1
+		if [ "$enabled" = "1" ]; then
+			start || rc=1
+		fi
+	else
+		printf '{}' | /usr/libexec/rpcd/tailscale call applyCron >/dev/null 2>&1 || rc=1
+		if [ -n "$up_hash" ] && [ "$up_hash" != "$saved_up_hash" ] && ts_running; then
+			( result="$(printf '{}' | /usr/libexec/rpcd/tailscale call applyUp 2>/dev/null)"; case "$result" in *'"ok":true'*) printf '%s\n' "$up_hash" >"$(ts_hash_file up)" ;; esac ) >/dev/null 2>&1 &
+		fi
+	fi
+	return "$rc"
+}
+
+firewall_apply() {
+	fw_apply
+	local rc=$?
+	if [ "$rc" = "0" ]; then
+		ts_save_hash network
+	fi
+	return "$rc"
+}
+
+firewall_clear() {
+	fw_clear
+}
+
+firewall_status() {
+	fw_status
+}
+
+service_triggers() {
+	procd_add_reload_trigger tailscale
+}
