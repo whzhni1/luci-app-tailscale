@@ -9,6 +9,7 @@
 					"getSources",
 					"getVersionFiles",
 					"resolveFile",
+					"getFileSize",
 					"progress",
 					"getLogs",
 					"diag"

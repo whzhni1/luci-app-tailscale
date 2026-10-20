@@ -71,8 +71,17 @@ function sq(s) {
 	return "'" + join("'\\''", split(s || '', "'")) + "'";
 }
 
+function existingPath(path) {
+	let p = '' + (path || '/');
+	while (p != '/' && stat(p) == null) {
+		let i = rindex(p, '/');
+		p = i > 0 ? substr(p, 0, i) : '/';
+	}
+	return p;
+}
+
 function diskSpace(path) {
-	let r = sh('df -Pk ' + sq(path) + " 2>/dev/null | awk 'NR==2 { printf \"%.0f %.0f\\n\", $2 * 1024, $4 * 1024 }'");
+	let r = sh('df -Pk ' + sq(existingPath(path)) + " 2>/dev/null | awk 'NR==2 { printf \"%.0f %.0f\\n\", $2 * 1024, $4 * 1024 }'");
 	if (r.rc != 0) return { path: path, total_bytes: 0, free_bytes: 0 };
 	let fields = split(trim(r.out), ' ');
 	if (length(fields) < 2) return { path: path, total_bytes: 0, free_bytes: 0 };
@@ -94,7 +103,7 @@ function updateSpaceSummary(spaces, channel) {
 	let selected = spaces[location] || { path: '', total_bytes: 0, free_bytes: 0 };
 	for (let i = 1; i < length(names); i++) {
 		let current = spaces[names[i]] || { path: '', total_bytes: 0, free_bytes: 0 };
-		if (current.free_bytes < selected.free_bytes) {
+		if (current.total_bytes > 0 && (selected.total_bytes <= 0 || current.free_bytes < selected.free_bytes)) {
 			selected = current;
 			location = names[i];
 		}
@@ -871,6 +880,17 @@ function resolveFile(p) {
 	return { ok: false, error: 'no_match' };
 }
 
+function getFileSize(p) {
+	let source = p.source == null ? '' : '' + p.source;
+	let file = p.file == null || p.file == '' ? 'auto' : '' + p.file;
+	if (source == '' || source == 'official' || src_list(source) == null || index(file, '/') >= 0)
+		return { ok: false, error: 'bad_file' };
+	let r = sh('TS_METADATA_TIMEOUT=10 TS_METADATA_RETRIES=0 ' + sq(libdir() + '/update.sh') + ' size ' + sq(source) + ' ' + sq(file) + ' 2>/dev/null');
+	let bytes = r.rc == 0 ? int(trim(r.out)) || 0 : 0;
+	if (bytes <= 0) return { ok: false, error: 'no_size' };
+	return { ok: true, bytes: bytes };
+}
+
 function manual_upload_root() { return '/tmp/tailscale/manual'; }
 function manual_upload_lock() { return '/tmp/tailscale/manual-upload.lock'; }
 function manual_upload_stage(id) { return manual_upload_root() + '/' + id + '.tailscaled'; }
@@ -1108,23 +1128,26 @@ function applyCron(p) {
 		hh = clean_int(ap[0], 3, 0, 23);
 		mm = clean_int(ap[1], 30, 0, 59);
 	}
+	let auto = cfg('update', 'auto_update', '0');
+	let cmd = sq(libdir() + '/update.sh') + ' auto';
 	let cronf = getenv2('TS_CRON_FILE', '/etc/crontabs/root');
 	let cur = '';
 	try { cur = readfile(cronf); } catch (e) { cur = ''; }
 	if (cur == null) cur = '';
+	let body = rtrim(cur, '\n');
 	let keep = '';
-	for (let ln in split(cur, '\n')) {
+	for (let ln in (body == '' ? [] : split(body, '\n'))) {
 		if (substr(ln, 0, 16) == '# tailscale-auto') continue;
-		if (index(ln, 'update.sh --auto') >= 0 || index(ln, 'update.sh auto') >= 0 || index(ln, 'wrapper.sh auto-update') >= 0) continue;
+		if (index(ln, cmd) >= 0 || index(ln, 'update.sh --auto') >= 0 || index(ln, 'update.sh auto') >= 0 || index(ln, 'wrapper.sh auto-update') >= 0) continue;
 		keep = keep + ln + '\n';
 	}
 	if (auto == '1') {
-		let cmd = sq(libdir() + '/update.sh') + ' auto';
 		let line = sprintf('%d %d */%d * * %s\n', mm, hh, days, cmd);
 		if (jit > 0)
 			line = sprintf('%d %d */%d * * sleep $((RANDOM %% %d)); %s\n', mm, hh, days, jit, cmd);
 		keep = keep + '# tailscale-auto-begin\n' + line + '# tailscale-auto-end\n';
 	}
+	if (keep == cur) return { ok: true };
 	try {
 		writefile(cronf, keep);
 	} catch (e) {
@@ -1566,7 +1589,7 @@ function diag(p) {
 	return { text: t };
 }
 
-const DISPATCH = { getStatus: getStatus, getConfig: getConfig, setConfig: setConfig, getSources: getSources, getVersionFiles: getVersionFiles, refreshSources: refreshSources, resolveFile: resolveFile, download: download, progress: progress, cancelTask: cancelTask, beginManualUpload: beginManualUpload, finishManualUpload: finishManualUpload, applyNetwork: applyNetwork, applyCron: applyCron, getLogin: getLogin, logout: logout, reauth: reauth, applyUp: applyUp, pingPeers: pingPeers, serviceAction: serviceAction, getLogs: getLogs, clearLogs: clearLogs, removeCore: removeCore, diag: diag };
+const DISPATCH = { getStatus: getStatus, getConfig: getConfig, setConfig: setConfig, getSources: getSources, getVersionFiles: getVersionFiles, refreshSources: refreshSources, resolveFile: resolveFile, getFileSize: getFileSize, download: download, progress: progress, cancelTask: cancelTask, beginManualUpload: beginManualUpload, finishManualUpload: finishManualUpload, applyNetwork: applyNetwork, applyCron: applyCron, getLogin: getLogin, logout: logout, reauth: reauth, applyUp: applyUp, pingPeers: pingPeers, serviceAction: serviceAction, getLogs: getLogs, clearLogs: clearLogs, removeCore: removeCore, diag: diag };
 
 if (ARGV[0] == 'list') {
 	let t = {};

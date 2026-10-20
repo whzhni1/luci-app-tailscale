@@ -13,6 +13,7 @@ const callGetSources = rpc.declare({ object: 'tailscale', method: 'getSources', 
 const callGetVersionFiles = rpc.declare({ object: 'tailscale', method: 'getVersionFiles', params: ['proj', 'source', 'version'] });
 const callRefreshSources = rpc.declare({ object: 'tailscale', method: 'refreshSources', params: ['source', 'proj'] });
 const callResolveFile = rpc.declare({ object: 'tailscale', method: 'resolveFile', params: ['proj', 'source', 'version', 'file', 'arch'] });
+const callGetFileSize = rpc.declare({ object: 'tailscale', method: 'getFileSize', params: ['source', 'file'] });
 const callDownload = rpc.declare({ object: 'tailscale', method: 'download', params: ['proj', 'source', 'version', 'file', 'arch'] });
 const callProgress = rpc.declare({ object: 'tailscale', method: 'progress', params: ['task_id'] });
 const callCancelTask = rpc.declare({ object: 'tailscale', method: 'cancelTask', params: ['task_id'] });
@@ -150,6 +151,7 @@ const api = baseclass.singleton({
 	getVersionFiles(proj, src, version) { return callGetVersionFiles(proj, src, version); },
 	refreshSources(src, proj) { return callRefreshSources(src, proj); },
 	resolveFile(proj, src, ver, file, arch) { return callResolveFile(proj, src, ver, file, arch); },
+	getFileSize(src, file) { return callGetFileSize(src, file); },
 	download(proj, src, ver, file, arch) { return callDownload(proj, src, ver, file, arch); },
 	progress(id) { return callProgress(id); },
 	cancelTask(id) { return callCancelTask(id); },

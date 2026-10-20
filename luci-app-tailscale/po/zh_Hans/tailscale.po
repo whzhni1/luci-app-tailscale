@@ -1040,8 +1040,8 @@ msgstr "不可用"
 msgid "Update channel"
 msgstr "更新渠道"
 
-msgid "GitHub build (under 10M)"
-msgstr "GitHub 编译（小于10M）"
+msgid "GitHub build"
+msgstr "GitHub 编译"
 
 msgid "Choose local subnet"
 msgstr "选择本地子网"

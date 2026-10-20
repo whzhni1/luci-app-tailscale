@@ -40,6 +40,7 @@ return view.extend({
 		let configuredSourceOrder = '' + (Up.source_order || 'gitlab github r2');
 		if (configuredSourceOrder.trim() === 'gitlab r2 github') configuredSourceOrder = 'gitlab github r2';
 		const sourceOptions = configuredSourceOrder.split(/\s+/).filter((x, i, a) => ['gitlab', 'github', 'r2'].includes(x) && a.indexOf(x) === i);
+		const channelLabel = (x) => x === 'official' ? _('Official Tailscale') : _('GitHub build');
 		const sourceLabel = (x) => x === 'gitlab' ? _('GitLab') : x === 'r2' ? _('Cloudflare R2') : x === 'github' ? _('GitHub') : x === 'official' ? _('Official Tailscale') : x;
 		for (const source of ['gitlab', 'github', 'r2'])
 			if (!sourceOptions.includes(source)) sourceOptions.push(source);
@@ -56,8 +57,8 @@ return view.extend({
 			'<div class="seg update-tabs" role="tablist"><button type="button" id="onlineTab" class="on" role="tab" aria-selected="true">' + _('Online download') + '</button><button type="button" id="manualTab" role="tab" aria-selected="false">' + _('Manual upload') + '</button></div>' +
 			'<div id="onlinePanel" role="tabpanel">' +
 			'<div class="frow"><div class="field channel-field"><label>' + _('Update channel') + '</label><select id="dlChannel" class="update-channel-select">' +
-			'<option value="custom"' + (Up.channel !== 'official' ? ' selected' : '') + '>' + _('GitHub build (under 10M)') + '</option>' +
-			'<option value="official"' + (Up.channel === 'official' ? ' selected' : '') + '>' + _('Official Tailscale') + '</option></select><div class="stat-s space-note" id="channelSpaceHint"></div></div></div>' +
+			'<option value="custom"' + (Up.channel !== 'official' ? ' selected' : '') + '>' + channelLabel('custom') + '</option>' +
+			'<option value="official"' + (Up.channel === 'official' ? ' selected' : '') + '>' + channelLabel('official') + '</option></select><div class="stat-s space-note" id="channelSpaceHint"></div></div></div>' +
 			
 			
 			'<div class="trow rollback-row"><div class="t"><b>' + _('Automatic backup and rollback when space permits') + '</b></div><label class="switch"><input type="checkbox" id="rollbackSw"' + (on(Up.auto_rollback == null ? '1' : Up.auto_rollback) ? ' checked' : '') + '><span class="sw"></span></label><div class="field rollback-wait"><label for="serviceWaitSeconds">' + _('Health check (s)') + '</label><input id="serviceWaitSeconds" type="number" min="30" max="600" step="1" value="' + val(Up.service_wait_seconds || '180') + '"></div></div>' +
@@ -202,6 +203,8 @@ return view.extend({
 		const selectedChannel = () => q('#dlChannel').value === 'official' ? 'official' : 'custom';
 		const selectedMirror = () => q('#dlSrc').value || orderOf()[0] || '';
 		const selectedSource = () => selectedChannel() === 'official' ? 'official' : selectedMirror();
+		const mirrorOrder = (source) => [source].concat(sourceOptions.filter((item) => item !== source));
+		const luciMirror = () => (((luciSrc && luciSrc.sources) || [])[0] || {}).name || selectedMirror();
 		const updateArtifactLinks = () => {
 			q('#githubArtifactLink').style.display = '';
 			q('#gitlabArtifactLink').style.display = '';
@@ -259,15 +262,34 @@ return view.extend({
 			updateMatchedDownload();
 			common.main.badges(root, status, true);
 		};
-		const setOfficialChannelLabel = (info) => {
-			const bytes = Number(info && info.download_bytes) || 0;
-			const option = q('#dlChannel').querySelector('option[value="official"]');
-			option.textContent = _('Official Tailscale') + (bytes > 0 ? ' (' + (bytes / 1048576).toFixed(1) + ' MiB)' : '');
+		const setChannelLabel = (channel, bytes) => {
+			const size = Number(bytes) || 0;
+			q('#dlChannel').querySelector('option[value="' + channel + '"]').textContent = channelLabel(channel) + (size > 0 ? ' (' + formatBytes(size) + ')' : '');
 		};
 		const setOfficialLabelFromSources = (data) => {
 			const list = data && data.sources || [];
 			const official = list.find((item) => item.name === 'official');
-			if (official) setOfficialChannelLabel(official.info || {});
+			if (official) setChannelLabel('official', official.info && official.info.download_bytes);
+		};
+		const fileSizeCache = {};
+		let customSizeKey = '';
+		const customSizeFile = () => selectedChannel() === 'custom' && q('#dlFile').value || 'auto';
+		const updateCustomSize = () => {
+			const source = selectedMirror(), file = customSizeFile();
+			if (!source) return;
+			const key = source + '|' + file;
+			if (key === customSizeKey) return;
+			customSizeKey = key;
+			setChannelLabel('custom', fileSizeCache[key]);
+			if (fileSizeCache[key]) return;
+			withTimeout(() => common.api.getFileSize(source, file), SOURCE_TIMEOUT).then((r) => {
+				if (r && r.ok && r.bytes > 0) fileSizeCache[key] = r.bytes;
+				if (customSizeKey === key && root.isConnected) setChannelLabel('custom', fileSizeCache[key]);
+			}).catch(() => {});
+		};
+		const selectFile = (file) => {
+			q('#dlFile').value = file;
+			updateCustomSize();
 		};
 		const updateMatchedDownload = () => {
 			const id = ++matchedLinkRequestId;
@@ -341,7 +363,7 @@ return view.extend({
 			const updatePill = ver && latest ? (updateAvailable ? ' · ' + _('Update available') : ' · ' + _('Latest already')) : '';
 			const layoutNote = check.channel_mismatch === true ? ' · ' + _('Binary layout will switch to the selected channel') : '';
 			q('#newSub').textContent = sourceLabel(ent.name) + updatePill + layoutNote;
-			if (ent.name === 'official') setOfficialChannelLabel(ent.info || {});
+			if (ent.name === 'official') setChannelLabel('official', ent.info && ent.info.download_bytes);
 			if (selectedChannel() === 'official') updateOfficialInfo(ent);
 			paintVersions();
 			updateMatchedDownload();
@@ -366,7 +388,7 @@ return view.extend({
 			const arch = q('#dlArch').value.trim().toLowerCase();
 			if (!chosen && arch && arch !== 'auto') chosen = files.find((x) => x.toLowerCase().indexOf(arch) >= 0) || '';
 			if (!chosen) chosen = files[0] || '';
-			fileSelect.value = chosen;
+			selectFile(chosen);
 			if (files.length === 0) {
 				fileSelect.innerHTML = '<option value="">' + _('No files available') + '</option>';
 				fileSelect.disabled = true;
@@ -383,14 +405,14 @@ return view.extend({
 			currentResolveKey = '';
 			if (!arch || arch === 'auto') {
 				archResolveKey = '';
-				if (currentFile && files.includes(currentFile)) q('#dlFile').value = currentFile;
+				if (currentFile && files.includes(currentFile)) selectFile(currentFile);
 				return;
 			}
 			const direct = files.find((x) => x.toLowerCase().indexOf(arch) >= 0);
 			if (direct) {
 				archResolveKey = '';
 				currentFile = direct;
-				q('#dlFile').value = direct;
+				selectFile(direct);
 				return;
 			}
 			const key = source + '|' + version + '|' + rawArch;
@@ -399,7 +421,7 @@ return view.extend({
 				if (archResolveKey !== key || !root.isConnected) return;
 				if (r && r.ok && files.includes(r.file)) {
 					currentFile = r.file;
-					q('#dlFile').value = r.file;
+					selectFile(r.file);
 				}
 			}).catch(() => {}), 250);
 		};
@@ -550,7 +572,7 @@ return view.extend({
 			});
 		};
 		const loadMirrorSource = (project, source, force, isCurrent, onLoading, onLoaded, onFailed) => {
-			const mirrors = [source].concat(sourceOptions.filter((item) => item !== source));
+			const mirrors = mirrorOrder(source);
 			const complete = (result) => {
 				if (result && isCurrent()) onLoaded(result);
 			};
@@ -638,6 +660,7 @@ return view.extend({
 		};
 		const fillSources = (force) => {
 			const source = selectedSource();
+			updateCustomSize();
 			return Promise.all([loadCoreSource(source, force), loadLuciSource(selectedMirror(), force)]);
 		};
 		const refreshSource = (proj) => {
@@ -678,17 +701,24 @@ return view.extend({
 			const value = Number.parseInt(q('#serviceWaitSeconds').value, 10);
 			return String(Number.isFinite(value) ? Math.max(30, Math.min(600, value)) : 180);
 		};
+		const mainValues = () => ({ bin_dir: q('#dlDir').value.trim() });
+		const updateValues = () => ({
+			channel: selectedChannel(),
+			source_order: mirrorOrder(selectedMirror()).join(' '),
+			arch: q('#dlArch').value.trim() || 'auto',
+			auto_rollback: q('#rollbackSw').checked ? '1' : '0',
+			service_wait_seconds: serviceWaitSeconds()
+		});
+		const saveConfig = (section, values) => common.api.setConfig(section, values).then((saved) => {
+			if (!saved || saved.ok === false) throw new Error('save');
+		});
 		saveAction = () => [
-			['main', { bin_dir: q('#dlDir').value.trim() }],
-			['update', {
-				channel: selectedChannel(),
-				arch: q('#dlArch').value.trim() || 'auto',
-				auto_rollback: q('#rollbackSw').checked ? '1' : '0',
-				service_wait_seconds: serviceWaitSeconds(),
+			['main', mainValues()],
+			['update', Object.assign(updateValues(), {
 				auto_update: q('#cronSw').checked ? '1' : '0',
 				every_days: q('#cronDays').value.trim() || '7',
 				at_time: q('#cronAt').value.trim() || '03:30'
-			}]
+			})]
 		];
 		const taskView = (proj) => proj === 'manual' ? {
 			bar: '#manualBar', step: '#manualStep', pct: '#manualPct', detail: '#manualDet', log: '#manualLog', cancel: '#manualCancelRow', button: '#manualUploadBtn', done: _('Tailscale core uploaded')
@@ -984,6 +1014,7 @@ return view.extend({
 			q('#rollbackSw').addEventListener('change', syncSpaceControls);
 			q('#serviceWaitSeconds').addEventListener('change', () => { q('#serviceWaitSeconds').value = serviceWaitSeconds(); syncSpaceControls(); });
 			q('#dlSrc').addEventListener('change', () => {
+				updateCustomSize();
 				updateArtifactLinks();
 				updateMatchedDownload();
 				loadCoreSource(selectedSource());
@@ -995,15 +1026,14 @@ return view.extend({
 			q('#dlFile').addEventListener('change', () => {
 				cancelFileResolve();
 				currentFile = q('#dlFile').value;
+				updateCustomSize();
 			});
 			q('#dlArch').addEventListener('input', chooseFileForArch);
 			q('#checkBtn').addEventListener('click', () => refreshSource('tailscale'));
 			q('#luciCheck').addEventListener('click', () => refreshSource('luci-app-tailscale'));
 			q('#dlBtn').addEventListener('click', () => {
-				const channel = selectedChannel();
-				const official = channel === 'official';
-				const ent = entryFor();
-				const source = official ? 'official' : ent.name;
+				const official = selectedChannel() === 'official';
+				const source = selectedSource();
 				const version = q('#dlVer').value;
 				const file = official ? 'auto' : q('#dlFile').value;
 				const arch = official ? 'auto' : q('#dlArch').value.trim() || 'auto';
@@ -1011,19 +1041,16 @@ return view.extend({
 					q('#dlStep').textContent = _('No files available');
 					return;
 				}
-				common.api.setConfig('main', { bin_dir: q('#dlDir').value.trim() }).then((saved) => {
-					if (!saved || saved.ok === false) throw new Error('save');
-					return common.api.setConfig('update', { channel: channel, arch: arch, auto_rollback: q('#rollbackSw').checked ? '1' : '0', service_wait_seconds: serviceWaitSeconds() });
-				}).then((saved) => {
-					if (!saved || saved.ok === false) throw new Error('save');
-					startTask('tailscale', source, version, file, arch);
-				}).catch(() => { q('#dlStep').textContent = _('Failed to save'); });
+				saveConfig('main', mainValues())
+					.then(() => saveConfig('update', updateValues()))
+					.then(() => startTask('tailscale', source, version, file, arch))
+					.catch(() => { q('#dlStep').textContent = _('Failed to save'); });
 			});
 			q('#dlCancel').addEventListener('click', () => {
 				if (!activeTask || activeTask.proj !== 'tailscale') return;
 				common.api.cancelTask(activeTask.id).then(() => {}).catch(() => {});
 			});
-			q('#luciBtn').addEventListener('click', () => startTask('luci-app-tailscale', 'auto', 'latest', 'auto', 'auto'));
+			q('#luciBtn').addEventListener('click', () => startTask('luci-app-tailscale', luciMirror(), 'latest', 'auto', 'auto'));
 			q('#cronSw').addEventListener('change', (e) => {
 				q('#cronFields').classList.toggle('open', e.target.checked);
 				syncSpaceControls();

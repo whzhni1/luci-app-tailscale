@@ -21,6 +21,9 @@ TS_DEF_WAN=wan
 TS_DEF_UPWAIT=5
 TS_DEF_BOOTWAIT=30
 TS_DEF_UPTIMEOUT=600
+TS_UPGRADE_MARKER=/tmp/tailscale-luci-app-upgrade
+TS_PURGE_LIST=/tmp/tailscale-luci-app-purge
+TS_BACKUP_FILE=/tmp/tailscale-luci-app-backup.tar.gz
 
 ts_uci_get() {
 	local section="$1" option="$2" default="$3" value
@@ -266,6 +269,10 @@ ts_path_bytes() {
 
 ts_free_bytes() {
 	local path="$1" bytes
+	while [ ! -e "$path" ] && [ "${path%/*}" != "$path" ]; do
+		path="${path%/*}"
+	done
+	[ -n "$path" ] || path=/
 	bytes="$(df -Pk "$path" 2>/dev/null | awk 'NR==2 { printf "%.0f", $4 * 1024 }')"
 	case "$bytes" in ''|*[!0-9]*) bytes=0 ;; esac
 	printf '%s' "$bytes"
@@ -284,6 +291,13 @@ ts_remote_bytes() {
 		bytes="$(printf '%s\n' "$headers" | awk 'BEGIN { IGNORECASE=1 } tolower($1)=="content-length:" { gsub("\r", "", $2); value=$2 } END { if (value ~ /^[0-9]+$/) print value; else print 0 }')"
 	fi
 	case "$bytes" in ''|*[!0-9]*) bytes=0 ;; esac
+	printf '%s' "$bytes"
+}
+
+ts_asset_bytes() {
+	local blob="$1" file="$2" url="$3" bytes
+	bytes="$(grep -A"$TS_DEF_GH_WINDOW" -F "\"name\": \"$file\"" "$blob" 2>/dev/null | grep -o -m1 '"size":[[:space:]]*[0-9]*' | grep -o '[0-9]*$')"
+	case "$bytes" in ''|*[!0-9]*|0) bytes="$(ts_remote_bytes "$url")" ;; esac
 	printf '%s' "$bytes"
 }
 
@@ -720,7 +734,7 @@ core_attempt() {
 		ts_task_log "$id" space_insufficient 'unable to create a staging directory'
 		return 7
 	fi
-	download_bytes="$(ts_remote_bytes "$url")"
+	download_bytes="$(ts_asset_bytes "$blob" "$file" "$url")"
 	free_tmp="$(ts_free_bytes "$dir/dl")"
 	free_bin="$(ts_free_bytes "$bin")"
 	if [ "$download_bytes" -gt 0 ]; then
@@ -871,6 +885,18 @@ core_stop_for_update() {
 	return 0
 }
 
+ts_abs_dir() {
+	local dir="$1"
+	while [ "$dir" != "/" ] && [ "${dir%/}" != "$dir" ]; do
+		dir="${dir%/}"
+	done
+	case "$dir" in
+		/|*/..|*/../*|*/.|*/./*) return 1 ;;
+		/*) printf '%s' "$dir" ;;
+		*) return 1 ;;
+	esac
+}
+
 core_remove() {
 	local dir bin init
 	dir="$(ts_tmpdir)"
@@ -882,25 +908,11 @@ core_remove() {
 		printf 'busy'
 		return 1
 	fi
-	bin="$(ts_uci_get main bin_dir "$TS_DEF_BIN")"
-	while [ "$bin" != "/" ] && [ "${bin%/}" != "$bin" ]; do
-		bin="${bin%/}"
-	done
-	case "$bin" in
-		/*) ;;
-		*)
-			ts_unlock "$dir/download"
-			printf 'invalid_bin_dir'
-			return 1
-			;;
-	esac
-	case "$bin" in
-		/|*/..|*/../*|*/.|*/./*)
-			ts_unlock "$dir/download"
-			printf 'invalid_bin_dir'
-			return 1
-			;;
-	esac
+	if ! bin="$(ts_abs_dir "$(ts_uci_get main bin_dir "$TS_DEF_BIN")")"; then
+		ts_unlock "$dir/download"
+		printf 'invalid_bin_dir'
+		return 1
+	fi
 	init="${TS_SELF_INIT:-/etc/init.d/tailscale}"
 	if ! core_stop_for_update "$init" 30; then
 		ts_unlock "$dir/download"
@@ -1453,6 +1465,20 @@ core_urlhash() {
 	return 1
 }
 
+core_file_bytes() {
+	local file="$2" blob url bytes
+	blob="$(ts_releases "$TS_PKG" "$1")" || return 1
+	if [ -z "$file" ] || [ "$file" = auto ]; then
+		file="$(core_resolve "$blob" latest auto | head -n 1)"
+		[ -n "$file" ] || return 1
+	fi
+	url="$(ts_url "$blob" "$file")"
+	[ -n "$url" ] || return 1
+	bytes="$(ts_asset_bytes "$blob" "$file" "$url")"
+	[ "$bytes" -gt 0 ] || return 1
+	printf '%s' "$bytes"
+}
+
 core_versions() {
 	ts_versions "$1"
 }
@@ -1946,6 +1972,121 @@ update_download() {
 }
 
 
+pkg_upgrading() {
+	local pid="$$" depth=0 args
+	[ "$PKG_UPGRADE" = "1" ] && return 0
+	case " $* " in
+		*" upgrade "*) return 0 ;;
+	esac
+	while [ "$depth" -lt 16 ]; do
+		case "$pid" in
+			''|*[!0-9]*|0|1) return 1 ;;
+		esac
+		args="$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null)"
+		case "${args%% *}" in
+			opkg|*/opkg) case " $args " in *" install "*|*" upgrade "*) return 0 ;; esac ;;
+			apk|*/apk) case " $args " in *" add "*|*" upgrade "*|*" fix "*) return 0 ;; esac ;;
+		esac
+		pid="$(sed -n 's/^PPid:[[:space:]]*//p' "/proc/$pid/status" 2>/dev/null)"
+		depth=$((depth + 1))
+	done
+	return 1
+}
+
+pkg_foreign() {
+	local list
+	for list in /usr/lib/opkg/info/*.list /lib/apk/packages/*.list; do
+		[ -f "$list" ] || continue
+		[ "${list##*/}" = "$TS_PKG_LUCI.list" ] && continue
+		awk -v f="$1" '$1 == f { found = 1; exit } END { exit !found }' "$list" && return 0
+	done
+	return 1
+}
+
+purge_paths() {
+	local dir="$1" name
+	shift
+	[ -n "$dir" ] || return 0
+	case "${dir##*/}" in
+		*tailscale*) printf '%s\n' "$dir" ;;
+		*) for name in "$@"; do printf '%s\n' "$dir"/$name; done ;;
+	esac
+}
+
+state_paths() {
+	purge_paths "$1" 'tailscaled.*' derpmap.cached.json
+}
+
+core_backup() {
+	local tmp rel='' path
+	for path in /etc/config/tailscale $(state_paths "$1"); do
+		[ -e "$path" ] && rel="$rel ${path#/}"
+	done
+	[ -n "$rel" ] || return 0
+	tmp="$(mktemp /tmp/tailscale-luci-app-backup.XXXXXX)" || return 1
+	if tar czf "$tmp" -C / $rel 2>/dev/null; then
+		mv -f "$tmp" "$TS_BACKUP_FILE"
+	else
+		rm -f "$tmp"
+		return 1
+	fi
+}
+
+core_restore() {
+	local stage state
+	[ -f "$TS_BACKUP_FILE" ] && [ -O "$TS_BACKUP_FILE" ] || return 0
+	stage="$(mktemp -d /tmp/tailscale-luci-app-restore.XXXXXX)" || return 1
+	if tar xzf "$TS_BACKUP_FILE" -C "$stage" 2>/dev/null && [ -f "$stage/etc/config/tailscale" ]; then
+		cp -f "$stage/etc/config/tailscale" /etc/config/tailscale
+		state="$(ts_abs_dir "$(ts_uci_get main state_dir "$TS_DEF_STATE")")"
+		if [ -n "$state" ] && [ -d "$stage$state" ]; then
+			mkdir -p "$state" && cp -a "$stage$state/." "$state/"
+		fi
+		rm -f "$TS_BACKUP_FILE"
+	fi
+	rm -rf "$stage"
+}
+
+purge_cron() {
+	local cron="${TS_CRON_FILE:-/etc/crontabs/root}" lib="$1"
+	grep -qE "^# tailscale-auto|$lib/" "$cron" 2>/dev/null || return 0
+	sed -i -e '/^# tailscale-auto/d' -e "\\#$lib/#d" "$cron"
+	"${TS_CRON_INIT:-/etc/init.d/cron}" restart >/dev/null 2>&1
+}
+
+core_uninstall() {
+	local init="${TS_SELF_INIT:-/etc/init.d/tailscale}" lib="${TS_LIBDIR:-/usr/libexec/tailscale}" cli=/usr/bin/tailscale bin state socket file
+	rm -f "$TS_PURGE_LIST"
+	if pkg_upgrading "$@"; then
+		: >"$TS_UPGRADE_MARKER"
+		return 0
+	fi
+	rm -f "$TS_UPGRADE_MARKER"
+	bin="$(ts_abs_dir "$(ts_uci_get main bin_dir "$TS_DEF_BIN")")"
+	state="$(ts_abs_dir "$(ts_uci_get main state_dir "$TS_DEF_STATE")")"
+	socket="$(ts_uci_get main socket "$TS_DEF_SOCKET")"
+	TS_STOP_RELOAD_NETWORK=1 "$init" stop >/dev/null 2>&1
+	"$init" disable >/dev/null 2>&1
+	core_stop_for_update "$init" 15 || killall tailscaled tailscale >/dev/null 2>&1
+	[ -n "$bin" ] && [ -x "$bin/tailscaled" ] && "$bin/tailscaled" --cleanup >/dev/null 2>&1
+	core_backup "$state"
+	purge_cron "$lib"
+	{
+		[ "$(readlink "$cli" 2>/dev/null)" = "$lib/cli-dispatch.sh" ] && printf '%s\n' "$cli"
+		if [ -n "$bin" ] && ! pkg_foreign "$bin/tailscaled" && ! pkg_foreign "$bin/tailscale"; then
+			printf '%s\n' "$bin/tailscaled" "$bin/tailscale" "$bin"/.tailscale-update-* "$bin"/.tailscale-stage-*
+			state_paths "$state"
+			purge_paths "$(ts_abs_dir "${socket%/*}")" "${socket##*/}"
+			printf '%s\n' "$(ts_cache_dir)/tailscale-update"
+		fi
+		purge_paths "$(ts_abs_dir "$(ts_uci_get main tmp_dir "$TS_DEF_TMP")")"
+		for file in /etc/config/tailscale /etc/config/tailscale-opkg /etc/config/tailscale.apk-new /tmp/.uci/tailscale; do
+			pkg_foreign "$file" || printf '%s\n' "$file"
+		done
+	} >"$TS_PURGE_LIST"
+}
+
+
 case "${1:-}" in
 	auto|--auto) update_auto ;;
 	c2n-update) update_c2n ;;
@@ -1959,10 +2100,12 @@ case "${1:-}" in
 	resolve) update_resolve "$2" "$3" "$4" "$5" "$6" ;;
 	download) update_download "$2" "$3" "$4" "$5" "$6" "$7" ;;
 	urlhash) core_urlhash "$2" "$3" ;;
+	size) core_file_bytes "$2" "$3" ;;
 	installed) update_installed "$2" ;;
 	core-versions) core_versions "$2" ;;
 	luci-filevers) luci_filevers "$2" ;;
 	luci-mgr) luci_mgr ;;
-	"") printf 'usage: %s {auto|ensure-core|manual-install|remove-core|list|tags|files|check|resolve|download|urlhash|installed}\n' "${0##*/}" >&2; exit 2 ;;
-	*) printf 'usage: %s {auto|ensure-core|manual-install|remove-core|list|tags|files|check|resolve|download|urlhash|installed}\n' "${0##*/}" >&2; exit 2 ;;
+	uninstall) shift; core_uninstall "$@" ;;
+	restore) core_restore ;;
+	*) printf 'usage: %s {auto|ensure-core|manual-install|remove-core|list|tags|files|check|resolve|download|urlhash|size|installed}\n' "${0##*/}" >&2; exit 2 ;;
 esac
