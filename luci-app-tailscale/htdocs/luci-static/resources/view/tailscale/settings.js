@@ -13,11 +13,11 @@ return view.extend({
 	},
 	handleReset: null,
 	load() {
-		return common.api.getConfig().catch(() => ({})).then((o) => [
-			(o && o.config) || {},
-			common.api.getCachedStatus() || {},
-			(o && o.local_routes) || []
-		]);
+		return common.api.getConfig().catch(() => ({})).then((o) => {
+			const config = (o && o.config) || {};
+			config.router_model = (o && o.router_model) || '';
+			return [config, common.api.getCachedStatus() || {}, (o && o.local_routes) || []];
+		});
 	},
 	toggle(id, title, on, flag, description) {
 		return '<div class="trow"><div class="t"><b>' + title + '</b>' +
@@ -33,6 +33,8 @@ return view.extend({
 		const cfg = data[0] || {}, st = data[1] || {}, localRoutes = Array.isArray(data[2]) ? data[2] : [];
 		const hasStatus = Object.keys(st).length > 0;
 		const M = cfg.main || {}, U = cfg.up || {};
+		const hostnameValue = (U.hostname == null ? '' : '' + U.hostname).trim();
+		const hostnamePlaceholder = cfg.router_model || _('e.g. router-01');
 		const on = (v) => v === '1' || v === 1 || v === true;
 		const val = (v) => common.main.esc(v == null ? '' : v);
 		const routes = ('' + (U.advertise_routes || '')).split(',').map((x) => x.trim()).filter((x) => x !== '');
@@ -78,12 +80,12 @@ return view.extend({
 		const body =
 			'<div class="grid">' +
 			'<div class="card glass"><h3>' + common.icons.icon('settings') + ' ' + _('Basic settings') + '</h3><div class="frow">' +
-			'<div class="field">' + this.fieldLabel(_('Hostname'), '--hostname', _('The name shown to other tailnet devices and MagicDNS; it does not change the router\'s system hostname.')) + '<input id="f_hostname" value="' + val(U.hostname || st.router_model || '') + '"></div>' +
-			'<div class="field">' + this.fieldLabel(_('UDP port'), '--port', _('UDP port used by tailscaled. Set to 0 to choose a port automatically.')) + '<input id="f_port" value="' + val(M.port || '0') + '"></div>' +
-			'<div class="field">' + this.fieldLabel(_('SOCKS5'), '--socks5-server', _('Optional upstream SOCKS5 proxy used for Tailscale connections; leave empty to disable.')) + '<input id="f_socks5" value="' + val(M.socks5) + '"></div>' +
-			'<div class="field">' + this.fieldLabel(_('Outbound HTTP proxy'), '--outbound-http-proxy-listen', _('Address for Tailscale\'s outbound HTTP proxy listener; leave empty to disable.')) + '<input id="f_http_proxy" value="' + val(M.http_proxy) + '"></div>' +
-			'<div class="field">' + this.fieldLabel(_('Operator user'), '--operator', _('Allow this local account to control Tailscale without sudo.')) + '<input id="f_operator" value="' + val(U.operator) + '"></div>' +
-			'<div class="field">' + this.fieldLabel(_('Login server'), '--login-server', _('Control server for this device. Leave empty for the official Tailscale control plane, or enter a Headscale URL.')) + '<input id="f_login_server" value="' + val(U.login_server) + '"></div>' +
+			'<div class="field">' + this.fieldLabel(_('Hostname'), '--hostname', _('The name shown to other tailnet devices and MagicDNS; it does not change the router\'s system hostname.')) + '<input id="f_hostname" value="' + val(hostnameValue) + '" placeholder="' + val(hostnamePlaceholder) + '"></div>' +
+			'<div class="field">' + this.fieldLabel(_('UDP port'), '--port', _('UDP port used by tailscaled. Set to 0 to choose a port automatically.')) + '<input id="f_port" value="' + val(M.port === '0' ? '' : M.port) + '" placeholder="' + _('0 for automatic selection') + '"></div>' +
+			'<div class="field">' + this.fieldLabel(_('SOCKS5'), '--socks5-server', _('Optional upstream SOCKS5 proxy used for Tailscale connections; leave empty to disable.')) + '<input id="f_socks5" value="' + val(M.socks5) + '" placeholder="' + _('e.g. 127.0.0.1:1080') + '"></div>' +
+			'<div class="field">' + this.fieldLabel(_('Outbound HTTP proxy'), '--outbound-http-proxy-listen', _('Address for Tailscale\'s outbound HTTP proxy listener; leave empty to disable.')) + '<input id="f_http_proxy" value="' + val(M.http_proxy) + '" placeholder="' + _('e.g. 127.0.0.1:8080') + '"></div>' +
+			'<div class="field">' + this.fieldLabel(_('Operator user'), '--operator', _('Allow this local account to control Tailscale without sudo.')) + '<input id="f_operator" value="' + val(U.operator) + '" placeholder="' + _('e.g. root') + '"></div>' +
+			'<div class="field">' + this.fieldLabel(_('Login server'), '--login-server', _('Control server for this device. Leave empty for the official Tailscale control plane, or enter a Headscale URL.')) + '<input id="f_login_server" value="' + val(U.login_server) + '" placeholder="' + _('e.g. https://headscale.example.com') + '"></div>' +
 			'</div></div>' +
 			'<div class="card glass network-card"><h3>' + common.icons.icon('network') + ' ' + _('Tailscale network') + '</h3>' +
 			this.toggle('t_accept_dns', _('Accept tailnet DNS'), on(U.accept_dns), '--accept-dns', _('Use DNS settings supplied by the tailnet. This is separate from accepting subnet routes.')) +
@@ -146,7 +148,7 @@ return view.extend({
 			}
 			return [
 				['main', {
-					port: q('#f_port').value.trim(), socks5: q('#f_socks5').value.trim(), http_proxy: q('#f_http_proxy').value.trim(),
+					port: q('#f_port').value.trim() || '0', socks5: q('#f_socks5').value.trim(), http_proxy: q('#f_http_proxy').value.trim(),
 					start_delay: q('#f_start_delay').value.trim(), respawn_threshold: q('#f_respawn_threshold').value.trim(),
 					respawn_timeout: q('#f_respawn_timeout').value.trim(), respawn_retry: q('#f_respawn_retry').value.trim(),
 					state_dir: q('#f_state_dir').value.trim(), socket: q('#f_socket').value.trim(), tmp_dir: q('#f_tmp_dir').value.trim(),

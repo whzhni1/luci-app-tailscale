@@ -13,6 +13,7 @@ TS_DEF_LAN=lan
 TS_DEF_WAN=wan
 TS_DEF_BOOTWAIT=30
 TS_SELF_INIT=/etc/init.d/tailscale
+FW_WORKER_REQUESTED=0
 TS_FW_INIT=/etc/init.d/firewall
 TS_NET_INIT=/etc/init.d/network
 
@@ -104,66 +105,183 @@ fw_driver() {
 
 fw_forward() {
 	if [ "$4" = "1" ]; then
+		if [ "$(uci -q get "firewall.$1" 2>/dev/null)" != "" ] && [ "$(uci -q get "firewall.$1.ts_managed" 2>/dev/null)" != "1" ] && [ "$(ts_uci_get network conflicts 'overwrite')" = "skip" ]; then
+			return 0
+		fi
 		uci -q set "firewall.$1=forwarding"
 		uci -q set "firewall.$1.src=$2"
 		uci -q set "firewall.$1.dest=$3"
-	else
+		uci -q set "firewall.$1.ts_managed=1"
+	elif [ "$(uci -q get "firewall.$1.ts_managed" 2>/dev/null)" = "1" ] || [ "$(ts_uci_get network conflicts 'overwrite')" != "skip" ]; then
 		uci -q delete "firewall.$1"
 	fi
 }
 
-fw_reload() {
+fw_worker_dir() {
+	printf '%s/fw-worker' "$(ts_tmpdir)"
+}
+
+fw_worker_has_pending() {
+	[ -e "$1/pending.firewall" ] || [ -e "$1/pending.network" ]
+}
+
+fw_reload_sync() {
+	local reload_network="${1:-0}" rc=0
+	if [ "$reload_network" = "1" ] && ! "${TS_NET_INIT:-/etc/init.d/network}" reload >/dev/null 2>&1; then
+		logger -t tailscale 'network reload failed' 2>/dev/null
+		rc=1
+	fi
 	if ! "${TS_FW_INIT:-/etc/init.d/firewall}" reload >/dev/null 2>&1; then
-		printf 'reload_fw_fail'
-		return 1
+		logger -t tailscale 'firewall reload failed' 2>/dev/null
+		rc=1
 	fi
-	if ! "${TS_NET_INIT:-/etc/init.d/network}" reload >/dev/null 2>&1; then
-		printf 'reload_net_fail'
-		return 1
+	return "$rc"
+}
+
+fw_worker_run() {
+	local dir="$1" reload_network rc at failed=0
+	while fw_worker_has_pending "$dir"; do
+		reload_network='0'
+		if [ -e "$dir/pending.network" ]; then
+			rm -f "$dir/pending.network"
+			reload_network='1'
+		fi
+		rm -f "$dir/pending.firewall"
+		at="$(date +%s)"
+		if fw_reload_sync "$reload_network"; then
+			if [ "$failed" != "1" ]; then
+				printf 'ok %s\n' "$at" >"$dir/status"
+			fi
+		else
+			rc="$?"
+			failed=1
+			printf 'error %s %s\n' "$at" "$rc" >"$dir/status"
+			rm -f "$(ts_hash_file network)"
+		fi
+	done
+	rm -f "$dir/lock/pid" "$dir/lock/starting"
+	rmdir "$dir/lock" 2>/dev/null
+	if fw_worker_has_pending "$dir"; then
+		fw_worker_start "$dir"
 	fi
+}
+
+fw_worker_start() {
+	local dir="$1" pid
+	if mkdir "$dir/lock" 2>/dev/null; then
+		: >"$dir/lock/starting"
+		(
+			while [ -e "$dir/lock/starting" ]; do
+				sleep 1
+			done
+			fw_worker_run "$dir"
+		) >/dev/null 2>&1 </dev/null &
+		pid="$!"
+		printf '%s\n' "$pid" >"$dir/lock/pid" 2>/dev/null || :
+		rm -f "$dir/lock/starting"
+		return 0
+	fi
+	[ -d "$dir/lock" ]
+}
+
+fw_worker_request() {
+	local reload_network="${1:-0}" dir pid
+	dir="$(fw_worker_dir)"
+	mkdir -p "$dir" || return 1
+	if [ "$reload_network" = "1" ]; then
+		: >"$dir/pending.network" || return 1
+	else
+		: >"$dir/pending.firewall" || return 1
+	fi
+	printf 'pending %s\n' "$(date +%s)" >"$dir/status"
+	FW_WORKER_REQUESTED=1
+	if [ -d "$dir/lock" ]; then
+		pid="$(cat "$dir/lock/pid" 2>/dev/null)"
+		case "$pid" in
+			''|*[!0-9]*) pid='' ;;
+		esac
+		if [ -n "$pid" ]; then
+			if ! kill -0 "$pid" 2>/dev/null; then
+				rm -f "$dir/lock/pid" "$dir/lock/starting"
+				rmdir "$dir/lock" 2>/dev/null
+			fi
+		elif [ -n "$(find "$dir/lock" -maxdepth 0 -mmin +5 2>/dev/null)" ]; then
+			rm -f "$dir/lock/pid" "$dir/lock/starting"
+			rmdir "$dir/lock" 2>/dev/null
+		fi
+	fi
+	fw_worker_start "$dir"
+}
+
+fw_worker_wait() {
+	local timeout="${1:-90}" waited=0 dir status
+	dir="$(fw_worker_dir)"
+	while [ -d "$dir/lock" ] || fw_worker_has_pending "$dir"; do
+		if [ "$waited" -ge "$timeout" ]; then
+			logger -t tailscale 'firewall reload worker timed out' 2>/dev/null
+			return 1
+		fi
+		sleep 1
+		waited=$((waited + 1))
+	done
+	status="$(cat "$dir/status" 2>/dev/null)"
+	case "$status" in
+		error*|pending*) return 1 ;;
+	esac
 	return 0
 }
 
+fw_reload() {
+	fw_worker_request "${1:-0}"
+}
+
 fw_apply() {
-	local driver iface device zone masq mss iface_en zone_en conflicts zone_go zone_skip reload_mode
-	reload_mode="${1:-full}"
+	local driver iface device zone masq mss iface_en zone_en conflicts zone_go zone_skip zone_managed network_changed network_reload
 	driver="$(fw_driver)"
 	if [ "$driver" = "none" ]; then
 		printf 'no_firewall'
 		return 1
 	fi
 	iface="$(ts_uci_get network iface_name 'tailscale')"
-	device="$(ts_uci_get network device 'tailscale0')"
+	device="$(ts_uci_get main tun "$TS_DEF_TUN")"
 	zone="$(ts_uci_get network zone_name 'tailscale')"
 	masq="$(ts_uci_get network masq '1')"
 	mss="$(ts_uci_get network mss '1')"
 	iface_en="$(ts_uci_get network iface_enabled '1')"
 	zone_en="$(ts_uci_get network zone_enabled '1')"
 	conflicts="$(ts_uci_get network conflicts 'overwrite')"
+	network_changed='0'
+	network_reload='0'
 	if [ "$iface_en" = "1" ]; then
 		if uci -q get "network.$iface" >/dev/null 2>&1; then
-			if [ "$(uci -q get "network.$iface.ts_managed")" != "1" ] && [ "$conflicts" = "skip" ]; then
+			if [ "$(uci -q get "network.$iface.ts_managed" 2>/dev/null)" != "1" ] && [ "$conflicts" = "skip" ]; then
 				iface_en='skipped'
 			fi
 		fi
-		if [ "$iface_en" != "skipped" ]; then
+		if [ "$iface_en" != "skipped" ] && { [ "$(uci -q get "network.$iface" 2>/dev/null)" != "interface" ] || [ "$(uci -q get "network.$iface.proto" 2>/dev/null)" != "none" ] || [ "$(uci -q get "network.$iface.device" 2>/dev/null)" != "$device" ] || [ "$(uci -q get "network.$iface.ts_managed" 2>/dev/null)" != "1" ]; }; then
 			uci -q set "network.$iface=interface"
 			uci -q set "network.$iface.proto=none"
 			uci -q set "network.$iface.device=$device"
 			uci -q set "network.$iface.ts_managed=1"
-			uci -q commit network
+			network_changed='1'
+			network_reload='1'
 		fi
 	else
-		if [ "$(uci -q get "network.$iface.ts_managed")" = "1" ]; then
+		if [ "$(uci -q get "network.$iface.ts_managed" 2>/dev/null)" = "1" ]; then
 			uci -q delete "network.$iface"
-			uci -q commit network
+			network_changed='1'
+			network_reload='1'
 		fi
+	fi
+	if [ "$network_changed" = "1" ]; then
+		uci -q commit network
 	fi
 	zone_go=''
 	zone_skip=''
+	zone_managed="$(uci -q get firewall.tailscale_zone.ts_managed 2>/dev/null)"
 	if [ "$zone_en" = "1" ] && { [ "$iface_en" = "1" ] || [ "$iface_en" = "skipped" ]; }; then
 		zone_go='1'
-		if [ "$conflicts" = "skip" ] && uci -q get firewall.tailscale_zone >/dev/null 2>&1; then
+		if [ "$conflicts" = "skip" ] && uci -q get firewall.tailscale_zone >/dev/null 2>&1 && [ "$zone_managed" != "1" ]; then
 			zone_go=''
 			zone_skip='1'
 		fi
@@ -177,26 +295,23 @@ fw_apply() {
 		uci -q set "firewall.tailscale_zone.forward=REJECT"
 		uci -q set "firewall.tailscale_zone.masq=$masq"
 		uci -q set "firewall.tailscale_zone.mtu_fix=$mss"
+		uci -q set "firewall.tailscale_zone.ts_managed=1"
 		fw_forward tailscale_fwd_ts_lan "$zone" "$TS_DEF_LAN" "$(ts_uci_get network fwd_ts_lan '1')"
 		fw_forward tailscale_fwd_lan_ts "$TS_DEF_LAN" "$zone" "$(ts_uci_get network fwd_lan_ts '1')"
 		fw_forward tailscale_fwd_ts_wan "$zone" "$TS_DEF_WAN" "$(ts_uci_get network fwd_ts_wan '0')"
 		fw_forward tailscale_fwd_wan_ts "$TS_DEF_WAN" "$zone" "$(ts_uci_get network fwd_wan_ts '0')"
 	elif [ "$zone_skip" != "1" ]; then
-		uci -q delete firewall.tailscale_zone
-		uci -q delete firewall.tailscale_fwd_ts_lan
-		uci -q delete firewall.tailscale_fwd_lan_ts
-		uci -q delete firewall.tailscale_fwd_ts_wan
-		uci -q delete firewall.tailscale_fwd_wan_ts
+		if [ "$conflicts" != "skip" ] || [ "$zone_managed" = "1" ]; then
+			uci -q delete firewall.tailscale_zone
+		fi
+		for sid in tailscale_fwd_ts_lan tailscale_fwd_lan_ts tailscale_fwd_ts_wan tailscale_fwd_wan_ts; do
+			if [ "$conflicts" != "skip" ] || [ "$(uci -q get "firewall.$sid.ts_managed" 2>/dev/null)" = "1" ]; then
+				uci -q delete "firewall.$sid"
+			fi
+		done
 	fi
 	uci -q commit firewall
-	if [ "$reload_mode" = "service-start" ]; then
-		if ! "${TS_FW_INIT:-/etc/init.d/firewall}" reload >/dev/null 2>&1; then
-			printf 'reload_fw_fail'
-			return 1
-		fi
-		return 0
-	fi
-	fw_reload
+	fw_reload "$network_reload"
 }
 
 fw_ensure() {
@@ -222,7 +337,7 @@ fw_ensure() {
 		needed='1'
 	fi
 	if [ "$needed" = "1" ]; then
-		fw_apply service-start
+		fw_apply
 		return $?
 	fi
 	return 0
@@ -239,19 +354,49 @@ fw_attach() {
 }
 
 fw_clear() {
-	local iface
+	local iface conflicts zone_managed sid reload_network skip_worker
+	reload_network="${1:-0}"
+	skip_worker="${2:-0}"
 	iface="$(ts_uci_get network iface_name 'tailscale')"
-	uci -q delete firewall.tailscale_zone
-	uci -q delete firewall.tailscale_fwd_ts_lan
-	uci -q delete firewall.tailscale_fwd_lan_ts
-	uci -q delete firewall.tailscale_fwd_ts_wan
-	uci -q delete firewall.tailscale_fwd_wan_ts
+	conflicts="$(ts_uci_get network conflicts 'overwrite')"
+	zone_managed="$(uci -q get firewall.tailscale_zone.ts_managed 2>/dev/null)"
+	if [ "$conflicts" != "skip" ] || [ "$zone_managed" = "1" ]; then
+		uci -q delete firewall.tailscale_zone
+	fi
+	for sid in tailscale_fwd_ts_lan tailscale_fwd_lan_ts tailscale_fwd_ts_wan tailscale_fwd_wan_ts; do
+		if [ "$conflicts" != "skip" ] || [ "$(uci -q get "firewall.$sid.ts_managed" 2>/dev/null)" = "1" ]; then
+			uci -q delete "firewall.$sid"
+		fi
+	done
 	uci -q commit firewall
-	if [ "$(uci -q get "network.$iface.ts_managed")" = "1" ]; then
+	if [ "$skip_worker" != "1" ] && [ "$(uci -q get "network.$iface.ts_managed" 2>/dev/null)" = "1" ]; then
 		uci -q delete "network.$iface"
 		uci -q commit network
 	fi
-	fw_reload
+	if [ "$skip_worker" != "1" ]; then
+		fw_reload "$reload_network"
+	fi
+}
+
+stop_service() {
+	local reload_network skip_worker
+	case "${TS_STOP_KEEP_CONFIG:-0}" in
+		1|true|yes|on) return 0 ;;
+	esac
+	reload_network="${TS_STOP_RELOAD_NETWORK:-$(ts_uci_get network reload_network_on_stop '1')}"
+	case "$reload_network" in
+		1|true|yes|on) reload_network=1 ;;
+		*) reload_network=0 ;;
+	esac
+	skip_worker="${TS_STOP_SKIP_WORKER:-0}"
+	fw_clear "$reload_network" "$skip_worker"
+}
+
+restart() {
+	trap '' TERM
+	TS_STOP_RELOAD_NETWORK=0 TS_STOP_SKIP_WORKER=1 stop "$@"
+	trap - TERM
+	start "$@"
 }
 
 fw_status() {
@@ -346,9 +491,13 @@ ts_log_tailscale() {
 }
 
 up_service() {
-	local bin="$1" socket="$2" waits="$3" key login_server out model spec opt flag val kind dir display
+	local bin="$1" socket="$2" waits="$3" wait_worker="${4:-0}" key login_server out model spec opt flag val kind dir display worker_dir
 	if [ ! -x "$bin/tailscale" ] || ! up_wait_socket "$socket" "$waits"; then
 		return 1
+	fi
+	worker_dir="$(fw_worker_dir)"
+	if [ "$wait_worker" = "1" ] || [ -d "$worker_dir/lock" ] || fw_worker_has_pending "$worker_dir"; then
+		fw_worker_wait || return 1
 	fi
 	fw_attach
 	key="$(ts_uci_get up auth_key '')"
@@ -449,7 +598,7 @@ install_cli_dispatcher() {
 }
 
 start_service() {
-	local bin state socket tun port delay socks proxy mode lib uptime
+	local bin state socket tun port delay socks proxy mode lib uptime wait_worker worker_dir
 	if [ "$(ts_uci_get main enabled '0')" != "1" ]; then
 		return 1
 	fi
@@ -470,7 +619,16 @@ start_service() {
 	if ! ts_running; then
 		"$bin/tailscaled" --cleanup >/dev/null 2>&1 || :
 	fi
-	fw_ensure >/dev/null 2>&1 || :
+	FW_WORKER_REQUESTED=0
+	wait_worker="${TS_START_WAIT_FW_WORKER:-0}"
+	if ! fw_ensure >/dev/null 2>&1; then
+		logger -t tailscale 'failed to queue network configuration reload' 2>/dev/null
+		return 1
+	fi
+	worker_dir="$(fw_worker_dir)"
+	if [ "$FW_WORKER_REQUESTED" = "1" ] || [ -d "$worker_dir/lock" ] || fw_worker_has_pending "$worker_dir"; then
+		wait_worker=1
+	fi
 	mkdir -p "$state" "$(dirname "$socket")" 2>/dev/null
 	mode="$(ts_uci_get main mode 'tun')"
 	if [ "$mode" = "userspace" ]; then
@@ -488,7 +646,7 @@ start_service() {
 			''|*[!0-9]*) uptime=120 ;;
 		esac
 		if [ "$uptime" -lt 120 ]; then
-			( sleep "$delay"; TS_NODELAY=1 "${TS_SELF_INIT:-/etc/init.d/tailscale}" start ) >/dev/null 2>&1 &
+			( sleep "$delay"; TS_NODELAY=1 TS_START_WAIT_FW_WORKER="$wait_worker" "${TS_SELF_INIT:-/etc/init.d/tailscale}" start ) >/dev/null 2>&1 &
 			return 0
 		fi
 	fi
@@ -509,7 +667,7 @@ start_service() {
 	printf '%s\n' "$tun" >"$(ts_tmpdir)/applied-tun" 2>/dev/null
 	ts_save_hash network
 	ts_save_hash up
-	( up_service "$bin" "$socket" "$TS_DEF_BOOTWAIT"; apply_derp_preference "$bin" "$socket" ) >/dev/null 2>&1 &
+	( up_service "$bin" "$socket" "$TS_DEF_BOOTWAIT" "$wait_worker"; apply_derp_preference "$bin" "$socket" ) >/dev/null 2>&1 &
 	return 0
 }
 
@@ -528,7 +686,7 @@ reload_service() {
 		fi
 		if [ -n "$running_tun" ] && [ "$running_tun" != "$current_tun" ]; then
 			tun_changed=1
-			stop >/dev/null 2>&1 || :
+			TS_STOP_RELOAD_NETWORK=0 TS_STOP_SKIP_WORKER=1 stop >/dev/null 2>&1 || :
 		fi
 	fi
 	network_hash="$(ts_config_hash network)"
@@ -556,6 +714,7 @@ firewall_apply() {
 	fw_apply
 	local rc=$?
 	if [ "$rc" = "0" ]; then
+		fw_worker_wait || return 1
 		ts_save_hash network
 	fi
 	return "$rc"
@@ -572,4 +731,3 @@ firewall_status() {
 service_triggers() {
 	procd_add_reload_trigger tailscale
 }
-

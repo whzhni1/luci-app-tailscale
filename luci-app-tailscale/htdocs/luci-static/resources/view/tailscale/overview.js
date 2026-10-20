@@ -36,7 +36,11 @@ return view.extend({
 		for (const p of (s.peers || []).slice(0, 7))
 			rest.push({ name: p.name || p.ip, ms: p.online ? this.latMs(s, p.ip) : -1, on: !!p.online });
 		const all = [self].concat(rest);
-		const cx = 300, cy = 130, rx = 225, ry = 92;
+		const shortLabel = (value) => {
+			const text = '' + (value || '');
+			return text.length > 14 ? text.slice(0, 13) + '…' : text;
+		};
+		const cx = 300, cy = 140, rx = 225, ry = 100;
 		let h = '';
 		for (let i = 1; i < all.length; i++) {
 			const a = -Math.PI / 2 + (i / all.length) * Math.PI * 2;
@@ -45,18 +49,19 @@ return view.extend({
 			const cls = ms === -1 ? ' off' : ms === -2 ? '' : ms <= 100 ? '' : ms <= 250 ? ' warn' : ' err';
 			h += '<line class="tlink' + cls + '" x1="' + cx + '" y1="' + cy + '" x2="' + x + '" y2="' + y + '"/>';
 		}
-		h += '<circle class="me-pulse" cx="' + cx + '" cy="' + cy + '" r="34"><animate attributeName="r" values="30;46" dur="2.2s" repeatCount="indefinite"/></circle>';
-		h += '<circle class="tnode me" cx="' + cx + '" cy="' + cy + '" r="30"/><text class="ttxt" x="' + cx + '" y="' + (cy - 1) + '">' + common.main.esc(self.name) + '</text><text class="tsub" x="' + cx + '" y="' + (cy + 14) + '">' + _('This host') + '</text>';
+		h += '<circle class="me-pulse" cx="' + cx + '" cy="' + cy + '" r="39"><animate attributeName="r" values="36;52" dur="2.2s" repeatCount="indefinite"/></circle>';
+		h += '<circle class="tnode me" cx="' + cx + '" cy="' + cy + '" r="35"><title>' + common.main.esc(self.name) + '</title></circle><text class="ttxt" x="' + cx + '" y="' + (cy - 1) + '">' + common.main.esc(shortLabel(self.name)) + '</text><text class="tsub" x="' + cx + '" y="' + (cy + 17) + '">' + _('This host') + '</text>';
 		for (let i = 1; i < all.length; i++) {
 			const a = -Math.PI / 2 + (i / all.length) * Math.PI * 2;
 			const x = (cx + rx * Math.cos(a)).toFixed(0), y = (cy + ry * Math.sin(a)).toFixed(0);
 			const sub = !all[i].on ? _('Offline') : all[i].ms === -2 ? _('Online') : all[i].ms + 'ms';
-			h += '<circle class="tnode' + (all[i].on ? ' on' : '') + '" cx="' + x + '" cy="' + y + '" r="27"/>';
-			h += '<text class="ttxt" x="' + x + '" y="' + (+y - 1) + '">' + common.main.esc(all[i].name) + '</text>';
-			h += '<text class="tsub" x="' + x + '" y="' + (+y + 14) + '">' + common.main.esc(sub) + '</text>';
+			h += '<circle class="tnode' + (all[i].on ? ' on' : '') + '" cx="' + x + '" cy="' + y + '" r="31"><title>' + common.main.esc(all[i].name) + '</title></circle>';
+			h += '<text class="ttxt" x="' + x + '" y="' + (+y - 1) + '">' + common.main.esc(shortLabel(all[i].name)) + '</text>';
+			h += '<text class="tsub" x="' + x + '" y="' + (+y + 17) + '">' + common.main.esc(sub) + '</text>';
 		}
 		return h;
 	},
+
 	trafficPath(a, max) {
 		let d = '';
 		for (let j = 0; j < a.length; j++) {
@@ -111,13 +116,13 @@ return view.extend({
 			'<circle id="spaceRing" cx="60" cy="60" r="52" class="ring-fg" stroke="#34d399"/>' +
 			'<text x="60" y="60" id="spacePct">—</text><text x="60" y="78" class="ring-lab">' + _('Available space') + '</text></svg>' +
 			'<div class="stat-s" id="spaceAbs">—</div></div></div></div>' +
-			'<div class="card glass"><h3>' + common.icons.icon('network') + ' ' + _('Topology') + '</h3>' +
-			'<svg id="topo" width="600" height="260" viewBox="0 0 600 260">' + this.topoSvg(s) + '</svg>' +
-			'<div class="tlegend legend-center">' +
+			'<div class="card glass topology-card"><div class="topology-header"><h3>' + common.icons.icon('network') + ' ' + _('Topology') + '</h3>' +
+			'<div class="tlegend topology-legend">' +
 			'<span><i class="swd" style="background:var(--ok)"></i>≤100ms</span>' +
 			'<span><i class="swd" style="background:var(--warn)"></i>100–250ms</span>' +
 			'<span><i class="swd" style="background:var(--err)"></i>&gt;250ms</span>' +
-			'<span><i class="swd" style="background:var(--muted)"></i>' + _('Offline') + '</span></div>' +
+			'<span><i class="swd" style="background:var(--muted)"></i>' + _('Offline') + '</span></div></div>' +
+			'<svg id="topo" width="600" height="280" viewBox="0 0 600 280">' + this.topoSvg(s) + '</svg>' +
 			'<div class="stat-s legend-center" id="topoNote"></div></div></div>';
 		const d = document.createElement('div');
 		d.innerHTML = common.main.shell('overview', body);
@@ -142,11 +147,12 @@ return view.extend({
 			down.push(0);
 			up.push(0);
 		}
-		const paintPowerButton = (enabled) => {
+		const paintPowerButton = (enabled, waiting) => {
 			const button = root.querySelector('#runToggle');
 			button.setAttribute('aria-pressed', enabled ? 'true' : 'false');
-			button.classList.toggle('is-enabled', !!enabled);
-			button.classList.toggle('is-disabled', !enabled);
+			button.classList.toggle('is-waiting', !!waiting);
+			button.classList.toggle('is-enabled', !!enabled && !waiting);
+			button.classList.toggle('is-disabled', !enabled && !waiting);
 			button.classList.add('breathing');
 		};
 		const paintRun = (st) => {
@@ -155,7 +161,7 @@ return view.extend({
 			el.textContent = '● ' + (!running ? _('Not running') : loggedIn ? _('Logged in') : reconnecting ? _('Reconnecting') : _('Not logged in'));
 			el.style.color = !running ? 'var(--muted)' : loggedIn ? 'var(--ok)' : reconnecting ? 'var(--warn)' : 'var(--err)';
 			sub.textContent = !st.binary_ok ? _('Core missing') : !running ? '' : reconnecting ? _('Waiting for Tailscale to reconnect') : loggedIn ? '' : _('Running but not logged in, click to login');
-			paintPowerButton(pendingEnabled == null ? !!st.enabled : pendingEnabled);
+			paintPowerButton(pendingEnabled == null ? !!st.enabled : pendingEnabled, reconnecting);
 			toggle.disabled = !st.binary_ok || busy;
 			restart.disabled = !st.binary_ok || busy;
 			const canLogin = !!st.binary_ok && !!st.running && !busy && !reconnecting;
@@ -341,12 +347,14 @@ return view.extend({
 			busy = true;
 			root.querySelector('#transitionText').textContent = text;
 			root.querySelector('#runTransition').classList.add('show', 'breathing');
+			paintPowerButton(pendingEnabled == null ? !!current.enabled : pendingEnabled, true);
 			root.querySelector('#runToggle').disabled = true;
 			root.querySelector('#restartBtn').disabled = true;
 		};
 		const hideTransition = () => {
 			busy = false;
 			root.querySelector('#runTransition').classList.remove('show', 'breathing');
+			paintPowerButton(pendingEnabled == null ? !!current.enabled : pendingEnabled, !!current.auth_reconnecting);
 			root.querySelector('#runToggle').disabled = !current.binary_ok;
 			root.querySelector('#restartBtn').disabled = !current.binary_ok;
 		};

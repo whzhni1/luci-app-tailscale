@@ -14,10 +14,8 @@ return view.extend({
 	},
 	handleReset: null,
 	load() {
-		return Promise.all([
-			common.api.getConfig().then((o) => (o && o.config) || {}).catch(() => ({})),
-			common.api.getStatus(true).then((s) => s || {}).catch(() => ({}))
-		]);
+		const status = common.api.getCachedStatus() || {};
+		return common.api.getConfig().then((o) => [(o && o.config) || {}, status]).catch(() => [{}, status]);
 	},
 	normTag(t) {
 		t = '' + (t || '');
@@ -33,14 +31,17 @@ return view.extend({
 		return 0;
 	},
 	render(data) {
-		const cfg = data[0] || {}, st = data[1] || {};
+		const cfg = data[0] || {};
+		let st = data[1] || {};
 		const Up = cfg.update || {}, M = cfg.main || {};
 		const on = (v) => v === '1' || v === 1 || v === true;
 		const val = (v) => common.main.esc(v == null ? '' : v);
 		const ver = st.version ? ('' + st.version).split(/[ \n]/)[0] : '';
-		const sourceOptions = ('' + (Up.source_order || 'gitlab r2 github')).split(/\s+/).filter((x, i, a) => ['gitlab', 'r2', 'github'].includes(x) && a.indexOf(x) === i);
+		let configuredSourceOrder = '' + (Up.source_order || 'gitlab github r2');
+		if (configuredSourceOrder.trim() === 'gitlab r2 github') configuredSourceOrder = 'gitlab github r2';
+		const sourceOptions = configuredSourceOrder.split(/\s+/).filter((x, i, a) => ['gitlab', 'github', 'r2'].includes(x) && a.indexOf(x) === i);
 		const sourceLabel = (x) => x === 'gitlab' ? _('GitLab') : x === 'r2' ? _('Cloudflare R2') : x === 'github' ? _('GitHub') : x === 'official' ? _('Official Tailscale') : x;
-		for (const source of ['gitlab', 'r2', 'github'])
+		for (const source of ['gitlab', 'github', 'r2'])
 			if (!sourceOptions.includes(source)) sourceOptions.push(source);
 		const body =
 			'<div class="grid"><div class="grid g2">' +
@@ -59,13 +60,13 @@ return view.extend({
 			'<option value="official"' + (Up.channel === 'official' ? ' selected' : '') + '>' + _('Official Tailscale') + '</option></select><div class="stat-s space-note" id="channelSpaceHint"></div></div></div>' +
 			
 			
-			'<div class="trow rollback-row"><div class="t"><b>' + _('Automatic rollback on failure') + '</b></div><label class="switch"><input type="checkbox" id="rollbackSw"' + (on(Up.auto_rollback == null ? '1' : Up.auto_rollback) ? ' checked' : '') + '><span class="sw"></span></label></div>' +
+			'<div class="trow rollback-row"><div class="t"><b>' + _('Automatic backup and rollback when space permits') + '</b></div><label class="switch"><input type="checkbox" id="rollbackSw"' + (on(Up.auto_rollback == null ? '1' : Up.auto_rollback) ? ' checked' : '') + '><span class="sw"></span></label><div class="field rollback-wait"><label for="serviceWaitSeconds">' + _('Health check (s)') + '</label><input id="serviceWaitSeconds" type="number" min="30" max="600" step="1" value="' + val(Up.service_wait_seconds || '180') + '"></div></div>' +
 			'<div class="stat-s space-note" id="rollbackHint"></div>' +
 			'<div id="customFields"><div class="frow">' +
 			'<div class="field"><label>' + _('Mirror source') + '</label><select id="dlSrc">' + sourceOptions.map((x, i) => '<option value="' + common.main.esc(x) + '"' + (i === 0 ? ' selected' : '') + '>' + common.main.esc(sourceLabel(x)) + '</option>').join('') + '</select></div>' +
 			'<div class="field"><label>' + _('Version') + '</label><select id="dlVer"><option value="">' + _('Loading versions') + '</option></select></div>' +
 			'<div class="field"><label>' + _('File list') + '</label><select id="dlFile"><option value="">' + _('Loading files') + '</option></select></div>' +
-			'<div class="field"><label>' + _('Arch') + '</label><input id="dlArch" value="' + val(Up.arch || 'auto') + '" placeholder="' + _('Auto') + '"></div></div></div>' +
+			'<div class="field"><label>' + _('Arch') + '</label><input id="dlArch" value="' + val(Up.arch || 'auto') + '" placeholder="' + _('Auto') + '"><div class="stat-s arch-note">' + _('Use auto to detect the architecture, or specify it manually, for example x86_64 or mips-hardfloat.') + '</div></div></div></div>' +
 			'<div class="frow update-action-row"><div class="field"><label>' + _('Install dir') + '</label><input id="dlDir" value="' + val(M.bin_dir || '/usr/sbin') + '"></div>' +
 			'<div class="field update-action"><button type="button" class="btn primary install-btn" id="dlBtn">' + common.icons.icon('download') + ' <span>' + _('Download and install') + '</span></button><div class="stat-s space-note" id="dlSpaceHint"></div></div></div>' +
 			'<div class="card inset" id="officialInfo" style="display:none"><h4>' + _('Official static Linux update') + '</h4>' +
@@ -75,7 +76,7 @@ return view.extend({
 			'<tr><th>' + _('Free space in install filesystem') + '</th><td id="officialFreeBin">—</td></tr>' +
 			'<tr><th>' + _('Free space in temporary filesystem') + '</th><td id="officialFreeTmp">—</td></tr>' +
 			'<tr><th>' + _('Free space in download cache') + '</th><td id="officialFreeCache">—</td></tr></table>' +
-			'<div class="stat-s update-hint" id="officialSpaceHint">' + _('The official binary pair uses about 70 MiB after installation. Space requirements include the download, temporary files, and optional rollback backups.') + '</div></div>' +
+			'<div class="stat-s update-hint" id="officialSpaceHint">' + _('Space is checked dynamically from the package, installed binaries, and available backup locations when the update runs.') + '</div></div>' +
 			'<div class="progress"><i id="dlBar"></i></div>' +
 			'<div class="prow"><span id="dlStep">' + _('Ready') + '</span><span id="dlPct"></span></div>' +
 			'<div class="btnrow" id="dlCancelRow" style="display:none"><button type="button" class="btn sm" id="dlCancel">' + _('Cancel task') + '</button></div>' +
@@ -108,9 +109,11 @@ return view.extend({
 			'<div class="stat-s space-note" id="cronSpaceHint"></div></div>' +
 			'<div class="card glass"><h3>' + common.icons.icon('info') + ' ' + _('Local environment') + '</h3>' +
 			'<table class="tbl"><tr><th>' + _('Arch') + '</th><td id="envArch">' + val(st.arch || '—') + '</td></tr>' +
-			'<tr><th>' + _('Binary') + '</th><td>' + val((M.bin_dir || '/usr/sbin') + '/tailscaled') + ' ' +
-			(st.binary_ok ? '<span class="pill ok">' + _('Ready') + '</span>' : '<span class="pill warn">' + _('Missing') + '</span>') + '</td></tr>' +
-			'<tr><th>' + _('Firewall') + '</th><td>' + val(st.fw_driver === 'none' ? _('None') : st.fw_driver || _('None')) + '</td></tr></table>' +
+			'<tr><th>' + _('Binary') + '</th><td id="envBinary"><span class="env-bin-path">' + val((M.bin_dir || '/usr/sbin') + '/tailscaled') + '</span> ' +
+			(st.binary_ok ? '<span class="pill ok">' + _('Ready') + '</span>' : '<span class="pill warn">' + _('Missing') + '</span>') +
+			'<button type="button" class="iconbtn danger env-delete-btn" id="deleteCore" title="' + _('Delete Tailscale core binaries') + '" aria-label="' + _('Delete Tailscale core binaries') + '"' +
+			(!(st.binary_ok || st.tailscaled_ok || st.tailscale_cli_ok) ? ' disabled' : '') + '>' + common.icons.icon('trash') + '</button></td></tr>' +
+			'<tr><th>' + _('Firewall') + '</th><td id="envFirewall">' + val(st.fw_driver === 'none' ? _('None') : st.fw_driver || _('None')) + '</td></tr></table>' +
 			'</div></div></div>';
 		const d = document.createElement('div');
 		d.className = 'cbi-map';
@@ -118,11 +121,69 @@ return view.extend({
 		const root = d.querySelector('#app');
 		const self = this;
 		const q = (id) => root.querySelector(id);
-		let coreSrc = null, luciSrc = null, currentFile = '', currentResolveKey = '', archResolveKey = '', archTimer = null, activeTask = null, taskTimer = null, manualUploadRequest = null, taskBusy = false;
+		let coreSrc = null, luciSrc = null, currentFile = '', currentResolveKey = '', archResolveKey = '', archTimer = null, activeTask = null, taskTimer = null, manualUploadRequest = null, taskBusy = false, removeBusy = false;
+		const coreBinaryPresent = (status) => !!(status && (status.binary_ok || status.tailscaled_ok || status.tailscale_cli_ok));
+		const syncCoreDeleteButton = () => {
+			const button = q('#deleteCore');
+			if (button) button.disabled = taskBusy || removeBusy || !coreBinaryPresent(st);
+		};
+		const renderBinaryRow = (status) => {
+			q('#envBinary').innerHTML = '<span class="env-bin-path">' + val((M.bin_dir || '/usr/sbin') + '/tailscaled') + '</span> ' +
+				(status.binary_ok ? '<span class="pill ok">' + _('Ready') + '</span>' : '<span class="pill warn">' + _('Missing') + '</span>') +
+				'<button type="button" class="iconbtn danger env-delete-btn" id="deleteCore" title="' + _('Delete Tailscale core binaries') + '" aria-label="' + _('Delete Tailscale core binaries') + '"' +
+				(taskBusy || removeBusy || !coreBinaryPresent(status) ? ' disabled' : '') + '>' + common.icons.icon('trash') + '</button>';
+		};
 		let spaceData = st.disk_spaces || null;
 		let coreRequestId = 0, luciRequestId = 0, matchedLinkRequestId = 0, officialOptionRequest = null;
-		const coreSourceCache = {}, luciSourceCache = {};
-		const SOURCE_TIMEOUT = 10000;
+		let resolvedFileCache = {}, resolvedFileRequests = {};
+		const SOURCE_TIMEOUT = 20000;
+		const SOURCE_CACHE_KEY = 'tailscale-update-source-cache-v1';
+		const SOURCE_CACHE_TTL = 300000;
+		const readSourceCache = (project) => {
+			try {
+				const all = JSON.parse(window.sessionStorage.getItem(SOURCE_CACHE_KEY) || '{}');
+				const state = all && all[project] || {};
+				return {
+					values: state.values && typeof state.values === 'object' ? state.values : {},
+					timestamps: state.timestamps && typeof state.timestamps === 'object' ? state.timestamps : {}
+				};
+			}
+			catch (e) {
+				return { values: {}, timestamps: {} };
+			}
+		};
+		const coreSourceState = readSourceCache('tailscale');
+		const luciSourceState = readSourceCache('luci-app-tailscale');
+		const coreSourceCache = coreSourceState.values;
+		const luciSourceCache = luciSourceState.values;
+		const sourceCacheState = (project) => project === 'tailscale' ? coreSourceState : luciSourceState;
+		const sourceCacheFresh = (project, source) => {
+			const state = sourceCacheState(project);
+			const age = Date.now() - (+state.timestamps[source] || 0);
+			return age >= 0 && age < SOURCE_CACHE_TTL;
+		};
+		const writeSourceCache = (project, source, data) => {
+			const state = sourceCacheState(project);
+			state.values[source] = data;
+			state.timestamps[source] = Date.now();
+			try {
+				const all = JSON.parse(window.sessionStorage.getItem(SOURCE_CACHE_KEY) || '{}');
+				all[project] = state;
+				window.sessionStorage.setItem(SOURCE_CACHE_KEY, JSON.stringify(all));
+			}
+			catch (e) {}
+		};
+		const removeSourceCache = (project, source) => {
+			const state = sourceCacheState(project);
+			delete state.values[source];
+			delete state.timestamps[source];
+			try {
+				const all = JSON.parse(window.sessionStorage.getItem(SOURCE_CACHE_KEY) || '{}');
+				all[project] = state;
+				window.sessionStorage.setItem(SOURCE_CACHE_KEY, JSON.stringify(all));
+			}
+			catch (e) {}
+		};
 		const withTimeout = (operation, timeout) => new Promise((resolve, reject) => {
 			let settled = false;
 			const timer = setTimeout(() => { settled = true; reject(new Error('timeout')); }, timeout);
@@ -151,44 +212,52 @@ return view.extend({
 			const bytes = Number(value) || 0;
 			return bytes > 0 ? (bytes / 1048576).toFixed(1) + ' MiB' : _('Unavailable');
 		};
-		const spaceIssue = (channel, rollback) => {
+		const spaceSummary = () => {
 			const spaces = spaceData || {};
-			const sources = [spaces.install, spaces.temporary];
-			if (channel === 'official') sources.push(spaces.cache);
-			const values = sources.map((item) => Number(item && item.free_bytes));
-			if (values.some((value) => !Number.isFinite(value) || value <= 0))
-				return { ok: false, message: _('Free space could not be determined; update is disabled') };
-			const free = Math.min(...values);
-			if (rollback == null) rollback = q('#rollbackSw').checked;
-			const required = (channel === 'official' ? (rollback ? 200 : 130) : (rollback ? 30 : 10)) * 1048576;
-			if (free < required)
-				return { ok: false, message: _('Device space is insufficient by') + ' ' + Math.ceil((required - free) / 1048576) + ' MiB', free: free, required: required };
-			return { ok: true, free: free, required: required };
+			const parts = [];
+			if (spaces.temporary) parts.push(_('Free space in temporary filesystem') + ': ' + formatBytes(spaces.temporary.free_bytes));
+			if (spaces.install) parts.push(_('Free space in install filesystem') + ': ' + formatBytes(spaces.install.free_bytes));
+			if (selectedChannel() === 'official' && spaces.cache) parts.push(_('Free space in download cache') + ': ' + formatBytes(spaces.cache.free_bytes));
+			return parts.length ? parts.join(' · ') : _('Available space is checked when the update starts.');
 		};
 		const syncSpaceControls = () => {
-			const channel = selectedChannel();
 			const rollback = q('#rollbackSw').checked;
-			const issue = spaceIssue(channel, rollback);
-			const rollbackIssue = spaceIssue(channel, true);
-			for (const name of ['custom', 'official']) {
-				const option = q('#dlChannel').querySelector('option[value="' + name + '"]');
-				option.disabled = !spaceIssue(name, rollback).ok;
+			const hint = spaceSummary();
+			q('#channelSpaceHint').textContent = hint;
+			q('#dlSpaceHint').textContent = _('Required space is checked dynamically using the actual download and binary sizes.');
+			q('#channelSpaceHint').classList.remove('warn');
+			q('#dlSpaceHint').classList.remove('warn');
+			const waitHint = _('If Tailscale was running before the update, wait up to %s seconds for it to restart; if it has not started by then, automatically restore the backup.').replace('%s', serviceWaitSeconds());
+			q('#rollbackHint').textContent = rollback ? waitHint : _('Automatic backup and rollback are disabled.');
+			q('#rollbackHint').classList.toggle('warn', rollback && !spaceData);
+			q('#cronSpaceHint').textContent = _('Scheduled updates check available space when each update runs.');
+			q('#cronSpaceHint').classList.remove('warn');
+			q('#dlBtn').disabled = taskBusy || removeBusy;
+			q('#rollbackSw').disabled = taskBusy || removeBusy;
+			q('#serviceWaitSeconds').disabled = taskBusy || removeBusy;
+			q('#luciBtn').disabled = taskBusy || removeBusy;
+			const manualFile = q('#manualFile').files[0];
+			q('#manualUploadBtn').disabled = taskBusy || removeBusy || !manualFile || manualFile.name !== 'tailscaled' || manualFile.size < 1 || manualFile.size > 33554432;
+			q('#manualFile').disabled = taskBusy || removeBusy;
+			syncCoreDeleteButton();
+		};
+		const applyStatus = (status) => {
+			if (!status || !root.isConnected) return;
+			st = Object.assign({}, st, status);
+			renderBinaryRow(st);
+			if (status.version != null)
+				q('#curVer').textContent = status.version ? ('' + status.version).split(/[ \n]/)[0] : '—';
+			if (status.arch != null) {
+				q('#curArch').textContent = status.arch || '—';
+				q('#envArch').textContent = status.arch || '—';
 			}
-			q('#rollbackSw').disabled = !rollback && !rollbackIssue.ok;
-			q('#channelSpaceHint').textContent = issue.ok ? '' : issue.message;
-			q('#dlSpaceHint').textContent = issue.ok ? '' : issue.message;
-			q('#channelSpaceHint').classList.toggle('warn', !issue.ok);
-			q('#dlSpaceHint').classList.toggle('warn', !issue.ok);
-			const enabledFloor = channel === 'official' ? 200 : 30;
-			const disabledFloor = channel === 'official' ? 130 : 10;
-			let rollbackMessage = rollback ? _('Automatic rollback is enabled; minimum free space:') + ' ' + enabledFloor + ' MiB' : _('Automatic rollback is off; no update backup will be created; minimum free space:') + ' ' + disabledFloor + ' MiB';
-			if (!rollbackIssue.ok) rollbackMessage = rollbackIssue.message + ' · ' + (rollback ? _('Turn off automatic rollback to install without backups') : _('Automatic rollback cannot be enabled'));
-			q('#rollbackHint').textContent = rollbackMessage;
-			q('#rollbackHint').classList.toggle('warn', !rollbackIssue.ok);
-			const cronHint = issue.ok ? '' : _('Scheduled updates are unavailable') + ': ' + issue.message;
-			q('#cronSpaceHint').textContent = cronHint;
-			q('#cronSpaceHint').classList.toggle('warn', !issue.ok);
-			q('#dlBtn').disabled = taskBusy || !issue.ok;
+			if (status.fw_driver != null)
+				q('#envFirewall').textContent = status.fw_driver === 'none' ? _('None') : status.fw_driver;
+			if (status.disk_spaces) spaceData = status.disk_spaces;
+			if (selectedChannel() === 'official') updateOfficialInfo(entryFor());
+			syncSpaceControls();
+			updateMatchedDownload();
+			common.main.badges(root, status, true);
 		};
 		const setOfficialChannelLabel = (info) => {
 			const bytes = Number(info && info.download_bytes) || 0;
@@ -215,7 +284,11 @@ return view.extend({
 				state.textContent = _('No matching cached download is available');
 				return;
 			}
-			common.api.resolveFile('tailscale', source, version, 'auto', 'auto').then((result) => {
+			if (!Object.prototype.hasOwnProperty.call(entryFor().files || {}, version)) {
+				state.textContent = _('Loading files');
+				return;
+			}
+			resolveSourceFile('tailscale', source, version, 'auto', 'auto').then((result) => {
 				if (id !== matchedLinkRequestId || !root.isConnected) return;
 				if (!result || !result.ok || !result.url || !result.file) {
 					state.textContent = _('No matching cached download is available');
@@ -245,7 +318,7 @@ return view.extend({
 			q('#officialFreeBin').textContent = formatBytes(info.free_bin_bytes);
 			q('#officialFreeTmp').textContent = formatBytes(spaceData && spaceData.temporary && spaceData.temporary.free_bytes);
 			q('#officialFreeCache').textContent = formatBytes(info.free_cache_bytes);
-			q('#officialSpaceHint').classList.toggle('warn', !spaceIssue('official').ok);
+			q('#officialSpaceHint').classList.remove('warn');
 		};
 		const updateLatest = (message) => {
 			const ent = entryFor(), tags = ent.tags || [];
@@ -275,9 +348,17 @@ return view.extend({
 		};
 		const paintFiles = () => {
 			const ent = entryFor(), version = q('#dlVer').value;
-			const files = (ent.files || {})[version] || [];
+			const fileMap = ent.files || {};
+			const hasFiles = Object.prototype.hasOwnProperty.call(fileMap, version);
+			const files = hasFiles ? fileMap[version] || [] : [];
 			const fileSelect = q('#dlFile');
 			const previous = fileSelect.value;
+			if (!hasFiles) {
+				fileSelect.innerHTML = optionMarkup(_('Loading files'));
+				fileSelect.disabled = true;
+				return;
+			}
+			fileSelect.disabled = false;
 			fileSelect.innerHTML = files.map((x) => '<option value="' + common.main.esc(x) + '">' + common.main.esc(x) + '</option>').join('');
 			let chosen = files.includes(previous) ? previous : '';
 			if (!chosen && Up.file && Up.file !== 'auto' && files.includes(Up.file)) chosen = Up.file;
@@ -286,12 +367,16 @@ return view.extend({
 			if (!chosen && arch && arch !== 'auto') chosen = files.find((x) => x.toLowerCase().indexOf(arch) >= 0) || '';
 			if (!chosen) chosen = files[0] || '';
 			fileSelect.value = chosen;
-			if (files.length === 0)
+			if (files.length === 0) {
 				fileSelect.innerHTML = '<option value="">' + _('No files available') + '</option>';
+				fileSelect.disabled = true;
+			}
 		};
 		const chooseFileForArch = () => {
-			const files = (entryFor().files || {})[q('#dlVer').value] || [];
 			const source = q('#dlSrc').value, version = q('#dlVer').value;
+			const fileMap = entryFor().files || {};
+			if (!Object.prototype.hasOwnProperty.call(fileMap, version)) return;
+			const files = fileMap[version] || [];
 			const rawArch = q('#dlArch').value.trim();
 			const arch = rawArch.toLowerCase();
 			clearTimeout(archTimer);
@@ -310,7 +395,7 @@ return view.extend({
 			}
 			const key = source + '|' + version + '|' + rawArch;
 			archResolveKey = key;
-			archTimer = setTimeout(() => withTimeout(() => common.api.resolveFile('tailscale', source, version, 'auto', rawArch), SOURCE_TIMEOUT).then((r) => {
+			archTimer = setTimeout(() => resolveSourceFile('tailscale', source, version, 'auto', rawArch).then((r) => {
 				if (archResolveKey !== key || !root.isConnected) return;
 				if (r && r.ok && files.includes(r.file)) {
 					currentFile = r.file;
@@ -320,22 +405,40 @@ return view.extend({
 		};
 		const resolveCurrentFile = () => {
 			const source = q('#dlSrc').value, version = q('#dlVer').value;
-			if (selectedChannel() === 'official' || !source || !version) return;
+			const files = (entryFor().files || {})[version] || [];
+			if (selectedChannel() === 'official' || !source || !version || files.length === 0) return;
 			clearTimeout(archTimer);
 			archResolveKey = '';
 			const arch = q('#dlArch').value.trim() || 'auto';
 			const key = source + '|' + version + '|' + arch;
+			if (currentResolveKey === key) return;
 			currentResolveKey = key;
-			withTimeout(() => common.api.resolveFile('tailscale', source, version, 'auto', arch), SOURCE_TIMEOUT).then((r) => {
+			resolveSourceFile('tailscale', source, version, 'auto', arch).then((r) => {
 				if (currentResolveKey !== key || !root.isConnected) return;
 				currentFile = r && r.ok ? r.file : '';
 				paintFiles();
-			}).catch(() => {});
+			}).catch(() => { if (currentResolveKey === key) currentResolveKey = ''; });
 		};
 		const cancelFileResolve = () => {
 			clearTimeout(archTimer);
 			archResolveKey = '';
 			currentResolveKey = '';
+		};
+		const loadSelectedVersionFiles = (source, version) => {
+			paintFiles();
+			return loadVersionFiles('tailscale', source, version).then((files) => {
+				if (root.isConnected && q('#dlSrc').value === source && q('#dlVer').value === version) {
+					paintFiles();
+					resolveCurrentFile();
+				}
+				return files;
+			}).catch((e) => {
+				if (root.isConnected && q('#dlSrc').value === source && q('#dlVer').value === version) {
+					q('#dlFile').innerHTML = optionMarkup(e && e.message === 'timeout' ? _('Request timed out') : _('No files available'));
+					q('#dlFile').disabled = true;
+				}
+				return [];
+			});
 		};
 		const paintVersions = () => {
 			const ent = entryFor(), tags = ent.tags || [];
@@ -348,8 +451,7 @@ return view.extend({
 			versionSelect.innerHTML = tags.map((tag, i) => '<option value="' + common.main.esc(tag) + '">' + common.main.esc(tag) + (i === 0 ? ' (' + _('Latest') + ')' : '') + '</option>').join('');
 			const wanted = tags.includes(previous) ? previous : Up.version && Up.version !== 'latest' && tags.includes(Up.version) ? Up.version : tags[0] || '';
 			versionSelect.value = wanted;
-			paintFiles();
-			resolveCurrentFile();
+			loadSelectedVersionFiles(ent.name, wanted);
 		};
 		const paintLuci = (message) => {
 			const list = (luciSrc && luciSrc.sources) || [];
@@ -360,16 +462,57 @@ return view.extend({
 				return;
 			}
 			const tags = list[0].tags || [];
-			q('#luciTag').textContent = tags[0] || '—';
-			const files = (list[0].files || {})[tags[0]] || [];
-			q('#luciFile').textContent = files[0] || '—';
+			q('#luciTag').textContent = (tags[0] || '—') + (list[0].name ? ' · ' + sourceLabel(list[0].name) : '');
+			const fileMap = list[0].files || {};
+			const hasFiles = Object.prototype.hasOwnProperty.call(fileMap, tags[0]);
+			const files = hasFiles ? fileMap[tags[0]] || [] : [];
+			q('#luciFile').textContent = files[0] || (hasFiles ? _('No files available') : _('Loading files'));
+		};
+		const versionFileRequests = {};
+		const sourceEntry = (proj, source) => {
+			const data = proj === 'tailscale' ? coreSrc : luciSrc;
+			return (data && data.sources || []).find((item) => item.name === source) || null;
+		};
+		const loadVersionFiles = (proj, source, version) => {
+			const entry = sourceEntry(proj, source);
+			if (!entry || !version) return Promise.reject(new Error('no_source'));
+			const fileMap = entry.files || {};
+			if (Object.prototype.hasOwnProperty.call(fileMap, version)) return Promise.resolve(fileMap[version] || []);
+			const key = proj + '|' + source + '|' + version;
+			if (versionFileRequests[key]) return versionFileRequests[key];
+			const request = withTimeout(() => common.api.getVersionFiles(proj, source, version), SOURCE_TIMEOUT).then((result) => {
+				if (!result || !result.ok || !Array.isArray(result.files)) throw new Error(result && result.error || 'files');
+				entry.files = entry.files || {};
+				entry.files[version] = result.files;
+				if (proj === 'tailscale' && q('#dlSrc').value === source && q('#dlVer').value === version) {
+					paintFiles();
+					updateMatchedDownload();
+				}
+				if (proj === 'luci-app-tailscale') paintLuci();
+				return result.files;
+			});
+			versionFileRequests[key] = request;
+			request.then(() => { if (versionFileRequests[key] === request) delete versionFileRequests[key]; }, () => { if (versionFileRequests[key] === request) delete versionFileRequests[key]; });
+			return request;
+		};
+		const resolveSourceFile = (proj, source, version, file, arch) => {
+			const key = [proj, source, version, file, arch].join('|');
+			if (resolvedFileCache[key]) return Promise.resolve(resolvedFileCache[key]);
+			if (resolvedFileRequests[key]) return resolvedFileRequests[key];
+			const request = withTimeout(() => common.api.resolveFile(proj, source, version, file, arch), SOURCE_TIMEOUT).then((result) => {
+				if (result && result.ok) resolvedFileCache[key] = result;
+				return result;
+			});
+			resolvedFileRequests[key] = request;
+			request.then(() => { if (resolvedFileRequests[key] === request) delete resolvedFileRequests[key]; }, () => { if (resolvedFileRequests[key] === request) delete resolvedFileRequests[key]; });
+			return request;
 		};
 		const requestOfficialSource = (force) => {
-			if (!force && coreSourceCache.official) return Promise.resolve(coreSourceCache.official);
+			if (!force && coreSourceCache.official && sourceCacheFresh('tailscale', 'official')) return Promise.resolve(coreSourceCache.official);
 			if (!force && officialOptionRequest) return officialOptionRequest;
 			const request = withTimeout(() => common.api.getSources('tailscale', 'official'), 35000).then((o) => {
 				o = o || { sources: [] };
-				if (o.sources && o.sources.length > 0) coreSourceCache.official = o;
+				if (o.sources && o.sources.length > 0) writeSourceCache('tailscale', 'official', o);
 				setOfficialLabelFromSources(o);
 				return o;
 			});
@@ -379,7 +522,52 @@ return view.extend({
 			}
 			return request;
 		};
-		const loadOfficialChannelOption = () => requestOfficialSource(false).catch(() => {});
+		const hasSourceTags = (data, source) => {
+			const entry = (data && data.sources || []).find((item) => item.name === source);
+			return !!(entry && Array.isArray(entry.tags) && entry.tags.length);
+		};
+		const getMirrorData = (project, mirror, force, isCurrent, onRefresh) => {
+			const cache = project === 'tailscale' ? coreSourceCache : luciSourceCache;
+			const cached = !force ? cache[mirror] : null;
+			if (cached && hasSourceTags(cached, mirror)) {
+				if (sourceCacheFresh(project, mirror)) return Promise.resolve({ mirror: mirror, data: cached });
+				setTimeout(() => {
+					if (!isCurrent()) return;
+					withTimeout(() => common.api.getSources(project, mirror), SOURCE_TIMEOUT).then((o) => {
+						o = o || { sources: [] };
+						if (!hasSourceTags(o, mirror)) throw new Error('no_tags');
+						writeSourceCache(project, mirror, o);
+						if (isCurrent()) onRefresh({ mirror: mirror, data: o });
+					}).catch(() => {});
+				}, 0);
+				return Promise.resolve({ mirror: mirror, data: cached });
+			}
+			return withTimeout(() => common.api.getSources(project, mirror), SOURCE_TIMEOUT).then((o) => {
+				o = o || { sources: [] };
+				if (!hasSourceTags(o, mirror)) throw new Error('no_tags');
+				writeSourceCache(project, mirror, o);
+				return { mirror: mirror, data: o };
+			});
+		};
+		const loadMirrorSource = (project, source, force, isCurrent, onLoading, onLoaded, onFailed) => {
+			const mirrors = [source].concat(sourceOptions.filter((item) => item !== source));
+			const complete = (result) => {
+				if (result && isCurrent()) onLoaded(result);
+			};
+			const tryMirror = (index, lastError) => {
+				if (!isCurrent()) return Promise.resolve(null);
+				if (index >= mirrors.length) return Promise.reject(lastError || new Error('no_match'));
+				const mirror = mirrors[index];
+				if (onLoading) onLoading(mirror);
+				return getMirrorData(project, mirror, force, isCurrent, complete).then((result) => {
+					if (!result || !isCurrent()) return null;
+					return result;
+				}).catch((error) => tryMirror(index + 1, error));
+			};
+			return tryMirror(0, null).then(complete).catch((error) => {
+				if (isCurrent()) onFailed(error);
+			});
+		};
 		const loadCoreSource = (source, force) => {
 			if (!source) return Promise.resolve();
 			const requestId = ++coreRequestId;
@@ -387,54 +575,66 @@ return view.extend({
 			currentResolveKey = '';
 			archResolveKey = '';
 			clearTimeout(archTimer);
-			if (!force && coreSourceCache[source]) {
-				coreSrc = coreSourceCache[source];
-				updateLatest();
-				return Promise.resolve();
-			}
 			coreSrc = { sources: [] };
 			q('#newVer').textContent = '…';
 			q('#newSub').textContent = _('Loading versions');
 			q('#dlVer').innerHTML = optionMarkup(_('Loading versions'));
 			q('#dlFile').innerHTML = optionMarkup(_('Loading files'));
-			const request = source === 'official' ? requestOfficialSource(force) : withTimeout(() => common.api.getSources('tailscale', source), SOURCE_TIMEOUT);
-			return request.then((o) => {
-				o = o || { sources: [] };
-				if (o.sources && o.sources.length > 0)
-					coreSourceCache[source] = o;
-				if (source === 'official') setOfficialLabelFromSources(o);
-				if (requestId !== coreRequestId || source !== selectedSource() || !root.isConnected) return;
-				coreSrc = o;
-				updateLatest();
-			}).catch((e) => {
-				if (requestId !== coreRequestId || source !== selectedSource() || !root.isConnected) return;
-				coreSrc = { sources: [] };
-				updateLatest(e && e.message === 'timeout' ? _('Request timed out') : _('Failed to load sources'));
-			});
+			if (source === 'official') {
+				return requestOfficialSource(force).then((o) => {
+					if (requestId !== coreRequestId || !root.isConnected) return;
+					setOfficialLabelFromSources(o);
+					coreSrc = o || { sources: [] };
+					updateLatest();
+				}).catch((e) => {
+					if (requestId !== coreRequestId || !root.isConnected) return;
+					coreSrc = { sources: [] };
+					updateLatest(e && e.message === 'timeout' ? _('Request timed out') : _('Failed to load sources'));
+				});
+			}
+			return loadMirrorSource('tailscale', source, force,
+				() => requestId === coreRequestId && root.isConnected,
+				(mirror) => { q('#newSub').textContent = _('Loading versions') + ' · ' + sourceLabel(mirror); },
+				(result) => {
+					const mirrorChanged = q('#dlSrc').value !== result.mirror;
+					q('#dlSrc').value = result.mirror;
+					if (mirrorChanged) loadLuciSource(result.mirror, force);
+					coreSrc = result.data;
+					currentFile = '';
+					updateLatest();
+				},
+				(e) => {
+					coreSrc = { sources: [] };
+					updateLatest(e && e.message === 'timeout' ? _('Request timed out') : _('Failed to load sources'));
+				});
 		};
 		const loadLuciSource = (source, force) => {
 			if (!source) return Promise.resolve();
 			const requestId = ++luciRequestId;
-			if (!force && luciSourceCache[source]) {
-				luciSrc = luciSourceCache[source];
-				paintLuci();
-				return Promise.resolve();
-			}
 			luciSrc = { sources: [] };
 			q('#luciTag').textContent = _('Loading versions');
 			q('#luciFile').textContent = _('Loading files');
-			return withTimeout(() => common.api.getSources('luci-app-tailscale', source), SOURCE_TIMEOUT).then((o) => {
-				o = o || { sources: [] };
-				if (o.sources && o.sources.length > 0)
-					luciSourceCache[source] = o;
-				if (requestId !== luciRequestId || source !== selectedMirror() || !root.isConnected) return;
-				luciSrc = o;
-				paintLuci();
-			}).catch((e) => {
-				if (requestId !== luciRequestId || source !== selectedMirror() || !root.isConnected) return;
-				luciSrc = { sources: [] };
-				paintLuci(e && e.message === 'timeout' ? _('Request timed out') : _('Failed to load sources'));
-			});
+			return loadMirrorSource('luci-app-tailscale', source, force,
+				() => requestId === luciRequestId && source === selectedMirror() && root.isConnected,
+				null,
+				(result) => {
+					luciSrc = result.data;
+					paintLuci();
+					const entry = (result.data.sources || []).find((item) => item.name === result.mirror);
+					const version = entry && entry.tags && entry.tags[0];
+					if (entry && version) {
+						loadVersionFiles('luci-app-tailscale', entry.name, version).then((files) => {
+							if (!files.length) throw new Error('no_files');
+						}).catch((e) => {
+							if (requestId === luciRequestId && source === selectedMirror() && luciSrc === result.data)
+								q('#luciFile').textContent = e && e.message === 'timeout' ? _('Request timed out') : _('No files available');
+						});
+					}
+				},
+				(e) => {
+					luciSrc = { sources: [] };
+					paintLuci(e && e.message === 'timeout' ? _('Request timed out') : _('Failed to load sources'));
+				});
 		};
 		const fillSources = (force) => {
 			const source = selectedSource();
@@ -442,8 +642,12 @@ return view.extend({
 		};
 		const refreshSource = (proj) => {
 			const source = proj === 'tailscale' ? selectedSource() : selectedMirror();
+			for (const key of Object.keys(versionFileRequests))
+				if (key.indexOf(proj + '|') === 0) delete versionFileRequests[key];
+			resolvedFileCache = {};
+			resolvedFileRequests = {};
 			if (proj === 'tailscale') {
-				delete coreSourceCache[source];
+				removeSourceCache('tailscale', source);
 				coreSrc = { sources: [] };
 				q('#newVer').textContent = '…';
 				q('#newSub').textContent = _('Loading versions');
@@ -452,13 +656,14 @@ return view.extend({
 				updateMatchedDownload();
 			}
 			else {
-				delete luciSourceCache[source];
+				removeSourceCache('luci-app-tailscale', source);
 				luciSrc = { sources: [] };
 				q('#luciTag').textContent = _('Loading versions');
 				q('#luciFile').textContent = _('Loading files');
 			}
 			const timeout = source === 'official' ? 35000 : SOURCE_TIMEOUT;
-			return withTimeout(() => common.api.refreshSources(source, proj), timeout).then((r) => {
+			const refreshTarget = source === 'official' ? source : 'auto';
+			return withTimeout(() => common.api.refreshSources(refreshTarget, proj), timeout).then((r) => {
 				if (!r || !r.ok) throw new Error('refresh');
 				if (source !== (proj === 'tailscale' ? selectedSource() : selectedMirror())) return;
 				return proj === 'tailscale' ? loadCoreSource(source, true) : loadLuciSource(source, true);
@@ -469,12 +674,17 @@ return view.extend({
 				else paintLuci(message);
 			});
 		};
+		const serviceWaitSeconds = () => {
+			const value = Number.parseInt(q('#serviceWaitSeconds').value, 10);
+			return String(Number.isFinite(value) ? Math.max(30, Math.min(600, value)) : 180);
+		};
 		saveAction = () => [
 			['main', { bin_dir: q('#dlDir').value.trim() }],
 			['update', {
 				channel: selectedChannel(),
 				arch: q('#dlArch').value.trim() || 'auto',
 				auto_rollback: q('#rollbackSw').checked ? '1' : '0',
+				service_wait_seconds: serviceWaitSeconds(),
 				auto_update: q('#cronSw').checked ? '1' : '0',
 				every_days: q('#cronDays').value.trim() || '7',
 				at_time: q('#cronAt').value.trim() || '03:30'
@@ -489,11 +699,11 @@ return view.extend({
 		};
 		const taskStep = (t) => {
 			if (t.msg) return t.msg;
-			const map = { begin: _('Starting'), upload: _('Uploading'), resolve: _('Resolving'), download: _('Downloading'), verify: _('Verifying'), extract: _('Extracting'), tryrun: _('Testing binary'), stop: _('Stopping'), install: _('Installing'), restart: _('Restarting'), done: _('Completed'), error: _('Failed'), cancelled: _('Cancelled') };
+			const map = { begin: _('Starting'), upload: _('Uploading'), resolve: _('Resolving'), download: _('Downloading'), verify: _('Verifying'), extract: _('Extracting'), tryrun: _('Testing binary'), stop: _('Stopping'), install: _('Installing'), restart: _('Restarting'), healthcheck: _('Waiting for the Tailscale service'), done: _('Completed'), error: _('Failed'), cancelled: _('Cancelled') };
 			return map[t.step] || t.step || '';
 		};
 		const taskError = (code) => {
-			const map = { busy: _('Busy, try later'), no_match: _('No matching files'), no_url: _('Download URL not found'), no_hash: _('Checksum unavailable'), fetch_fail: _('Download failed'), hash_mismatch: _('Checksum mismatch'), extract_fail: _('Extraction failed'), tryrun_fail: _('Binary check failed'), install_fail: _('Install failed'), pkg_fail: _('Package installation failed'), restart_warn: _('Restart warning'), official_update_fail: _('Official update failed'), channel_switch_fail: _('Channel switch failed'), version_ahead: _('Installed version is newer than selected channel; automatic downgrade was refused'), unsupported_version: _('Official channel only supports the latest stable version'), core_missing: _('Tailscale CLI is missing'), backup_fail: _('Could not back up binaries'), rolled_back: _('Update failed; previous state restored'), rollback_fail: _('Update failed and rollback failed; backup files were kept'), update_fail_no_rollback: _('Update failed; automatic rollback is disabled'), space_insufficient: _('Insufficient free space for this update'), invalid_upload: _('Choose the extracted tailscaled binary'), tmpfs_unavailable: _('RAM temporary storage is unavailable'), memory_low: _('Not enough RAM space for this upload'), upload_too_large: _('File exceeds the 32 MiB upload limit'), bad_chunk: _('Upload chunk failed'), upload_incomplete: _('Upload is incomplete'), service_stop_fail: _('Could not stop Tailscale before replacing the binary'), restart_fail: _('Tailscale failed to restart'), cancelled: _('Cancelled') };
+			const map = { busy: _('Busy, try later'), no_match: _('No matching files'), no_url: _('Download URL not found'), no_hash: _('Checksum unavailable'), fetch_fail: _('Download failed'), hash_mismatch: _('Checksum mismatch'), extract_fail: _('Extraction failed'), tryrun_fail: _('Binary check failed'), install_fail: _('Install failed'), pkg_fail: _('Package installation failed'), restart_warn: _('Restart warning'), official_update_fail: _('Official update failed'), channel_switch_fail: _('Channel switch failed'), version_ahead: _('Installed version is newer than selected channel; automatic downgrade was refused'), unsupported_version: _('Official channel only supports the latest stable version'), core_missing: _('Tailscale CLI is missing'), backup_fail: _('Could not back up binaries'), rolled_back: _('Update failed; previous state restored'), rollback_fail: _('Update failed and rollback failed; backup files were kept'), update_fail_no_rollback: _('Update failed; no rollback backup was available'), version_check_fail: _('Installed binaries did not pass the version check'), space_insufficient: _('Insufficient free space for this update'), invalid_upload: _('Choose the extracted tailscaled binary'), tmpfs_unavailable: _('RAM temporary storage is unavailable'), memory_low: _('Not enough RAM space for this upload'), upload_too_large: _('File exceeds the 32 MiB upload limit'), bad_chunk: _('Upload chunk failed'), upload_incomplete: _('Upload is incomplete'), service_stop_fail: _('Could not stop Tailscale before replacing the binary'), restart_fail: _('Tailscale failed to restart'), cancelled: _('Cancelled') };
 			return map[code] || code || _('Unknown error');
 		};
 		const updateInstalledVersion = (t) => {
@@ -525,14 +735,14 @@ return view.extend({
 			activeTask = null;
 			taskBusy = false;
 			syncSpaceControls();
-			q('#luciBtn').disabled = false;
-			q('#manualFile').disabled = false;
+			q('#luciBtn').disabled = removeBusy;
+			q('#manualFile').disabled = removeBusy;
 			if (task.cancel) q(task.cancel).style.display = 'none';
 			const selectedManualFile = q('#manualFile').files[0];
-			q('#manualUploadBtn').disabled = !selectedManualFile || selectedManualFile.name !== 'tailscaled' || selectedManualFile.size < 1 || selectedManualFile.size > 33554432;
+			q('#manualUploadBtn').disabled = removeBusy || !selectedManualFile || selectedManualFile.name !== 'tailscaled' || selectedManualFile.size < 1 || selectedManualFile.size > 33554432;
 			const cancelled = t.error === 'cancelled';
 			const failed = !!t.error && !cancelled;
-			const result = cancelled ? _('Cancelled') : failed ? _('Failed') + ' · ' + taskError(t.error) : task.done;
+			const result = cancelled ? _('Cancelled') : failed ? _('Failed') + ' · ' + taskError(t.error) : t.warning === 'backup_unavailable' ? _('Updated without a rollback backup') : task.done;
 			q(task.step).textContent = result;
 			if (!failed) updateInstalledVersion(t);
 			else common.api.getStatus(true).then((cur) => { if (cur && cur.disk_spaces) spaceData = cur.disk_spaces; syncSpaceControls(); }).catch(() => {});
@@ -558,7 +768,7 @@ return view.extend({
 			}).catch(() => {});
 		};
 		const startTask = (proj, source, version, file, arch) => {
-			if (activeTask) return;
+			if (activeTask || removeBusy) return;
 			const task = taskView(proj);
 			q(task.detail).style.display = '';
 			q(task.detail).open = true;
@@ -570,6 +780,7 @@ return view.extend({
 			q('#dlBtn').disabled = true;
 			q('#luciBtn').disabled = true;
 			q('#manualUploadBtn').disabled = true;
+			syncCoreDeleteButton();
 			common.api.download(proj, source, version, file, arch).then((r) => {
 				if (!r || !r.task_id) throw new Error('task');
 				activeTask = { id: r.task_id, proj: proj, finished: false };
@@ -579,9 +790,10 @@ return view.extend({
 			}).catch(() => {
 				taskBusy = false;
 				syncSpaceControls();
-				q('#luciBtn').disabled = false;
+				q('#luciBtn').disabled = removeBusy;
+				q('#manualFile').disabled = removeBusy;
 				const selectedManualFile = q('#manualFile').files[0];
-				q('#manualUploadBtn').disabled = !selectedManualFile || selectedManualFile.name !== 'tailscaled' || selectedManualFile.size < 1 || selectedManualFile.size > 33554432;
+				q('#manualUploadBtn').disabled = removeBusy || !selectedManualFile || selectedManualFile.name !== 'tailscaled' || selectedManualFile.size < 1 || selectedManualFile.size > 33554432;
 				q(task.step).textContent = _('Failed to start task');
 			});
 		};
@@ -614,7 +826,7 @@ return view.extend({
 			xhr.send(form);
 		});
 		const uploadManualFile = async () => {
-			if (taskBusy || activeTask) return;
+			if (taskBusy || removeBusy || activeTask) return;
 			const file = q('#manualFile').files[0];
 			if (!file) return;
 			if (file.name !== 'tailscaled') {
@@ -642,6 +854,7 @@ return view.extend({
 			q('#manualUploadBtn').disabled = true;
 			q('#dlBtn').disabled = true;
 			q('#luciBtn').disabled = true;
+			syncCoreDeleteButton();
 			try {
 				const begun = await common.api.beginManualUpload(file.name, file.size);
 				if (!begun || !begun.ok || !begun.task_id) throw new Error(begun && begun.error || 'upload_incomplete');
@@ -689,10 +902,10 @@ return view.extend({
 				}
 				taskBusy = false;
 				syncSpaceControls();
-				q('#luciBtn').disabled = false;
-				q('#manualFile').disabled = false;
+				q('#luciBtn').disabled = removeBusy;
+				q('#manualFile').disabled = removeBusy;
 				const selectedManualFile = q('#manualFile').files[0];
-				q('#manualUploadBtn').disabled = !selectedManualFile || selectedManualFile.name !== 'tailscaled' || selectedManualFile.size < 1 || selectedManualFile.size > 33554432;
+				q('#manualUploadBtn').disabled = removeBusy || !selectedManualFile || selectedManualFile.name !== 'tailscaled' || selectedManualFile.size < 1 || selectedManualFile.size > 33554432;
 				const message = taskError(e && e.message || 'upload_incomplete');
 				q(task.step).textContent = _('Failed') + ' · ' + message;
 			}
@@ -700,8 +913,33 @@ return view.extend({
 		setTimeout(() => {
 			if (!root.isConnected)
 				return;
-			common.main.wire('update', root, null);
+			common.main.wire('update', root, st, true);
+			if (st.version != null || st.running != null) common.main.badges(root, st, true);
 			common.login.init(root);
+			q('#envBinary').addEventListener('click', (e) => {
+				const button = e.target.closest && e.target.closest('#deleteCore');
+				if (!button || taskBusy || removeBusy || !coreBinaryPresent(st)) return;
+				common.main.openConfirm(_('Delete Tailscale core binaries?'), _('This will stop Tailscale and remove tailscaled and tailscale from the configured install directory. Existing configuration is kept. Since the service remains enabled, it may reinstall the core automatically the next time the router starts.'), _('Delete'), () => {
+					removeBusy = true;
+					syncSpaceControls();
+					common.api.removeCore().then((result) => {
+						if (!result || result.ok !== true) {
+							if (result && result.busy) throw new Error('busy');
+						throw new Error(result && result.error || 'delete_fail');
+						}
+						st = Object.assign({}, st, { binary_ok: false, tailscaled_ok: false, tailscale_cli_ok: false });
+						renderBinaryRow(st);
+						common.main.toast(_('Tailscale binaries deleted.'));
+						common.api.getStatus(true).then(applyStatus).catch(() => {});
+					}).catch((error) => {
+						const code = error && error.message;
+						common.main.toast(code === 'busy' ? _('Another operation is in progress.') : code === 'service_stop_fail' ? _('Could not stop Tailscale before deleting binaries.') : _('Failed to delete Tailscale binaries.'));
+					}).then(() => {
+						removeBusy = false;
+						syncSpaceControls();
+					});
+				});
+			});
 			const showUpdateTab = (manual) => {
 				q('#onlinePanel').style.display = manual ? 'none' : '';
 				q('#manualPanel').style.display = manual ? '' : 'none';
@@ -720,7 +958,7 @@ return view.extend({
 					return;
 				}
 				q('#manualFileInfo').textContent = file.name + ' · ' + common.main.fmtBytes(file.size);
-				q('#manualUploadBtn').disabled = taskBusy || file.name !== 'tailscaled' || file.size < 1 || file.size > 33554432;
+				q('#manualUploadBtn').disabled = taskBusy || removeBusy || file.name !== 'tailscaled' || file.size < 1 || file.size > 33554432;
 			});
 			q('#manualUploadBtn').addEventListener('click', uploadManualFile);
 			q('#manualCancelBtn').addEventListener('click', () => {
@@ -743,17 +981,15 @@ return view.extend({
 				loadCoreSource(selectedSource());
 				loadLuciSource(selectedMirror());
 			});
-			q('#rollbackSw').addEventListener('change', (e) => {
-				if (e.target.checked && !spaceIssue(selectedChannel(), true).ok) e.target.checked = false;
-				syncSpaceControls();
-			});
+			q('#rollbackSw').addEventListener('change', syncSpaceControls);
+			q('#serviceWaitSeconds').addEventListener('change', () => { q('#serviceWaitSeconds').value = serviceWaitSeconds(); syncSpaceControls(); });
 			q('#dlSrc').addEventListener('change', () => {
 				updateArtifactLinks();
 				updateMatchedDownload();
 				loadCoreSource(selectedSource());
 				loadLuciSource(selectedMirror());
 			});
-			q('#dlVer').addEventListener('change', () => { paintFiles(); resolveCurrentFile(); updateMatchedDownload(); });
+			q('#dlVer').addEventListener('change', () => { loadSelectedVersionFiles(q('#dlSrc').value, q('#dlVer').value); updateMatchedDownload(); });
 			q('#dlFile').addEventListener('pointerdown', cancelFileResolve);
 			q('#dlFile').addEventListener('keydown', cancelFileResolve);
 			q('#dlFile').addEventListener('change', () => {
@@ -765,10 +1001,6 @@ return view.extend({
 			q('#luciCheck').addEventListener('click', () => refreshSource('luci-app-tailscale'));
 			q('#dlBtn').addEventListener('click', () => {
 				const channel = selectedChannel();
-				if (!spaceIssue(channel).ok) {
-					syncSpaceControls();
-					return;
-				}
 				const official = channel === 'official';
 				const ent = entryFor();
 				const source = official ? 'official' : ent.name;
@@ -781,7 +1013,7 @@ return view.extend({
 				}
 				common.api.setConfig('main', { bin_dir: q('#dlDir').value.trim() }).then((saved) => {
 					if (!saved || saved.ok === false) throw new Error('save');
-					return common.api.setConfig('update', { channel: channel, arch: arch, auto_rollback: q('#rollbackSw').checked ? '1' : '0' });
+					return common.api.setConfig('update', { channel: channel, arch: arch, auto_rollback: q('#rollbackSw').checked ? '1' : '0', service_wait_seconds: serviceWaitSeconds() });
 				}).then((saved) => {
 					if (!saved || saved.ok === false) throw new Error('save');
 					startTask('tailscale', source, version, file, arch);
@@ -793,14 +1025,11 @@ return view.extend({
 			});
 			q('#luciBtn').addEventListener('click', () => startTask('luci-app-tailscale', 'auto', 'latest', 'auto', 'auto'));
 			q('#cronSw').addEventListener('change', (e) => {
-				if (e.target.checked && !spaceIssue(selectedChannel()).ok) {
-					e.target.checked = false;
-				}
 				q('#cronFields').classList.toggle('open', e.target.checked);
 				syncSpaceControls();
 			});
 			fillSources();
-			if (selectedChannel() !== 'official') loadOfficialChannelOption();
+			setTimeout(() => common.api.getStatus().then(applyStatus).catch(() => {}), 1000);
 		}, 0);
 		return d;
 	}

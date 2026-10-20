@@ -86,13 +86,20 @@ return view.extend({
 		let cur = initial, f = 'all', q = '', pinging = false;
 		let savedRegion = preferredRegion, savingRegion = false;
 		const isSub = (p) => (p.approved && p.approved.length > 0) || (p.pending && p.pending.length > 0);
+		const routeFor = (p) => {
+			const l = self.latOf(cur, p.ip);
+			const via = l && l.via ? '' + l.via : '';
+			const direct = via ? via === 'direct' : p.direct === true;
+			const relay = direct ? '' : via && via !== 'direct' && via !== 'derp' ? via : p.relay || '';
+			return { direct, relay };
+		};
 		const paint = () => {
 			const peers = cur.peers || [];
 			let cDirect = 0, cDerp = 0, cOff = 0, cSub = 0;
 			for (const p of peers) {
 				if (!p.online)
 					cOff++;
-				else if (p.direct)
+				else if (routeFor(p).direct)
 					cDirect++;
 				else
 					cDerp++;
@@ -128,7 +135,7 @@ return view.extend({
 					return _('This host');
 				if (!p.online)
 					return _('Offline');
-				return p.direct ? _('P2P direct') : _('DERP relay');
+				return routeFor(p).direct ? _('P2P direct') : _('DERP relay');
 			};
 			const info = (p) => {
 				if (p.me)
@@ -137,9 +144,10 @@ return view.extend({
 				if (!p.online)
 					return t + ' · ' + _('Last seen') + ' ' + self.relTime(p.lastseen);
 				const l = self.latOf(cur, p.ip);
-				t += ' · ' + (l && l.ms != null ? l.ms + 'ms' : _('Online'));
-				if (l && l.via && l.via !== 'direct')
-					t += ' · ' + _('Relay') + ' ' + l.via;
+				const route = routeFor(p);
+				t += ' · ' + _('Latency') + ' ' + (l && l.ms != null ? l.ms + 'ms' : _('Not measured'));
+				if (route.relay)
+					t += ' · ' + _('Relay') + ' ' + route.relay;
 				const r = (p.approved || []).concat(p.pending || []);
 				if (r.length > 0)
 					t += ' · ' + _('Routes') + ' ' + r.join(',');
@@ -160,8 +168,8 @@ return view.extend({
 					'<button type="button" class="btn sm" data-act="goto">' + _('Manage my routes') + '</button></div>';
 			for (const p of peers) {
 				if (f === 'subnet' && !isSub(p)) continue;
-				if (f === 'direct' && !(p.online && p.direct)) continue;
-				if (f === 'derp' && !(p.online && !p.direct)) continue;
+				if (f === 'direct' && !(p.online && routeFor(p).direct)) continue;
+				if (f === 'derp' && !(p.online && !routeFor(p).direct)) continue;
 				if (f === 'off' && p.online) continue;
 				if (q && ((p.name || '') + (p.ip || '') + (p.os || '')).toLowerCase().indexOf(q) < 0) continue;
 				h += '<div class="nrow"><span class="ndot ' + dot(p) + '"></span><div class="t"><b>' + common.main.esc(p.name || p.ip) +
@@ -171,16 +179,16 @@ return view.extend({
 			}
 			root.querySelector('#nodeRows').innerHTML = h || '<div class="stat-s empty-nodes">' + _('No matching nodes') + '</div>';
 		};
-		const doPing = () => {
+		const doPing = (timeout) => {
 			if (pinging || !root.isConnected)
 				return;
 			pinging = true;
 			const button = root.querySelector('#pingBtn');
 			button.classList.add('is-spinning');
-			common.api.pingPeers(8, 2).then(() => common.api.getStatus(true)).then((st) => {
+			return common.api.pingPeers(8, timeout).then((result) => {
 				if (!root.isConnected)
 					return;
-				cur = st || {};
+				cur = Object.assign({}, cur, { derp_ms: result && result.latency || {} });
 				paint();
 			}).catch(() => {}).finally(() => {
 				pinging = false;
@@ -250,7 +258,7 @@ return view.extend({
 				else if (act === 'goto')
 					location.href = L.url('admin/vpn/tailscale/settings');
 			});
-			root.querySelector('#pingBtn').addEventListener('click', doPing);
+			root.querySelector('#pingBtn').addEventListener('click', () => doPing(2));
 			let unsubscribeStatus;
 			unsubscribeStatus = common.main.onStatus((st) => {
 				if (!root.isConnected) {
@@ -260,10 +268,14 @@ return view.extend({
 				cur = st || {};
 				paint();
 			});
-			const statusPromise = hasInitialStatus ? Promise.resolve(cur) : common.api.getStatus(true);
+			const statusPromise = hasInitialStatus ? Promise.resolve(cur) : common.api.getStatus();
 			statusPromise.then(() => {
-				if (root.isConnected)
-					return loadDerpMap();
+				if (!root.isConnected)
+					return;
+				return loadDerpMap().then(() => {
+					if (root.isConnected)
+						return doPing(1);
+				});
 			}).catch(() => {
 				if (!root.isConnected)
 					return;

@@ -87,6 +87,9 @@ msgstr "应用超时，请检查状态"
 msgid "Arch"
 msgstr "架构"
 
+msgid "Use auto to detect the architecture, or specify it manually, for example x86_64 or mips-hardfloat."
+msgstr "auto 自动识别，或手动指定，例如 x86_64 或 mips-hardfloat。"
+
 msgid "At time"
 msgstr "执行时间"
 
@@ -245,9 +248,6 @@ msgstr "DERP 地区偏好无法应用，已恢复为自动模式。"
 
 msgid "Device"
 msgstr "设备"
-
-msgid "Device name"
-msgstr "设备名"
 
 msgid "Diag exported"
 msgstr "诊断包已导出"
@@ -414,6 +414,9 @@ msgstr "LAN 到 Tailscale"
 msgid "Last seen"
 msgstr "最后在线"
 
+msgid "Latency"
+msgstr "延迟"
+
 msgid "Latest"
 msgstr "最新"
 
@@ -426,8 +429,7 @@ msgstr "最新版本"
 msgid "Light"
 msgstr "浅色"
 
-msgid "Linux network device used by this OpenWrt interface; it should match the TUN interface name below."
-msgstr "此 OpenWrt 接口所绑定的 Linux 网络设备；应与下方 TUN 接口名称一致。"
+
 
 msgid "Live traffic"
 msgstr "实时流量"
@@ -540,8 +542,8 @@ msgstr "N 小时前"
 msgid "N minutes ago"
 msgstr "N 分钟前"
 
-msgid "Name of the tunnel device created by tailscaled; keep it consistent with Device name."
-msgstr "tailscaled 创建的隧道设备名称；应与“设备名称”保持一致。"
+msgid "Name of the tunnel device created by tailscaled; the OpenWrt network device follows this name automatically."
+msgstr "tailscaled 创建的 TUN 设备名称；OpenWrt 网络设备名会自动跟随此名称。"
 
 msgid "Netfilter mode"
 msgstr "netfilter 模式"
@@ -591,6 +593,9 @@ msgstr "不在当前 DERP 地图中"
 msgid "Not logged in"
 msgstr "未登录"
 
+msgid "Not measured"
+msgstr "尚未测量"
+
 msgid "Not running"
 msgstr "未运行"
 
@@ -619,7 +624,7 @@ msgid "Delay in seconds; only applied when router uptime is under 120 seconds."
 msgstr "延迟时间单位为秒；仅在路由器启动时间不足 120 秒时生效。"
 
 msgid "Open"
-msgstr "跳转登录"
+msgstr "打开"
 
 msgid "OpenWrt logical interface name used to reference the Tailscale link."
 msgstr "OpenWrt 中用于引用 Tailscale 链路的逻辑接口名称。"
@@ -1029,9 +1034,6 @@ msgstr "官方更新失败"
 msgid "Tailscale CLI is missing"
 msgstr "Tailscale 命令行程序缺失"
 
-msgid "The official binary pair uses about 70 MiB after installation. Space requirements include the download, temporary files, and optional rollback backups."
-msgstr "官方版的两个二进制文件安装后约占 70 MiB。空间需求包括下载文件、临时文件，以及可选的回滚备份。"
-
 msgid "Unavailable"
 msgstr "不可用"
 
@@ -1059,26 +1061,41 @@ msgstr "更新失败且自动回滚失败，备份文件已保留"
 msgid "Project repository"
 msgstr "项目地址"
 
-msgid "Automatic rollback on failure"
-msgstr "更新失败时自动回滚"
+msgid "Automatic backup and rollback when space permits"
+msgstr "空间允许时自动备份并在失败时回滚"
 
-msgid "Automatic rollback is enabled; minimum free space:"
-msgstr "已启用自动回滚，最低可用空间："
+msgid "Health check (s)"
+msgstr "健康检查（秒）"
 
-msgid "Automatic rollback is off; no update backup will be created; minimum free space:"
-msgstr "已关闭自动回滚，不会创建更新备份；最低可用空间："
+msgid "If Tailscale was running before the update, wait up to %s seconds for it to restart; if it has not started by then, automatically restore the backup."
+msgstr "更新时 Tailscale 已启动，最多等待 %s 秒；若 Tailscale 仍未启动，则自动恢复备份。"
 
-msgid "Device space is insufficient by"
-msgstr "设备空间不足"
+msgid "Automatic backup and rollback are disabled."
+msgstr "已关闭自动备份和失败回滚。"
 
-msgid "Free space could not be determined; update is disabled"
-msgstr "无法检测可用空间，已禁用更新"
+msgid "Scheduled updates check available space when each update runs."
+msgstr "每次执行定时更新时检查可用空间。"
 
-msgid "Scheduled updates are unavailable"
-msgstr "当前空间不足，无法启用自动更新"
+msgid "Update failed; no rollback backup was available"
+msgstr "更新失败，没有可用备份，无法自动回滚。"
 
-msgid "Update failed; automatic rollback is disabled"
-msgstr "更新失败，自动回滚已关闭"
+msgid "Installed binaries did not pass the version check"
+msgstr "安装后的二进制版本检查未通过"
+
+msgid "Updated without a rollback backup"
+msgstr "更新完成，但没有可用回滚备份"
+
+msgid "Available space is checked when the update starts."
+msgstr "更新开始时检查可用空间。"
+
+msgid "Space is checked dynamically from the package, installed binaries, and available backup locations when the update runs."
+msgstr "更新时根据实际安装包、已安装二进制文件和可用备份位置动态检查空间。"
+
+msgid "Required space is checked dynamically using the actual download and binary sizes."
+msgstr "更新时按实际下载文件和二进制大小动态检查所需空间。"
+
+msgid "Waiting for the Tailscale service"
+msgstr "等待 Tailscale 服务就绪"
 
 msgid "Insufficient free space for this update"
 msgstr "可用空间不足，无法更新"
@@ -1094,12 +1111,6 @@ msgstr "临时文件系统"
 
 msgid "Download cache"
 msgstr "下载缓存"
-
-msgid "Automatic rollback cannot be enabled"
-msgstr "当前空间不足，无法启用自动回滚"
-
-msgid "Turn off automatic rollback to install without backups"
-msgstr "关闭自动回滚后可不备份并继续安装"
 
 msgid "Total downloaded"
 msgstr "总下载量"
@@ -1184,3 +1195,51 @@ msgstr "Tailscale 重启失败"
 
 msgid "Manual upload does not change the online update channel."
 msgstr "手动上传不会更改当前在线更新渠道。"
+
+msgid "e.g. router-01"
+msgstr "例如 router-01"
+
+msgid "0 for automatic selection"
+msgstr "设为 0 时自动选择"
+
+msgid "e.g. 127.0.0.1:1080"
+msgstr "例如 127.0.0.1:1080"
+
+msgid "e.g. 127.0.0.1:8080"
+msgstr "例如 127.0.0.1:8080"
+
+msgid "e.g. root"
+msgstr "例如 root"
+
+msgid "e.g. https://headscale.example.com"
+msgstr "例如 https://headscale.example.com"
+
+msgid "Reload network configuration on stop"
+msgstr "停止时重载网络配置"
+
+msgid "Disable this if the WAN port flickers when stopping Tailscale."
+msgstr "停止Tailscale出现wan口网络抖动关闭此项"
+
+msgid "Delete Tailscale core binaries"
+msgstr "删除 Tailscale 核心二进制文件"
+
+msgid "Delete Tailscale core binaries?"
+msgstr "确认删除 Tailscale 核心二进制文件？"
+
+msgid "This will stop Tailscale and remove tailscaled and tailscale from the configured install directory. Existing configuration is kept. Since the service remains enabled, it may reinstall the core automatically the next time the router starts."
+msgstr "此操作将停止 Tailscale，并从配置的安装目录中删除 tailscaled 和 tailscale。现有配置会保留。由于服务仍处于启用状态，路由器下次启动时可能会自动重新安装核心。"
+
+msgid "Delete"
+msgstr "删除"
+
+msgid "Tailscale binaries deleted."
+msgstr "Tailscale 二进制文件已删除。"
+
+msgid "Another operation is in progress."
+msgstr "另一个操作正在进行中。"
+
+msgid "Could not stop Tailscale before deleting binaries."
+msgstr "删除二进制文件前无法停止 Tailscale。"
+
+msgid "Failed to delete Tailscale binaries."
+msgstr "删除 Tailscale 二进制文件失败。"

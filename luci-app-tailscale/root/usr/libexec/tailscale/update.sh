@@ -2,7 +2,7 @@
 TS_PKG=tailscale
 TS_DEF_TMP=/tmp/tailscale
 TS_DEF_BIN=/usr/sbin
-TS_DEF_SOURCES='gitlab r2 github'
+TS_DEF_SOURCES='gitlab github r2'
 TS_DEF_TIMEOUT=20
 TS_DEF_RETRY=2
 TS_DEF_TTL=3600
@@ -75,10 +75,15 @@ ts_task_step() {
 }
 
 ts_task_done() {
-	local dir
+	local dir warning
 	dir="$(ts_tmpdir)"
+	warning="$3"
 	if [ -z "$2" ]; then
-		printf '{"step":"done","percent":100,"msg":"","done":true,"error":""}' >"$dir/task-$1.json"
+		if [ -n "$warning" ]; then
+			printf '{"step":"done","percent":100,"msg":"","done":true,"error":"","warning":"%s"}' "$warning" >"$dir/task-$1.json"
+		else
+			printf '{"step":"done","percent":100,"msg":"","done":true,"error":""}' >"$dir/task-$1.json"
+		fi
 	else
 		printf '{"step":"error","percent":100,"msg":"","done":true,"error":"%s"}' "$2" >"$dir/task-$1.json"
 	fi
@@ -118,7 +123,7 @@ ts_unlock() {
 }
 
 ts_fetch() {
-	local url="$1" out="$2" max="$3" timeout retry attempt
+	local url="$1" out="$2" max="$3" timeout retry attempt empty_seen
 	timeout="$(ts_uci_get update timeout "$TS_DEF_TIMEOUT")"
 	retry="$(ts_uci_get update retry "$TS_DEF_RETRY")"
 	if [ -n "${TS_METADATA_TIMEOUT:-}" ]; then
@@ -130,19 +135,69 @@ ts_fetch() {
 		max="$timeout"
 	fi
 	attempt=0
+	empty_seen=0
+	TS_FETCH_ERROR='fetch_fail'
 	while [ "$attempt" -le "$retry" ]; do
 		if command -v curl >/dev/null 2>&1; then
-			curl -fsSL --connect-timeout "$timeout" --max-time "$max" -o "$out" "$url" && return 0
+			if curl -fsSL --connect-timeout "$timeout" --max-time "$max" -o "$out" "$url"; then
+				if [ -s "$out" ]; then
+					TS_FETCH_ERROR=''
+					return 0
+				fi
+				empty_seen=1
+			fi
 		elif command -v uclient-fetch >/dev/null 2>&1; then
-			uclient-fetch --timeout="$max" -O "$out" "$url" && return 0
+			if uclient-fetch --timeout="$max" -O "$out" "$url"; then
+				if [ -s "$out" ]; then
+					TS_FETCH_ERROR=''
+					return 0
+				fi
+				empty_seen=1
+			fi
 		elif command -v wget >/dev/null 2>&1; then
-			wget -q -T "$max" -O "$out" "$url" && return 0
+			if wget -q -T "$max" -O "$out" "$url"; then
+				if [ -s "$out" ]; then
+					TS_FETCH_ERROR=''
+					return 0
+				fi
+				empty_seen=1
+			fi
 		else
+			TS_FETCH_ERROR='no_client'
 			return 2
 		fi
+		rm -f "$out"
 		attempt=$((attempt + 1))
-		sleep "$attempt"
+		if [ "$attempt" -le "$retry" ]; then
+			sleep "$attempt"
+		fi
 	done
+	if [ "$empty_seen" = "1" ]; then
+		TS_FETCH_ERROR='empty_response'
+	fi
+	return 1
+}
+
+ts_cached_fetch() {
+	local cache="$1" url="$2" max="$3" ttl="$4" stamp now
+	if [ -f "$cache" ]; then
+		stamp="$(stat -c %Y "$cache" 2>/dev/null || printf '0')"
+		now="$(date +%s)"
+		if [ $((now - stamp)) -lt "$ttl" ]; then
+			printf '%s' "$cache"
+			return 0
+		fi
+	fi
+	if ts_fetch "$url" "$cache.tmp" "$max"; then
+		mv "$cache.tmp" "$cache"
+		printf '%s' "$cache"
+		return 0
+	fi
+	rm -f "$cache.tmp"
+	if [ -f "$cache" ]; then
+		printf '%s' "$cache"
+		return 0
+	fi
 	return 1
 }
 
@@ -172,29 +227,11 @@ ts_official_arch() {
 }
 
 ts_official_manifest() {
-	local dir ttl cache stamp now
+	local dir ttl cache
 	dir="$(ts_tmpdir)"
 	ttl="$(ts_uci_get update cache_ttl "$TS_DEF_TTL")"
 	cache="$dir/rel-official-tailscale.json"
-	if [ -f "$cache" ]; then
-		stamp="$(stat -c %Y "$cache" 2>/dev/null || printf '0')"
-		now="$(date +%s)"
-		if [ $((now - stamp)) -lt "$ttl" ]; then
-			printf '%s' "$cache"
-			return 0
-		fi
-	fi
-	if ts_fetch 'https://pkgs.tailscale.com/stable/?mode=json&os=linux' "$cache.tmp" "$(ts_uci_get update timeout "$TS_DEF_TIMEOUT")"; then
-		mv "$cache.tmp" "$cache"
-		printf '%s' "$cache"
-		return 0
-	fi
-	rm -f "$cache.tmp"
-	if [ -f "$cache" ]; then
-		printf '%s' "$cache"
-		return 0
-	fi
-	return 1
+	ts_cached_fetch "$cache" 'https://pkgs.tailscale.com/stable/?mode=json&os=linux' "$(ts_uci_get update timeout "$TS_DEF_TIMEOUT")" "$ttl"
 }
 
 ts_official_latest() {
@@ -222,6 +259,7 @@ ts_path_bytes() {
 	[ -n "$real" ] || real="$path"
 	[ -f "$real" ] || { printf '0'; return 0; }
 	size="$(stat -c %s "$real" 2>/dev/null)"
+	case "$size" in ''|*[!0-9]*) size="$(wc -c < "$real" 2>/dev/null | tr -d ' ')" ;; esac
 	case "$size" in ''|*[!0-9]*) size=0 ;; esac
 	printf '%s' "$size"
 }
@@ -233,56 +271,36 @@ ts_free_bytes() {
 	printf '%s' "$bytes"
 }
 
-ts_update_required_bytes() {
-	local channel="$1" rollback
-	rollback="$(ts_uci_get update auto_rollback '1')"
-	case "$channel:$rollback" in
-		custom:1) printf '%s' $((30 * 1048576)) ;;
-		custom:*) printf '%s' $((10 * 1048576)) ;;
-		official:1) printf '%s' $((200 * 1048576)) ;;
-		official:*) printf '%s' $((130 * 1048576)) ;;
-		*) printf '0' ;;
-	esac
-}
-
-ts_update_free_bytes() {
-	local channel="$1" bin tmp cache_home cache_parent free_bin free_tmp free_cache minimum
-	bin="$(ts_uci_get main bin_dir "$TS_DEF_BIN")"
-	tmp="$(ts_tmpdir)"
-	free_bin="$(ts_free_bytes "$bin")"
-	free_tmp="$(ts_free_bytes "$tmp")"
-	minimum="$free_bin"
-	[ "$free_tmp" -ge "$minimum" ] || minimum="$free_tmp"
-	if [ "$channel" = "official" ]; then
-		cache_home="${XDG_CACHE_HOME:-${HOME:-/root}/.cache}"
-		cache_parent="$cache_home"
-		[ -d "$cache_parent" ] || cache_parent="${HOME:-/root}"
-		free_cache="$(ts_free_bytes "$cache_parent")"
-		[ "$free_cache" -ge "$minimum" ] || minimum="$free_cache"
-	fi
-	printf '%s' "$minimum"
-}
-
-ts_update_space_check() {
-	local channel="$1" available required
-	available="$(ts_update_free_bytes "$channel")"
-	required="$(ts_update_required_bytes "$channel")"
-	[ "$required" -gt 0 ] && [ "$available" -ge "$required" ]
-}
-
-ts_official_download_bytes() {
-	local url="$1" bytes
+ts_remote_bytes() {
+	local url="$1" bytes headers
+	bytes=0
 	if command -v curl >/dev/null 2>&1; then
-		bytes="$(curl -fsSI -L --connect-timeout 8 --max-time 20 "$url" 2>/dev/null | awk 'BEGIN { IGNORECASE=1 } tolower($1)=="content-length:" { gsub("\\r", "", $2); value=$2 } END { if (value ~ /^[0-9]+$/) print value; else print 0 }')"
-	else
-		bytes=0
+		bytes="$(curl -fsSI -L --connect-timeout 8 --max-time 20 "$url" 2>/dev/null | awk 'BEGIN { IGNORECASE=1 } tolower($1)=="content-length:" { gsub("\r", "", $2); value=$2 } END { if (value ~ /^[0-9]+$/) print value; else print 0 }')"
+	elif command -v uclient-fetch >/dev/null 2>&1; then
+		headers="$(uclient-fetch --timeout=20 --spider -O - -q "$url" 2>&1)"
+		bytes="$(printf '%s\n' "$headers" | awk 'BEGIN { IGNORECASE=1 } tolower($1)=="content-length:" { gsub("\r", "", $2); value=$2 } END { if (value ~ /^[0-9]+$/) print value; else print 0 }')"
+	elif command -v wget >/dev/null 2>&1; then
+		headers="$(wget --spider --server-response -T 20 -O /dev/null "$url" 2>&1)"
+		bytes="$(printf '%s\n' "$headers" | awk 'BEGIN { IGNORECASE=1 } tolower($1)=="content-length:" { gsub("\r", "", $2); value=$2 } END { if (value ~ /^[0-9]+$/) print value; else print 0 }')"
 	fi
 	case "$bytes" in ''|*[!0-9]*) bytes=0 ;; esac
 	printf '%s' "$bytes"
 }
 
+ts_cache_dir() {
+	local cache home
+	home="${HOME:-/root}"
+	cache="${XDG_CACHE_HOME:-$home/.cache}"
+	[ -d "$cache" ] || cache="$home"
+	printf '%s' "$cache"
+}
+
+ts_official_download_bytes() {
+	ts_remote_bytes "$1"
+}
+
 ts_official_info() {
-	local version="$1" arch="$2" file="$3" bin url cli_real daemon_real cli_bytes daemon_bytes installed_bytes cache_home cache_parent free_bin free_cache download_bytes
+	local version="$1" arch="$2" file="$3" bin url cli_real daemon_real cli_bytes daemon_bytes installed_bytes cache_parent free_bin free_cache download_bytes
 	bin="$(ts_uci_get main bin_dir "$TS_DEF_BIN")"
 	url="https://pkgs.tailscale.com/stable/$file"
 	cli_real="$(readlink -f "$bin/tailscale" 2>/dev/null)"
@@ -294,9 +312,7 @@ ts_official_info() {
 	else
 		installed_bytes=$((cli_bytes + daemon_bytes))
 	fi
-	cache_home="${XDG_CACHE_HOME:-${HOME:-/root}/.cache}"
-	cache_parent="$cache_home"
-	[ -d "$cache_parent" ] || cache_parent="${HOME:-/root}"
+	cache_parent="$(ts_cache_dir)"
 	free_bin="$(ts_free_bytes "$bin")"
 	free_cache="$(ts_free_bytes "$cache_parent")"
 	download_bytes="$(ts_official_download_bytes "$url")"
@@ -315,8 +331,8 @@ ts_custom_layout() {
 }
 
 ts_official_list() {
-	local version arch file info
-	version="$(ts_official_latest)" || return 1
+	local version="${1:-}" arch file info
+	[ -n "$version" ] || version="$(ts_official_latest)" || return 1
 	arch="$(ts_official_arch)" || return 1
 	file="$(ts_official_file "$version" "$arch")" || return 1
 	info="$(ts_official_info "$version" "$arch" "$file")"
@@ -439,34 +455,19 @@ ts_sources() {
 		return 0
 	fi
 	order="$(ts_uci_get update source_order "$TS_DEF_SOURCES")"
+	if [ "$order" = 'gitlab r2 github' ]; then
+		order="$TS_DEF_SOURCES"
+	fi
 	printf '%s' "$order"
 }
 
 ts_releases() {
-	local dir ttl cache url stamp now
+	local dir ttl cache url
 	dir="$(ts_tmpdir)"
 	ttl="$(ts_uci_get update cache_ttl "$TS_DEF_TTL")"
 	cache="$dir/rel-$2-$1.json"
 	url="$(ts_api_url "$2" "$1")" || return 1
-	if [ -f "$cache" ]; then
-		stamp="$(stat -c %Y "$cache" 2>/dev/null || printf '0')"
-		now="$(date +%s)"
-		if [ $((now - stamp)) -lt "$ttl" ]; then
-			printf '%s' "$cache"
-			return 0
-		fi
-	fi
-	if ts_fetch "$url" "$cache.tmp"; then
-		mv "$cache.tmp" "$cache"
-		printf '%s' "$cache"
-		return 0
-	fi
-	rm -f "$cache.tmp"
-	if [ -f "$cache" ]; then
-		printf '%s' "$cache"
-		return 0
-	fi
-	return 1
+	ts_cached_fetch "$cache" "$url" '' "$ttl"
 }
 
 ts_versions() {
@@ -548,6 +549,7 @@ ts_install_loop() {
 			4) fail='extract_fail' ;;
 			5) fail='tryrun_fail' ;;
 			6) fail='pkg_fail' ;;
+			7) fail='space_insufficient'; printf '%s' "$fail"; return 1 ;;
 			*) fail='install_fail' ;;
 			esac
 		done
@@ -577,6 +579,14 @@ core_member() {
 	tar -tzf "$1" 2>/dev/null | grep -m1 '/tailscaled$'
 }
 
+core_member_bytes() {
+	local bytes
+	bytes="$(tar -tvzf "$1" "$2" 2>/dev/null | awk 'NR==1 { print $3; exit }')"
+	case "$bytes" in ''|*[!0-9]*|0) bytes="$(tar -xzOf "$1" "$2" 2>/dev/null | wc -c | tr -d ' ')" ;; esac
+	case "$bytes" in ''|*[!0-9]*) bytes=0 ;; esac
+	printf '%s' "$bytes"
+}
+
 core_tryrun() {
 	if command -v timeout >/dev/null 2>&1; then
 		timeout "$TS_DEF_TRYRUN" "$1" -version >/dev/null 2>&1
@@ -596,6 +606,81 @@ core_installed_version() {
 		return 1
 	fi
 	ts_ver_norm "$version"
+}
+
+ts_extract_version() {
+	printf '%s' "$1" | grep -Eo -m1 '[0-9]+\.[0-9]+\.[0-9]+'
+}
+
+ts_version_matches() {
+	local expected="$1" actual="$2"
+	[ -z "$expected" ] || [ "$expected" = "latest" ] || [ "$(ts_ver_norm "$actual")" = "$(ts_ver_norm "$expected")" ]
+}
+
+core_binary_version_ok() {
+	local bin="$1" expected="$2" cli_output daemon_output cli_version daemon_version
+	[ -x "$bin/tailscale" ] && [ -x "$bin/tailscaled" ] || return 1
+	cli_output="$("$bin/tailscale" version 2>/dev/null)" || return 1
+	daemon_output="$("$bin/tailscaled" --version 2>&1)" || return 1
+	cli_version="$(ts_extract_version "$cli_output")"
+	daemon_version="$(ts_extract_version "$daemon_output")"
+	[ -n "$cli_version" ] && [ -n "$daemon_version" ] || return 1
+	ts_version_matches "$expected" "$cli_version" && ts_version_matches "$expected" "$daemon_version"
+}
+
+core_service_ready() {
+	local bin="$1" expected="$2" socket="$3" output reported
+	if command -v timeout >/dev/null 2>&1; then
+		output="$(timeout 2 "$bin/tailscale" "--socket=$socket" status --json 2>/dev/null)" || return 1
+	else
+		output="$("$bin/tailscale" "--socket=$socket" status --json 2>/dev/null)" || return 1
+	fi
+	printf '%s' "$output" | grep -q '"BackendState"[[:space:]]*:' || return 1
+	reported="$(printf '%s' "$output" | grep -Eo -m1 '"Version"[[:space:]]*:[[:space:]]*"[^"]*"' | cut -d '"' -f4)"
+	if [ -n "$expected" ] && [ "$expected" != "latest" ] && [ -n "$reported" ]; then
+		reported="$(ts_extract_version "$reported")"
+		[ -n "$reported" ] && ts_version_matches "$expected" "$reported" || return 1
+	fi
+	return 0
+}
+
+ts_service_wait_seconds() {
+	local value
+	value="$(ts_uci_get update service_wait_seconds 180)"
+	case "$value" in
+		''|*[!0-9]*) value=180 ;;
+	esac
+	value="$(printf '%s' "$value" | sed 's/^0*//')"
+	[ -n "$value" ] || value=0
+	[ "$value" -ge 30 ] 2>/dev/null || value=30
+	[ "$value" -le 600 ] 2>/dev/null || value=600
+	printf '%s' "$value"
+}
+
+ts_wait_service() {
+	local id="$1" bin="$2" expected="$3" socket="$4" start deadline now elapsed next_log remaining wait_seconds
+	wait_seconds="$(ts_service_wait_seconds)"
+	start="$(date +%s)"
+	deadline=$((start + wait_seconds))
+	next_log=$((start + 15))
+	ts_task_step "$id" healthcheck 98 ''
+	while :; do
+		if core_service_ready "$bin" "$expected" "$socket"; then
+			now="$(date +%s)"
+			ts_task_log "$id" service_ready "$((now - start)) seconds"
+			return 0
+		fi
+		now="$(date +%s)"
+		[ "$now" -lt "$deadline" ] || break
+		elapsed=$((now - start))
+		if [ "$now" -ge "$next_log" ]; then
+			ts_task_log "$id" service_wait "$elapsed/$wait_seconds seconds"
+			next_log=$((now + 15))
+		fi
+		remaining=$((deadline - now))
+		if [ "$remaining" -lt 1 ]; then sleep "$remaining"; else sleep 1; fi
+	done
+	return 1
 }
 
 core_resolve() {
@@ -626,25 +711,79 @@ core_resolve() {
 }
 
 core_attempt() {
-	local id="$1" blob="$2" file="$3" url="$4" dir pkg expect got member new
+	local id="$1" blob="$2" file="$3" url="$4" dir bin pkg expect got member new download_bytes actual_download_bytes free_tmp free_bin member_bytes stage_dir archive_dir need
 	dir="$(ts_tmpdir)"
-	pkg="$dir/dl/$file"
+	bin="$(ts_uci_get main bin_dir "$TS_DEF_BIN")"
+	stage_dir="$bin/.tailscale-stage-$id"
+	rm -rf "$stage_dir" 2>/dev/null
+	if ! mkdir -p "$dir/dl" "$bin" "$stage_dir" 2>/dev/null; then
+		ts_task_log "$id" space_insufficient 'unable to create a staging directory'
+		return 7
+	fi
+	download_bytes="$(ts_remote_bytes "$url")"
+	free_tmp="$(ts_free_bytes "$dir/dl")"
+	free_bin="$(ts_free_bytes "$bin")"
+	if [ "$download_bytes" -gt 0 ]; then
+		need=$((download_bytes + 1048576))
+		if [ "$free_tmp" -ge "$need" ]; then
+			archive_dir="$dir/dl"
+		elif [ "$free_bin" -ge "$need" ]; then
+			archive_dir="$stage_dir"
+		else
+			rm -rf "$stage_dir"
+			ts_task_log "$id" space_insufficient 'not enough space for archive in temporary or installation directory'
+			return 7
+		fi
+	else
+		if [ "$free_tmp" -ge 1048576 ] && { [ "$free_bin" -lt 1048576 ] || [ "$free_tmp" -ge "$free_bin" ]; }; then
+			archive_dir="$dir/dl"
+		elif [ "$free_bin" -ge 1048576 ]; then
+			archive_dir="$stage_dir"
+		elif [ "$free_tmp" -ge 1048576 ]; then
+			archive_dir="$dir/dl"
+		else
+			rm -rf "$stage_dir"
+			ts_task_log "$id" space_insufficient 'temporary and installation directories are nearly full'
+			return 7
+		fi
+	fi
+	pkg="$archive_dir/$file"
 	ts_task_step "$id" download 20 "$file"
 	if ! ts_fetch "$url" "$pkg" "$(ts_uci_get update dl_timeout "$TS_DEF_DL")"; then
 		rm -f "$pkg"
-		ts_task_log "$id" fetch_fail "$file"
+		rm -rf "$stage_dir"
+		if [ "$TS_FETCH_ERROR" = "empty_response" ]; then
+			ts_task_log "$id" fetch_fail 'empty response after retries'
+		elif [ "$TS_FETCH_ERROR" = "no_client" ]; then
+			ts_task_log "$id" fetch_fail 'no downloader is installed'
+		else
+			ts_task_log "$id" fetch_fail "$file"
+		fi
 		return 1
+	fi
+	actual_download_bytes="$(ts_path_bytes "$pkg")"
+	if [ "$actual_download_bytes" -le 0 ]; then
+		rm -f "$pkg"
+		rm -rf "$stage_dir"
+		ts_task_log "$id" fetch_fail 'downloaded archive is empty'
+		return 1
+	fi
+	ts_task_log "$id" archive_bytes "$actual_download_bytes"
+	if [ "$download_bytes" -gt 0 ] && [ "$download_bytes" != "$actual_download_bytes" ]; then
+		ts_task_log "$id" content_length_mismatch "$download_bytes:$actual_download_bytes"
 	fi
 	ts_task_step "$id" download 60 "$file"
 	expect="$(ts_hash "$blob" "$file")"
 	if [ -z "$expect" ]; then
 		rm -f "$pkg"
+		rm -rf "$stage_dir"
 		ts_task_log "$id" no_hash "$file"
 		return 2
 	fi
 	got="$(ts_sha256_file "$pkg")"
 	if [ "$got" != "$expect" ]; then
 		rm -f "$pkg"
+		rm -rf "$stage_dir"
 		ts_task_log "$id" hash_mismatch "$file"
 		return 3
 	fi
@@ -652,19 +791,41 @@ core_attempt() {
 	member="$(core_member "$pkg")"
 	if [ -z "$member" ]; then
 		rm -f "$pkg"
+		rm -rf "$stage_dir"
 		ts_task_log "$id" extract_fail "$file"
 		return 4
 	fi
-	new="$dir/dl/tailscaled.new"
+	member_bytes="$(core_member_bytes "$pkg" "$member")"
+	if [ "$member_bytes" -le 0 ]; then
+		rm -f "$pkg"
+		rm -rf "$stage_dir"
+		ts_task_log "$id" extract_fail 'archive member size is unavailable'
+		return 4
+	fi
+	free_bin="$(ts_free_bytes "$bin")"
+	if [ "$free_bin" -lt "$((member_bytes + 1048576))" ]; then
+		rm -f "$pkg"
+		rm -rf "$stage_dir"
+		ts_task_log "$id" space_insufficient 'not enough installation space for extracted daemon'
+		return 7
+	fi
+	new="$stage_dir/tailscaled.new"
 	if ! tar -xzOf "$pkg" "$member" >"$new" 2>/dev/null; then
 		rm -f "$pkg" "$new"
+		rm -rf "$stage_dir"
 		ts_task_log "$id" extract_fail "$file"
 		return 4
 	fi
 	ts_task_step "$id" extract 80 "$file"
-	chmod 755 "$new"
+	if ! chmod 755 "$new"; then
+		rm -f "$pkg" "$new"
+		rm -rf "$stage_dir"
+		ts_task_log "$id" extract_fail "$file"
+		return 4
+	fi
 	if ! core_tryrun "$new"; then
 		rm -f "$pkg" "$new"
+		rm -rf "$stage_dir"
 		ts_task_log "$id" tryrun_fail "$file"
 		return 5
 	fi
@@ -675,10 +836,12 @@ core_attempt() {
 }
 
 core_finish() {
-	local dir
+	local dir bin
 	dir="$(ts_tmpdir)"
+	bin="$(ts_uci_get main bin_dir "$TS_DEF_BIN")"
+	rm -rf "$bin/.tailscale-stage-$1" 2>/dev/null
 	cp -f "$dir/task-$1.log" "$dir/last-core.log" 2>/dev/null
-	ts_task_done "$1" "$2"
+	ts_task_done "$1" "$2" "$3"
 	ts_unlock "$dir/download"
 }
 
@@ -688,6 +851,70 @@ core_cli_running() {
 	else
 		pidof tailscale >/dev/null 2>&1
 	fi
+}
+
+core_stop_for_update() {
+	local init="$1" timeout="${2:-30}" waited=0
+	if ts_running; then
+		TS_STOP_KEEP_CONFIG=1 TS_STOP_RELOAD_NETWORK=0 TS_STOP_SKIP_WORKER=1 "$init" stop >/dev/null 2>&1 || :
+	fi
+	while [ "$waited" -lt "$timeout" ]; do
+		if ! ts_running && ! core_cli_running; then
+			return 0
+		fi
+		sleep 1
+		waited=$((waited + 1))
+	done
+	if ts_running || core_cli_running; then
+		return 1
+	fi
+	return 0
+}
+
+core_remove() {
+	local dir bin init
+	dir="$(ts_tmpdir)"
+	if ! mkdir -p "$dir"; then
+		printf 'delete_fail'
+		return 1
+	fi
+	if ! ts_lock "$dir/download"; then
+		printf 'busy'
+		return 1
+	fi
+	bin="$(ts_uci_get main bin_dir "$TS_DEF_BIN")"
+	while [ "$bin" != "/" ] && [ "${bin%/}" != "$bin" ]; do
+		bin="${bin%/}"
+	done
+	case "$bin" in
+		/*) ;;
+		*)
+			ts_unlock "$dir/download"
+			printf 'invalid_bin_dir'
+			return 1
+			;;
+	esac
+	case "$bin" in
+		/|*/..|*/../*|*/.|*/./*)
+			ts_unlock "$dir/download"
+			printf 'invalid_bin_dir'
+			return 1
+			;;
+	esac
+	init="${TS_SELF_INIT:-/etc/init.d/tailscale}"
+	if ! core_stop_for_update "$init" 30; then
+		ts_unlock "$dir/download"
+		printf 'service_stop_fail'
+		return 1
+	fi
+	if ! rm -f "$bin/tailscaled" "$bin/tailscale"; then
+		ts_unlock "$dir/download"
+		printf 'delete_fail'
+		return 1
+	fi
+	ts_unlock "$dir/download"
+	printf 'removed'
+	return 0
 }
 
 core_manual_cleanup() {
@@ -736,7 +963,7 @@ core_manual_install() {
 	if [ -z "$result" ] && ts_running; then
 		was_running=1
 		ts_task_step "$id" stop 78 ""
-		if ! "$init" stop >/dev/null 2>&1; then
+		if ! TS_STOP_KEEP_CONFIG=1 TS_STOP_RELOAD_NETWORK=0 TS_STOP_SKIP_WORKER=1 "$init" stop >/dev/null 2>&1; then
 			result='service_stop_fail'
 		else
 			for i in 1 2 3 4 5 6 7 8 9 10; do
@@ -764,13 +991,14 @@ core_manual_install() {
 	fi
 	if [ -z "$result" ]; then
 		ts_task_step "$id" restart 92 ""
-		"$init" restart >/dev/null 2>&1 &
+		TS_STOP_KEEP_CONFIG=1 "$init" restart >/dev/null 2>&1 &
 	fi
 	if [ -n "$result" ] && [ "$changed" = 1 ] && [ "$backup_ok" = 1 ]; then
-		if ts_running; then "$init" stop >/dev/null 2>&1; fi
-		if cat "$backup" > "$bin/tailscaled" && chmod 755 "$bin/tailscaled" && ln -sf tailscaled "$bin/tailscale"; then
+		if ! core_stop_for_update "$init" 30; then
+			result='rollback_fail'
+		elif cat "$backup" > "$bin/tailscaled" && chmod 755 "$bin/tailscaled" && ln -sf tailscaled "$bin/tailscale"; then
 			result='rolled_back'
-			"$init" restart >/dev/null 2>&1 &
+			TS_STOP_KEEP_CONFIG=1 "$init" restart >/dev/null 2>&1 &
 		else
 			result='rollback_fail'
 		fi
@@ -779,45 +1007,66 @@ core_manual_install() {
 		ln -sf tailscaled "$bin/tailscale" || result='rollback_fail'
 	fi
 	if [ -n "$result" ] && [ "$changed" = 0 ] && [ "$was_running" = 1 ] && ! ts_running; then
-		"$init" restart >/dev/null 2>&1 &
+		TS_STOP_KEEP_CONFIG=1 "$init" restart >/dev/null 2>&1 &
 	fi
 	core_finish "$id" "$result"
 	core_manual_cleanup "$id"
 	[ -z "$result" ]
 }
 
+core_backup_bytes() {
+	local bin="$1" total=0 size file
+	for file in tailscaled tailscale; do
+		if [ -f "$bin/$file" ] && { [ "$file" = "tailscaled" ] || [ ! -L "$bin/$file" ]; }; then
+			size="$(ts_path_bytes "$bin/$file")"
+			total=$((total + size))
+		fi
+	done
+	printf '%s' "$total"
+}
+
+core_backup_destination() {
+	local id="$1" bin="$2" dir="$3" install_need="$4" backup_bytes free_bin free_tmp
+	backup_bytes="$(core_backup_bytes "$bin")"
+	[ "$backup_bytes" -gt 0 ] || return 1
+	free_bin="$(ts_free_bytes "$bin")"
+	if [ "$free_bin" -ge "$((backup_bytes + install_need))" ]; then
+		printf '%s' "$bin/.tailscale-update-$id"
+		return 0
+	fi
+	free_tmp="$(ts_free_bytes "$dir")"
+	if [ "$free_bin" -ge "$install_need" ] && [ "$free_tmp" -ge "$((backup_bytes + 1048576))" ]; then
+		printf '%s' "$dir/rollback-$id"
+		return 0
+	fi
+	return 1
+}
+
 core_backup_files() {
-	local bin="$1"
-	rm -f "$bin/tailscale.bak.new" "$bin/tailscaled.bak.new"
-	if [ -f "$bin/tailscaled" ] && ! cp -p "$bin/tailscaled" "$bin/tailscaled.bak.new"; then
-		rm -f "$bin/tailscale.bak.new" "$bin/tailscaled.bak.new"
+	local bin="$1" backup_dir="$2"
+	[ -n "$backup_dir" ] || return 1
+	rm -rf "$backup_dir"
+	mkdir -p "$backup_dir" || return 1
+	if [ -f "$bin/tailscaled" ] && ! cp -p "$bin/tailscaled" "$backup_dir/tailscaled"; then
+		rm -rf "$backup_dir"
 		return 1
 	fi
-	if [ -f "$bin/tailscale" ] && [ ! -L "$bin/tailscale" ] && ! cp -p "$bin/tailscale" "$bin/tailscale.bak.new"; then
-		rm -f "$bin/tailscale.bak.new" "$bin/tailscaled.bak.new"
+	if [ -f "$bin/tailscale" ] && [ ! -L "$bin/tailscale" ] && ! cp -p "$bin/tailscale" "$backup_dir/tailscale"; then
+		rm -rf "$backup_dir"
 		return 1
-	fi
-	if [ -f "$bin/tailscaled.bak.new" ]; then
-		mv -f "$bin/tailscaled.bak.new" "$bin/tailscaled.bak" || return 1
-	else
-		rm -f "$bin/tailscaled.bak" || return 1
-	fi
-	if [ -f "$bin/tailscale.bak.new" ]; then
-		mv -f "$bin/tailscale.bak.new" "$bin/tailscale.bak" || return 1
-	else
-		rm -f "$bin/tailscale.bak" || return 1
 	fi
 	return 0
 }
 
 core_remove_backups() {
-	rm -f "$1/tailscale.bak" "$1/tailscaled.bak" "$1/tailscale.bak.new" "$1/tailscaled.bak.new"
+	[ -n "$1" ] || return 0
+	rm -rf "$1"
 }
 
 core_restore_files() {
-	local bin="$1" had_daemon="$2" had_cli="$3" cli_link="$4" rc=0
+	local bin="$1" backup_dir="$2" had_daemon="$3" had_cli="$4" cli_link="$5" rc=0
 	if [ "$had_daemon" = "1" ]; then
-		if ! cp -p "$bin/tailscaled.bak" "$bin/tailscaled"; then rc=1; fi
+		if ! cp -p "$backup_dir/tailscaled" "$bin/tailscaled"; then rc=1; fi
 	else
 		rm -f "$bin/tailscaled" || rc=1
 	fi
@@ -825,8 +1074,8 @@ core_restore_files() {
 		if [ -n "$cli_link" ]; then
 			rm -f "$bin/tailscale" || rc=1
 			ln -s "$cli_link" "$bin/tailscale" || rc=1
-		elif [ -f "$bin/tailscale.bak" ]; then
-			cp -p "$bin/tailscale.bak" "$bin/tailscale" || rc=1
+		elif [ -f "$backup_dir/tailscale" ]; then
+			cp -p "$backup_dir/tailscale" "$bin/tailscale" || rc=1
 		else
 			rc=1
 		fi
@@ -837,29 +1086,50 @@ core_restore_files() {
 }
 
 core_rollback() {
-	local id="$1" bin="$2" init="$3" had_daemon="$4" had_cli="$5" cli_link="$6" was_running="$7" cause="$8"
+	local id="$1" bin="$2" init="$3" backup_dir="$4" had_daemon="$5" had_cli="$6" cli_link="$7" was_running="$8" cause="$9" old_version="${10}" socket
 	ts_task_log "$id" update_failed "$cause"
-	if ! core_restore_files "$bin" "$had_daemon" "$had_cli" "$cli_link"; then
+	if ! core_stop_for_update "$init" 30; then
+		if [ "$was_running" = "1" ] && ! ts_running; then
+			TS_STOP_KEEP_CONFIG=1 "$init" restart >/dev/null 2>&1 &
+		fi
+		ts_task_log "$id" rollback_fail 'service did not stop before restoring binaries'
+		core_finish "$id" rollback_fail
+		return 1
+	fi
+	if ! core_restore_files "$bin" "$backup_dir" "$had_daemon" "$had_cli" "$cli_link"; then
 		ts_task_log "$id" rollback_fail 'binary restoration failed'
 		core_finish "$id" rollback_fail
 		return 1
 	fi
-	if [ "$was_running" = "1" ] && ! "$init" restart >/dev/null 2>&1; then
-		ts_task_log "$id" rollback_fail 'service restart after restoration failed'
+	if [ -n "$old_version" ] && ! core_binary_version_ok "$bin" "$old_version"; then
+		ts_task_log "$id" rollback_fail 'restored binaries did not pass the version check'
 		core_finish "$id" rollback_fail
 		return 1
 	fi
-	core_remove_backups "$bin"
+	if [ "$was_running" = "1" ]; then
+		socket="$(ts_uci_get main socket "$TS_DEF_SOCKET")"
+		ts_task_step "$id" restart 99 ''
+		TS_STOP_KEEP_CONFIG=1 "$init" restart >/dev/null 2>&1 &
+		if ! ts_wait_service "$id" "$bin" "$old_version" "$socket"; then
+			ts_task_log "$id" rollback_fail 'service did not recover after restoration'
+			core_finish "$id" rollback_fail
+			return 1
+		fi
+	fi
+	core_remove_backups "$backup_dir"
 	ts_task_log "$id" rollback 'previous binary state restored'
 	core_finish "$id" rolled_back
 	return 1
 }
 
 core_update_failure() {
-	local id="$1" bin="$2" init="$3" had_daemon="$4" had_cli="$5" cli_link="$6" was_running="$7" cause="$8" rollback="${9:-1}"
-	if [ "$rollback" = "1" ]; then
-		core_rollback "$id" "$bin" "$init" "$had_daemon" "$had_cli" "$cli_link" "$was_running" "$cause"
+	local id="$1" bin="$2" init="$3" backup_dir="$4" had_daemon="$5" had_cli="$6" cli_link="$7" was_running="$8" cause="$9" old_version="${10}"
+	if [ -n "$backup_dir" ]; then
+		core_rollback "$id" "$bin" "$init" "$backup_dir" "$had_daemon" "$had_cli" "$cli_link" "$was_running" "$cause" "$old_version"
 		return 1
+	fi
+	if [ "$was_running" = "1" ] && ! ts_running; then
+		TS_STOP_KEEP_CONFIG=1 "$init" restart >/dev/null 2>&1 &
 	fi
 	ts_task_log "$id" update_failed "$cause"
 	core_finish "$id" update_fail_no_rollback
@@ -867,16 +1137,12 @@ core_update_failure() {
 }
 
 core_install() {
-	local id="$1" version="$2" want="$3" wsrc="$4" dir bin out new fail init had_daemon had_cli cli_link was_running rollback
+	local id="$1" version="$2" want="$3" wsrc="$4" dir bin out new fail init had_daemon had_cli cli_link was_running rollback backup_dir warning new_bytes install_need free_bin expected_version old_version socket
 	dir="$(ts_tmpdir)"
 	bin="$(ts_uci_get main bin_dir "$TS_DEF_BIN")"
 	init="${TS_SELF_INIT:-/etc/init.d/tailscale}"
 	mkdir -p "$bin" 2>/dev/null
 	ts_task_begin "$id"
-	if ! ts_update_space_check custom; then
-		ts_task_done "$id" space_insufficient
-		return 1
-	fi
 	if ! ts_lock "$dir/download"; then
 		ts_task_done "$id" busy
 		return 1
@@ -892,6 +1158,7 @@ core_install() {
 		return 1
 	fi
 	ts_task_step "$id" install 90 ""
+	old_version="$(core_installed_version)" || old_version=''
 	had_daemon=0
 	[ -f "$bin/tailscaled" ] && had_daemon=1
 	had_cli=0
@@ -901,42 +1168,89 @@ core_install() {
 	was_running=0
 	ts_running && was_running=1
 	rollback="$(ts_uci_get update auto_rollback '1')"
-	if [ "$rollback" = "1" ] && ! core_backup_files "$bin"; then
-		ts_task_log "$id" backup_fail ''
-		core_finish "$id" backup_fail
+	backup_dir=''
+	warning=''
+	new_bytes="$(ts_path_bytes "$new")"
+	if [ "$new" = "$bin/.tailscale-stage-$id/tailscaled.new" ]; then
+		install_need=1048576
+	else
+		install_need=$((new_bytes + 1048576))
+	fi
+	free_bin="$(ts_free_bytes "$bin")"
+	if [ "$new_bytes" -le 0 ] || [ "$free_bin" -lt "$install_need" ]; then
+		rm -f "$new"
+		core_finish "$id" space_insufficient
+		return 1
+	fi
+	if [ "$rollback" = "1" ]; then
+		backup_dir="$(core_backup_destination "$id" "$bin" "$dir" "$install_need")" || backup_dir=''
+		if [ -n "$backup_dir" ] && core_backup_files "$bin" "$backup_dir"; then
+			ts_task_log "$id" backup_created "$backup_dir"
+		else
+			backup_dir=''
+			warning='backup_unavailable'
+			ts_task_log "$id" backup_skipped 'space or filesystem constraints prevented a backup'
+		fi
+	fi
+	free_bin="$(ts_free_bytes "$bin")"
+	if [ "$free_bin" -lt "$install_need" ]; then
+		core_remove_backups "$backup_dir"
+		backup_dir=''
+		rm -f "$new"
+		core_finish "$id" space_insufficient
+		return 1
+	fi
+	expected_version="$version"
+	if [ "$expected_version" = "latest" ]; then
+		expected_version="$(ts_extract_version "$("$new" --version 2>&1)")"
+	fi
+	if [ "$was_running" = "1" ]; then
+		ts_task_step "$id" stop 92 ""
+	fi
+	if ! core_stop_for_update "$init" 30; then
+		if [ "$was_running" = "1" ] && ! ts_running; then
+			TS_STOP_KEEP_CONFIG=1 "$init" restart >/dev/null 2>&1 &
+		fi
+		core_remove_backups "$backup_dir"
+		core_finish "$id" service_stop_fail
 		return 1
 	fi
 	if ! mv -f "$new" "$bin/tailscaled"; then
-		core_update_failure "$id" "$bin" "$init" "$had_daemon" "$had_cli" "$cli_link" "$was_running" install_fail "$rollback"
+		core_update_failure "$id" "$bin" "$init" "$backup_dir" "$had_daemon" "$had_cli" "$cli_link" "$was_running" install_fail "$old_version"
 		return 1
 	fi
 	if ! chmod 755 "$bin/tailscaled"; then
-		core_update_failure "$id" "$bin" "$init" "$had_daemon" "$had_cli" "$cli_link" "$was_running" install_fail "$rollback"
+		core_update_failure "$id" "$bin" "$init" "$backup_dir" "$had_daemon" "$had_cli" "$cli_link" "$was_running" install_fail "$old_version"
 		return 1
 	fi
 	if ! ln -sf tailscaled "$bin/tailscale" && ! cp -f "$bin/tailscaled" "$bin/tailscale"; then
-		core_update_failure "$id" "$bin" "$init" "$had_daemon" "$had_cli" "$cli_link" "$was_running" install_fail "$rollback"
+		core_update_failure "$id" "$bin" "$init" "$backup_dir" "$had_daemon" "$had_cli" "$cli_link" "$was_running" install_fail "$old_version"
 		return 1
 	fi
-	if [ ! -x "$bin/tailscale" ] || [ ! -x "$bin/tailscaled" ]; then
-		core_update_failure "$id" "$bin" "$init" "$had_daemon" "$had_cli" "$cli_link" "$was_running" install_fail "$rollback"
+	if [ -z "$expected_version" ]; then
+		expected_version="$(core_installed_version)" || expected_version=''
+	fi
+	if ! core_binary_version_ok "$bin" "$expected_version"; then
+		core_update_failure "$id" "$bin" "$init" "$backup_dir" "$had_daemon" "$had_cli" "$cli_link" "$was_running" version_check_fail "$old_version"
 		return 1
 	fi
 	ts_task_step "$id" install 95 ""
 	if [ "$was_running" = "1" ]; then
-		ts_task_step "$id" restart 98 ""
-		if ! "$init" restart >/dev/null 2>&1; then
-			core_update_failure "$id" "$bin" "$init" "$had_daemon" "$had_cli" "$cli_link" "$was_running" restart_fail "$rollback"
+		ts_task_step "$id" restart 97 ""
+		socket="$(ts_uci_get main socket "$TS_DEF_SOCKET")"
+		TS_STOP_KEEP_CONFIG=1 "$init" restart >/dev/null 2>&1 &
+		if ! ts_wait_service "$id" "$bin" "$expected_version" "$socket"; then
+			core_update_failure "$id" "$bin" "$init" "$backup_dir" "$had_daemon" "$had_cli" "$cli_link" "$was_running" restart_fail "$old_version"
 			return 1
 		fi
 	fi
-	core_remove_backups "$bin"
-	core_finish "$id" ""
+	core_remove_backups "$backup_dir"
+	core_finish "$id" "" "$warning"
 	return 0
 }
 
 official_install() {
-	local id="$1" version="$2" dir bin init latest installed comparison force rc line restart_failed had_daemon had_cli cli_link was_running rollback
+	local id="$1" version="$2" dir bin init latest installed comparison force rc line restart_failed had_daemon had_cli cli_link was_running rollback backup_dir warning old_version arch file info download_bytes installed_bytes install_bytes install_need cache_need free_bin free_cache backup_bytes cache expected_version socket
 	dir="$(ts_tmpdir)"
 	bin="$(ts_uci_get main bin_dir "$TS_DEF_BIN")"
 	init="${TS_SELF_INIT:-/etc/init.d/tailscale}"
@@ -969,22 +1283,90 @@ official_install() {
 		core_finish "$id" core_missing
 		return 1
 	fi
+	arch="$(ts_official_arch)" || {
+		core_finish "$id" unsupported_version
+		return 1
+	}
+	file="$(ts_official_file "$latest" "$arch")" || {
+		core_finish "$id" fetch_fail
+		return 1
+	}
+	info="$(ts_official_info "$latest" "$arch" "$file")"
+	download_bytes="$(printf '%s' "$info" | sed -n 's/.*"download_bytes":\([0-9][0-9]*\).*/\1/p')"
+	installed_bytes="$(printf '%s' "$info" | sed -n 's/.*"installed_bytes":\([0-9][0-9]*\).*/\1/p')"
+	case "$download_bytes" in ''|*[!0-9]*) download_bytes=0 ;; esac
+	case "$installed_bytes" in ''|*[!0-9]*) installed_bytes=0 ;; esac
+	backup_bytes="$(core_backup_bytes "$bin")"
+	install_bytes="$installed_bytes"
+	[ "$install_bytes" -ge "$backup_bytes" ] || install_bytes="$backup_bytes"
+	[ "$install_bytes" -gt 0 ] || install_bytes=1048576
+	install_need=$((install_bytes + 1048576))
+	cache_need="$download_bytes"
+	[ "$cache_need" -gt 0 ] || cache_need="$install_bytes"
+	cache_need=$((cache_need + 1048576))
+	expected_version="$latest"
+	cache="$(ts_cache_dir)"
+	free_bin="$(ts_free_bytes "$bin")"
+	free_cache="$(ts_free_bytes "$cache")"
+	if [ "$free_bin" -lt "$install_need" ] || [ "$free_cache" -lt "$cache_need" ]; then
+		core_finish "$id" space_insufficient
+		return 1
+	fi
 	had_daemon=0
 	[ -f "$bin/tailscaled" ] && had_daemon=1
 	had_cli=0
 	{ [ -e "$bin/tailscale" ] || [ -L "$bin/tailscale" ]; } && had_cli=1
 	cli_link=''
 	if [ -L "$bin/tailscale" ]; then cli_link="$(readlink "$bin/tailscale" 2>/dev/null)"; fi
+	old_version="$installed"
 	was_running=0
 	ts_running && was_running=1
-	if ! ts_update_space_check official; then
-		core_finish "$id" space_insufficient
-		return 1
-	fi
 	rollback="$(ts_uci_get update auto_rollback '1')"
-	if [ "$rollback" = "1" ] && ! core_backup_files "$bin"; then
-		ts_task_log "$id" backup_fail ''
-		core_finish "$id" backup_fail
+	backup_dir=''
+	warning=''
+	if [ "$rollback" = "1" ]; then
+		backup_dir="$(core_backup_destination "$id" "$bin" "$dir" "$install_need")" || backup_dir=''
+		if [ -n "$backup_dir" ]; then
+			if core_backup_files "$bin" "$backup_dir"; then
+				free_bin="$(ts_free_bytes "$bin")"
+				free_cache="$(ts_free_bytes "$cache")"
+				if [ "$free_bin" -lt "$install_need" ] || [ "$free_cache" -lt "$cache_need" ]; then
+					core_remove_backups "$backup_dir"
+					backup_dir=''
+				fi
+			else
+				backup_dir=''
+			fi
+		fi
+		if [ -z "$backup_dir" ] && [ "$backup_bytes" -gt 0 ]; then
+			free_bin="$(ts_free_bytes "$bin")"
+			free_cache="$(ts_free_bytes "$cache")"
+			free_tmp="$(ts_free_bytes "$dir")"
+			if [ "$free_bin" -ge "$install_need" ] && [ "$free_cache" -ge "$cache_need" ] && [ "$free_tmp" -ge "$((backup_bytes + 1048576))" ]; then
+				backup_dir="$dir/rollback-$id"
+				if ! core_backup_files "$bin" "$backup_dir"; then backup_dir=''; fi
+			fi
+		fi
+		if [ -n "$backup_dir" ]; then
+			free_bin="$(ts_free_bytes "$bin")"
+			free_cache="$(ts_free_bytes "$cache")"
+			if [ "$free_bin" -lt "$install_need" ] || [ "$free_cache" -lt "$cache_need" ]; then
+				core_remove_backups "$backup_dir"
+				backup_dir=''
+			fi
+		fi
+		if [ -n "$backup_dir" ]; then
+			ts_task_log "$id" backup_created "$backup_dir"
+		else
+			warning='backup_unavailable'
+			ts_task_log "$id" backup_skipped 'space or filesystem constraints prevented a backup'
+		fi
+	fi
+	free_bin="$(ts_free_bytes "$bin")"
+	free_cache="$(ts_free_bytes "$cache")"
+	if [ "$free_bin" -lt "$install_need" ] || [ "$free_cache" -lt "$cache_need" ]; then
+		core_remove_backups "$backup_dir"
+		core_finish "$id" space_insufficient
 		return 1
 	fi
 	ts_task_step "$id" resolve 10 "$latest"
@@ -1003,24 +1385,35 @@ official_install() {
 	done <"$dir/task-$id.native.log"
 	rm -f "$dir/task-$id.native.log"
 	if [ "$rc" != "0" ]; then
-		core_update_failure "$id" "$bin" "$init" "$had_daemon" "$had_cli" "$cli_link" "$was_running" official_update_fail "$rollback"
+		core_update_failure "$id" "$bin" "$init" "$backup_dir" "$had_daemon" "$had_cli" "$cli_link" "$was_running" official_update_fail "$old_version"
 		return 1
 	fi
 	if [ "$restart_failed" = "1" ]; then
-		core_update_failure "$id" "$bin" "$init" "$had_daemon" "$had_cli" "$cli_link" "$was_running" restart_fail "$rollback"
+		core_update_failure "$id" "$bin" "$init" "$backup_dir" "$had_daemon" "$had_cli" "$cli_link" "$was_running" restart_fail "$old_version"
 		return 1
 	fi
 	if ! chmod 755 "$bin/tailscale" "$bin/tailscaled"; then
-		core_update_failure "$id" "$bin" "$init" "$had_daemon" "$had_cli" "$cli_link" "$was_running" install_fail "$rollback"
+		core_update_failure "$id" "$bin" "$init" "$backup_dir" "$had_daemon" "$had_cli" "$cli_link" "$was_running" install_fail "$old_version"
 		return 1
 	fi
 	if ts_custom_layout || [ ! -x "$bin/tailscale" ] || [ ! -x "$bin/tailscaled" ]; then
-		core_update_failure "$id" "$bin" "$init" "$had_daemon" "$had_cli" "$cli_link" "$was_running" channel_switch_fail "$rollback"
+		core_update_failure "$id" "$bin" "$init" "$backup_dir" "$had_daemon" "$had_cli" "$cli_link" "$was_running" channel_switch_fail "$old_version"
 		return 1
 	fi
+	if ! core_binary_version_ok "$bin" "$latest"; then
+		core_update_failure "$id" "$bin" "$init" "$backup_dir" "$had_daemon" "$had_cli" "$cli_link" "$was_running" version_check_fail "$old_version"
+		return 1
+	fi
+	if [ "$was_running" = "1" ]; then
+		socket="$(ts_uci_get main socket "$TS_DEF_SOCKET")"
+		if ! ts_wait_service "$id" "$bin" "$latest" "$socket"; then
+			core_update_failure "$id" "$bin" "$init" "$backup_dir" "$had_daemon" "$had_cli" "$cli_link" "$was_running" restart_fail "$old_version"
+			return 1
+		fi
+	fi
 	ts_task_step "$id" install 95 "$latest"
-	core_remove_backups "$bin"
-	core_finish "$id" ""
+	core_remove_backups "$backup_dir"
+	core_finish "$id" "" "$warning"
 	return 0
 }
 
@@ -1065,19 +1458,23 @@ core_versions() {
 }
 
 core_check() {
-	local source="$1" latest installed desired comparison outdated mismatch
+	local source="$1" latest="${2:-}" installed desired comparison outdated mismatch
 	if [ "$source" = "official" ] || { [ "$source" = "auto" ] && [ "$(ts_update_channel)" = "official" ]; }; then
 		desired=official
-		latest="$(ts_official_latest)" || {
-			printf '{"ok":false,"error":"fetch_fail"}'
-			return 1
-		}
+		if [ -z "$latest" ]; then
+			latest="$(ts_official_latest)" || {
+				printf '{"ok":false,"error":"fetch_fail"}'
+				return 1
+			}
+		fi
 	else
 		desired=custom
-		latest="$(ts_latest_for "$TS_PKG" "$source")" || {
-			printf '{"ok":false,"error":"fetch_fail"}'
-			return 1
-		}
+		if [ -z "$latest" ]; then
+			latest="$(ts_latest_for "$TS_PKG" "$source")" || {
+				printf '{"ok":false,"error":"fetch_fail"}'
+				return 1
+			}
+		fi
 	fi
 	installed="$(core_installed_version)" || installed=""
 	comparison="$(ts_ver_cmp "$installed" "$latest")"
@@ -1224,7 +1621,13 @@ luci_attempt() {
 	ts_task_step "$id" download 20 "$file"
 	if ! ts_fetch "$url" "$pkg" "$(ts_uci_get update dl_timeout "$TS_DEF_DL")"; then
 		rm -f "$pkg"
-		ts_task_log "$id" fetch_fail "$file"
+		if [ "$TS_FETCH_ERROR" = "empty_response" ]; then
+			ts_task_log "$id" fetch_fail 'empty response after retries'
+		elif [ "$TS_FETCH_ERROR" = "no_client" ]; then
+			ts_task_log "$id" fetch_fail 'no downloader is installed'
+		else
+			ts_task_log "$id" fetch_fail "$file"
+		fi
 		return 1
 	fi
 	ts_task_step "$id" download 60 "$file"
@@ -1393,13 +1796,26 @@ update_project_check() {
 }
 
 update_list() {
-	local proj="$1" source="$2" package blob versions version files first comma
+	local proj="$1" source="$2" mode="${3:-full}" package blob versions version files first comma check installed result latest
 	case "$proj" in
 		tailscale) package="$TS_PKG" ;;
 		luci-app-tailscale) package="$TS_PKG_LUCI" ;;
 		*) return 2 ;;
 	esac
 	if [ "$proj" = tailscale ] && [ "$source" = official ]; then
+		if [ "$mode" = tags ]; then
+			version="$(ts_official_latest)" || return 1
+			printf '{"source":"official","tags":["%s"]}' "$version"
+			return 0
+		fi
+		if [ "$mode" = rpc ]; then
+			latest="$(ts_official_latest)" || return 1
+			result="$(ts_official_list "$latest")" || return 1
+			check="$(core_check official "$latest" 2>/dev/null)"
+			[ -n "$check" ] || check='null'
+			printf '%s,"check":%s}' "${result%?}" "$check"
+			return 0
+		fi
 		ts_official_list
 		return $?
 	fi
@@ -1413,13 +1829,20 @@ update_list() {
 	else
 		versions="$(luci_filevers "$blob")"
 	fi
+	latest=''
+	if [ "$mode" = rpc ] && [ "$proj" = tailscale ]; then latest="$(printf '%s\n' "$versions" | head -n 1)"; fi
 	printf '{"source":"%s","tags":[' "$source"
 	comma=''
 	for version in $versions; do
 		printf '%s"%s"' "$comma" "$version"
 		comma=','
 	done
-	printf '],"files":{'
+	printf ']'
+	if [ "$mode" = tags ]; then
+		printf '}'
+		return 0
+	fi
+	printf ',"files":{'
 	comma=''
 	for version in $versions; do
 		if [ "$proj" = "tailscale" ]; then
@@ -1435,8 +1858,48 @@ update_list() {
 		done
 		printf ']'
 		comma=','
+		if [ "$mode" = rpc ]; then break; fi
 	done
-	printf '}}'
+	printf '}'
+	if [ "$mode" = rpc ]; then
+		if [ "$proj" = tailscale ]; then
+			check="$(core_check "$source" "$latest" 2>/dev/null)"
+			[ -n "$check" ] || check='null'
+			printf ',"check":%s' "$check"
+		else
+			installed="$(luci_installed_version 2>/dev/null)" || installed=''
+			if [ -n "$installed" ]; then printf ',"installed_version":"%s"' "$installed"; fi
+		fi
+	fi
+	printf '}'
+}
+
+update_version_files() {
+	local proj="$1" source="$2" version="$3" package blob files file comma
+	case "$proj" in
+		tailscale) package="$TS_PKG" ;;
+		luci-app-tailscale) package="$TS_PKG_LUCI" ;;
+		*) return 2 ;;
+	esac
+	case "$source" in
+		gitlab|r2|github) ;;
+		*) return 2 ;;
+	esac
+	version="$(ts_ver_norm "$version")"
+	[ -n "$version" ] || return 1
+	blob="$(ts_releases "$package" "$source")" || return 1
+	if [ "$proj" = tailscale ]; then
+		files="$(core_resolve "$blob" "$version" all)" || return 1
+	else
+		files="$(luci_resolve "$blob" "$version" auto)" || return 1
+	fi
+	printf '{"source":"%s","version":"%s","files":[' "$source" "$version"
+	comma=''
+	for file in $files; do
+		printf '%s"%s"' "$comma" "$file"
+		comma=','
+	done
+	printf ']}'
 }
 
 update_resolve() {
@@ -1488,7 +1951,10 @@ case "${1:-}" in
 	c2n-update) update_c2n ;;
 	ensure-core) core_ensure ;;
 	manual-install) core_manual_install "$2" ;;
-	list) update_list "$2" "$3" ;;
+	remove-core) core_remove ;;
+	list) update_list "$2" "$3" "$4" ;;
+	tags) update_list "$2" "$3" tags ;;
+	files) update_version_files "$2" "$3" "$4" ;;
 	check) update_project_check "$2" "$3" ;;
 	resolve) update_resolve "$2" "$3" "$4" "$5" "$6" ;;
 	download) update_download "$2" "$3" "$4" "$5" "$6" "$7" ;;
@@ -1497,6 +1963,6 @@ case "${1:-}" in
 	core-versions) core_versions "$2" ;;
 	luci-filevers) luci_filevers "$2" ;;
 	luci-mgr) luci_mgr ;;
-	"") printf 'usage: %s {auto|ensure-core|manual-install|list|check|resolve|download|urlhash|installed}\n' "${0##*/}" >&2; exit 2 ;;
-	*) printf 'usage: %s {auto|ensure-core|manual-install|list|check|resolve|download|urlhash|installed}\n' "${0##*/}" >&2; exit 2 ;;
+	"") printf 'usage: %s {auto|ensure-core|manual-install|remove-core|list|tags|files|check|resolve|download|urlhash|installed}\n' "${0##*/}" >&2; exit 2 ;;
+	*) printf 'usage: %s {auto|ensure-core|manual-install|remove-core|list|tags|files|check|resolve|download|urlhash|installed}\n' "${0##*/}" >&2; exit 2 ;;
 esac

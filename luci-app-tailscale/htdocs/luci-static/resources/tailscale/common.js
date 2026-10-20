@@ -4,12 +4,13 @@
 'require ui';
 'require uci';
 
-const ASSET_VERSION = '2.0.0-45';
-const callGetStatus = rpc.declare({ object: 'tailscale', method: 'getStatus' });
+const ASSET_VERSION = '2.0.0-52';
+const callGetStatus = rpc.declare({ object: 'tailscale', method: 'getStatus', params: ['force_refresh'] });
 const callGetStatusDerp = rpc.declare({ object: 'tailscale', method: 'getStatus', params: ['include_derp_map'] });
 const callGetConfig = rpc.declare({ object: 'tailscale', method: 'getConfig', params: ['section'] });
 const callSetConfig = rpc.declare({ object: 'tailscale', method: 'setConfig', params: ['section', 'values', 'apply'] });
 const callGetSources = rpc.declare({ object: 'tailscale', method: 'getSources', params: ['proj', 'source'] });
+const callGetVersionFiles = rpc.declare({ object: 'tailscale', method: 'getVersionFiles', params: ['proj', 'source', 'version'] });
 const callRefreshSources = rpc.declare({ object: 'tailscale', method: 'refreshSources', params: ['source', 'proj'] });
 const callResolveFile = rpc.declare({ object: 'tailscale', method: 'resolveFile', params: ['proj', 'source', 'version', 'file', 'arch'] });
 const callDownload = rpc.declare({ object: 'tailscale', method: 'download', params: ['proj', 'source', 'version', 'file', 'arch'] });
@@ -27,13 +28,14 @@ const callPingPeers = rpc.declare({ object: 'tailscale', method: 'pingPeers', pa
 const callServiceAction = rpc.declare({ object: 'tailscale', method: 'serviceAction', params: ['action'] });
 const callGetLogs = rpc.declare({ object: 'tailscale', method: 'getLogs', params: ['lines'] });
 const callClearLogs = rpc.declare({ object: 'tailscale', method: 'clearLogs' });
+const callRemoveCore = rpc.declare({ object: 'tailscale', method: 'removeCore' });
 const callDiag = rpc.declare({ object: 'tailscale', method: 'diag' });
 
 const STATUS_CACHE_KEY = 'tailscale-status-v2';
 const STATUS_AUTH_KEY = 'tailscale-auth-v1';
 const STATUS_CACHE_TTL = 10000;
 const STATUS_POLL_INTERVAL = 1500;
-let activeRoot = null, statusCache = null, statusCacheAt = 0, statusRequest = null, statusTimer = null, statusTickTimer = null, statusPollRoot = null, badgeRestarting = false;
+let activeRoot = null, statusCache = null, statusCacheAt = 0, statusRequest = null, statusRequestFresh = false, statusTimer = null, statusTickTimer = null, statusPollRoot = null, badgeRestarting = false;
 const statusSubscribers = [];
 const ACTION_THEME_VARS = ['--text', '--muted', '--accent', '--accent-soft', '--edge', '--hi', '--glass', '--glass2', '--shadow'];
 let actionObserver = null, actionFooter = null;
@@ -54,11 +56,13 @@ function publishStatus(s) {
 	else
 		s.uptime = 0;
 	statusCache = s;
-	statusCacheAt = now;
+	const rawServerAge = Number(s.status_age_seconds);
+	const serverAge = Number.isFinite(rawServerAge) && rawServerAge >= 0 ? rawServerAge : 0;
+	statusCacheAt = Math.max(0, now - serverAge * 1000);
 	try {
 		window.sessionStorage.setItem(STATUS_CACHE_KEY, JSON.stringify({ at: statusCacheAt, status: statusCache }));
 		if (s.logged_in)
-			window.sessionStorage.setItem(STATUS_AUTH_KEY, JSON.stringify({ at: now, logged_in: true, tailnet: s.tailnet || '' }));
+			window.sessionStorage.setItem(STATUS_AUTH_KEY, JSON.stringify({ at: statusCacheAt, logged_in: true, tailnet: s.tailnet || '' }));
 		else if (['NeedsLogin', 'NeedsMachineAuth', 'InUseOtherUser'].includes(s.backend_state))
 			window.sessionStorage.removeItem(STATUS_AUTH_KEY);
 	}
@@ -72,18 +76,28 @@ function publishStatus(s) {
 	}
 }
 
-function fetchStatus(force) {
-	if (statusRequest)
+function fetchStatus(force, forceBackend) {
+	forceBackend = forceBackend === true;
+	if (statusRequest) {
+		if (forceBackend && !statusRequestFresh)
+			return statusRequest.then(() => fetchStatus(true, true), () => fetchStatus(true, true));
 		return statusRequest;
+	}
 	const age = Date.now() - statusCacheAt;
 	if (!force && statusCache && age >= 0 && age < STATUS_CACHE_TTL)
 		return Promise.resolve(statusCache);
-	statusRequest = callGetStatus().then((s) => {
+	const request = callGetStatus(forceBackend ? '1' : '0').then((s) => {
 		publishStatus(s);
-		statusRequest = null;
 		return statusCache;
+	});
+	statusRequestFresh = forceBackend;
+	statusRequest = request.then((s) => {
+		statusRequest = null;
+		statusRequestFresh = false;
+		return s;
 	}, (e) => {
 		statusRequest = null;
+		statusRequestFresh = false;
 		throw e;
 	});
 	return statusRequest;
@@ -106,7 +120,7 @@ function stopActionObserver() {
 }
 
 const api = baseclass.singleton({
-	getStatus(force) { return fetchStatus(force === true); },
+	getStatus(force) { return fetchStatus(force === true, force === true); },
 	getCachedStatus() {
 		const age = Date.now() - statusCacheAt;
 		return statusCache && age >= 0 && age < STATUS_CACHE_TTL ? statusCache : null;
@@ -124,10 +138,16 @@ const api = baseclass.singleton({
 	clearKnownAuth() {
 		try { window.sessionStorage.removeItem(STATUS_AUTH_KEY); } catch (e) {}
 	},
-	getStatusWithDerp() { return callGetStatusDerp('1'); },
+	getStatusWithDerp() {
+		return callGetStatusDerp('1').then((s) => {
+			publishStatus(s);
+			return statusCache;
+		});
+	},
 	getConfig(s) { return callGetConfig(s); },
 	setConfig(s, v, apply) { return callSetConfig(s, v, apply === true ? '1' : '0'); },
 	getSources(proj, src) { return callGetSources(proj, src); },
+	getVersionFiles(proj, src, version) { return callGetVersionFiles(proj, src, version); },
 	refreshSources(src, proj) { return callRefreshSources(src, proj); },
 	resolveFile(proj, src, ver, file, arch) { return callResolveFile(proj, src, ver, file, arch); },
 	download(proj, src, ver, file, arch) { return callDownload(proj, src, ver, file, arch); },
@@ -145,6 +165,7 @@ const api = baseclass.singleton({
 	service(action) { return callServiceAction(action); },
 	getLogs(n) { return callGetLogs(n); },
 	clearLogs() { return callClearLogs(); },
+	removeCore() { return callRemoveCore(); },
 	diag() { return callDiag(); }
 });
 
@@ -170,6 +191,7 @@ const ICONS = {
 	power: '<path d="M12 3v8M6.3 6.5a8 8 0 1 0 11.4 0"/>',
 	external: '<path d="M14 4h6v6M20 4L10 14M9 5H5a1 1 0 0 0-1 1v13a1 1 0 0 0 1 1h13a1 1 0 0 0 1-1v-4"/>',
 	copy: '<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M5 15V5a1 1 0 0 1 1-1h10"/>',
+	trash: '<path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14M10 11v5M14 11v5"/>',
 	shield: '<path d="M12 3l7.5 3v6c0 4.5-3.2 7.6-7.5 9-4.3-1.4-7.5-4.5-7.5-9V6L12 3z"/><path d="M9 12l2.2 2.2L15.5 10"/>',
 	link: '<path d="M10 14a5 5 0 0 0 7.1 0l2.4-2.4a5 5 0 0 0-7.1-7.1L11 5.9M14 10a5 5 0 0 0-7.1 0L4.5 12.4a5 5 0 0 0 7.1 7.1L13 18.1"/>',
 	unlink: '<path d="M9 15l-2 2a4 4 0 0 1-5.7-5.7l2-2M15 9l2-2a4 4 0 0 1 5.7 5.7l-2 2M4 4l16 16"/>',
@@ -376,7 +398,7 @@ const main = baseclass.singleton({
 				actionFooter.style.removeProperty(name);
 		}
 	},
-	wire(active, root, status) {
+	wire(active, root, status, deferStatus) {
 		root = root || document.getElementById('app');
 		if (!root)
 			return;
@@ -398,7 +420,7 @@ const main = baseclass.singleton({
 		for (let i = 0; i < ds.length; i++)
 			ds[i].addEventListener('click', () => { location.href = ds[i].getAttribute('data-go'); });
 		this.startStatusPolling(root);
-		this.badges(root, status);
+		if (deferStatus !== true) this.badges(root, status);
 	},
 
 	startStatusPolling(root) {
@@ -421,7 +443,7 @@ const main = baseclass.singleton({
 				stop();
 				return;
 			}
-			fetchStatus(true).catch(() => {});
+			fetchStatus(true, false).catch(() => {});
 		}, STATUS_POLL_INTERVAL);
 		statusTickTimer = setInterval(() => {
 			if (!statusPollRoot || !statusPollRoot.isConnected) {
@@ -453,6 +475,12 @@ const main = baseclass.singleton({
 			s = s || {};
 			if (sharedUpdate && badgeRestarting)
 				s = Object.assign({}, s, { restarting: true });
+			if (s.running && statusCache && statusCache.running) {
+				const age = Date.now() - statusCacheAt;
+				const baseUptime = statusCache.status_age_seconds != null ? (+statusCache.uptime || 0) : (+s.uptime || 0);
+				if (age >= 0)
+					s = Object.assign({}, s, { uptime: baseUptime + Math.floor(age / 1000) });
+			}
 			const ver = root.querySelector('#tsVer'), badge = root.querySelector('#svcBadge'), dot = root.querySelector('#svcDot'), txt = root.querySelector('#svcTxt');
 			if (!ver || !badge || !dot || !txt)
 				return;

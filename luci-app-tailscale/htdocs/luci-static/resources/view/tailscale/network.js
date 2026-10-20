@@ -36,12 +36,12 @@ return view.extend({
 			'<div class="grid">' +
 			'<div class="card glass"><h3>' + common.icons.icon('link') + ' ' + _('Network interface') + '</h3>' +
 			'<div class="tbl-scroll"><table class="tbl"><tr><th>' + _('Interface') + '</th><td>' + val(N.iface_name || 'tailscale') + '</td><th>' + _('Protocol') + '</th><td>' + _('Unmanaged') + '</td></tr>' +
-			'<tr><th>' + _('Device') + '</th><td>' + val(N.device || 'tailscale0') + '</td><th>' + _('Status') + '</th><td id="ifaceSt">' +
+			'<tr><th>' + _('Device') + '</th><td>' + val(M.tun || 'tailscale0') + '</td><th>' + _('Status') + '</th><td id="ifaceSt">' +
 			(st.fw_iface ? '<span class="pill ok">' + _('Exists') + '</span>' : '<span class="pill">' + _('Missing') + '</span>') + '</td></tr></table></div>' +
 			this.toggle('t_iface_enabled', _('Enable network interface'), on(N.iface_enabled), _('Create a netifd interface for the Tailscale tunnel device so it can be used by firewall zones.')) +
+			this.toggle('t_reload_network_stop', _('Reload network configuration on stop'), N.reload_network_on_stop == null || on(N.reload_network_on_stop), _('Disable this if the WAN port flickers when stopping Tailscale.')) +
 			'<div class="frow"><div class="field">' + this.fieldLabel(_('Interface name'), _('OpenWrt logical interface name used to reference the Tailscale link.')) + '<input id="f_iface_name" value="' + val(N.iface_name || 'tailscale') + '"></div>' +
-			'<div class="field">' + this.fieldLabel(_('Device name'), _('Linux network device used by this OpenWrt interface; it should match the TUN interface name below.')) + '<input id="f_device" value="' + val(N.device || 'tailscale0') + '"></div>' +
-			'<div class="field">' + this.fieldLabel(_('TUN interface name'), _('Name of the tunnel device created by tailscaled; keep it consistent with Device name.')) + '<input id="f_tun" value="' + val(M.tun || 'tailscale0') + '"></div>' +
+			'<div class="field">' + this.fieldLabel(_('TUN interface name'), _('Name of the tunnel device created by tailscaled; the OpenWrt network device follows this name automatically.')) + '<input id="f_tun" value="' + val(M.tun || 'tailscale0') + '"></div>' +
 			'<div class="field">' + this.fieldLabel(_('Network mode'), _('TUN creates a kernel network device for normal routing; Userspace uses a userspace network stack and does not create that device.')) + '<select id="f_mode">' +
 			'<option value="tun"' + (M.mode !== 'userspace' ? ' selected' : '') + '>' + _('TUN') + '</option>' +
 			'<option value="userspace"' + (M.mode === 'userspace' ? ' selected' : '') + '>' + _('Userspace') + '</option></select></div></div></div>' +
@@ -69,8 +69,9 @@ return view.extend({
 		const gatherMain = () => ({ tun: q('#f_tun').value.trim(), mode: q('#f_mode').value });
 		const gatherNetwork = () => ({
 			iface_enabled: q('#t_iface_enabled').checked ? '1' : '0',
-			iface_name: q('#f_iface_name').value.trim(), device: q('#f_device').value.trim(),
+			iface_name: q('#f_iface_name').value.trim(),
 			zone_name: q('#f_zone_name').value.trim(), zone_enabled: '1', conflicts: q('#f_conflicts').value,
+			reload_network_on_stop: q('#t_reload_network_stop').checked ? '1' : '0',
 			masq: q('#t_masq').checked ? '1' : '0', mss: q('#t_mss').checked ? '1' : '0',
 			fwd_ts_lan: q('#t_ts_lan').checked ? '1' : '0', fwd_lan_ts: q('#t_lan_ts').checked ? '1' : '0',
 			fwd_ts_wan: q('#t_ts_wan').checked ? '1' : '0', fwd_wan_ts: q('#t_wan_ts').checked ? '1' : '0'

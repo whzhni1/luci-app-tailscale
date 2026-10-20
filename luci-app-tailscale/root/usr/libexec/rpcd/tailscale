@@ -5,12 +5,14 @@ import { popen, readfile, writefile, stdin, unlink, glob, stat } from 'fs';
 const WL = {
 	main: ['enabled', 'bin_dir', 'state_dir', 'socket', 'tun', 'mode', 'port', 'socks5', 'http_proxy', 'start_delay', 'respawn_threshold', 'respawn_timeout', 'respawn_retry', 'log_enabled', 'log_limit_kb', 'log_errors_only', 'theme', 'tmp_dir', 'derp_preferred_region'],
 	up: ['hostname', 'auth_key', 'accept_dns', 'accept_routes', 'advertise_routes', 'advertise_exit_node', 'exit_node', 'exit_node_allow_lan', 'shields_up', 'snat_subnet_routes', 'ssh', 'operator', 'login_server', 'netfilter_mode', 'stateful_filtering'],
-	network: ['iface_enabled', 'iface_name', 'device', 'zone_enabled', 'zone_name', 'masq', 'mss', 'fwd_ts_lan', 'fwd_lan_ts', 'fwd_ts_wan', 'fwd_wan_ts', 'conflicts'],
-	update: ['channel', 'source_order', 'arch', 'version', 'file', 'auto_update', 'auto_rollback', 'every_days', 'at_time', 'keep_backup', 'timeout', 'retry', 'cache_ttl', 'dl_timeout', 'jitter']
+	network: ['iface_enabled', 'iface_name', 'zone_enabled', 'zone_name', 'masq', 'mss', 'fwd_ts_lan', 'fwd_lan_ts', 'fwd_ts_wan', 'fwd_wan_ts', 'conflicts', 'reload_network_on_stop'],
+	update: ['channel', 'source_order', 'arch', 'version', 'file', 'auto_update', 'auto_rollback', 'service_wait_seconds', 'every_days', 'at_time', 'keep_backup', 'timeout', 'retry', 'cache_ttl', 'dl_timeout', 'jitter']
 };
 
 const SOCKET_WAITS = 5;
 const UP_TIMEOUT = 600;
+const STATUS_REFRESH_INTERVAL = 5;
+const STATUS_REFRESH_LOCK_MAX_AGE = 60;
 
 function getenv2(k, dflt) {
 	let v = getenv(k);
@@ -99,16 +101,6 @@ function updateSpaceSummary(spaces, channel) {
 	}
 	return { path: selected.path, location: location, total_bytes: selected.total_bytes, free_bytes: selected.free_bytes };
 }
-
-function requiredUpdateSpace(channel, rollback) {
-	if (channel == 'official') return (rollback == '1' ? 200 : 130) * 1048576;
-	return (rollback == '1' ? 30 : 10) * 1048576;
-}
-
-function updateSpaceAllowed(spaces, channel, rollback) {
-	return updateSpaceSummary(spaces, channel).free_bytes >= requiredUpdateSpace(channel, rollback);
-}
-
 
 function redactLogText(text) {
 	text = '' + (text || '');
@@ -208,7 +200,9 @@ function src_list(single) {
 			return null;
 		return [single];
 	}
-	return filter(split(cfg('update', 'source_order', 'gitlab r2 github'), ' '), (x) => x != '');
+	let order = cfg('update', 'source_order', 'gitlab github r2');
+	if (order == 'gitlab r2 github') order = 'gitlab github r2';
+	return filter(split(order, ' '), (x) => x != '');
 }
 
 function proj_of(p) {
@@ -264,6 +258,30 @@ function local_route_candidates() {
 	return candidates;
 }
 
+function routerModelRaw() {
+	let model = '';
+	try { model = trim(readfile('/tmp/sysinfo/model')); } catch (e) { model = ''; }
+	if (model == '') {
+		let br = sh('ubus call system board 2>/dev/null');
+		if (br.rc == 0) {
+			let board = null;
+			try { board = json(br.out); } catch (e) { board = null; }
+			if (board != null && board.model != null) model = '' + board.model;
+		}
+	}
+	return trim(model);
+}
+
+function routerModel() {
+	let model = routerModelRaw();
+	if (model == '') {
+		let hn = sh('uname -n 2>/dev/null');
+		if (hn.rc == 0) model = trim(hn.out);
+	}
+	if (model == '') return '';
+	return sh('printf %s ' + sq(model) + " | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g; s/--*/-/g; s/^-//; s/-$//").out;
+}
+
 function getConfig(p) {
 	let sec = p.section;
 	let single = (sec != null && sec != '');
@@ -287,7 +305,7 @@ function getConfig(p) {
 		out[s] = o;
 	}
 	if (single) return { ok: true, config: out[sec] };
-	return { ok: true, config: out, local_routes: local_route_candidates() };
+	return { ok: true, config: out, local_routes: local_route_candidates(), router_model: routerModelRaw() };
 }
 
 function normalize_derp_region(v) {
@@ -338,23 +356,6 @@ function setConfig(p) {
 	for (let k, v in vals) {
 		if (index(WL[sec], k) < 0)
 			return { ok: false, error: 'bad_option' };
-	}
-	if (sec == 'update') {
-		let previousChannel = cfg('update', 'channel', 'custom');
-		let channel = vals.channel != null ? '' + vals.channel : previousChannel;
-		let rollback = vals.auto_rollback != null ? '' + vals.auto_rollback : cfg('update', 'auto_rollback', '1');
-		let auto = vals.auto_update != null ? '' + vals.auto_update : cfg('update', 'auto_update', '0');
-		let channelChanged = vals.channel != null && channel != previousChannel;
-		let autoEnabled = vals.auto_update != null && auto == '1';
-		let rollbackEnabled = vals.auto_rollback != null && rollback == '1' && cfg('update', 'auto_rollback', '1') != '1';
-		if (channelChanged || autoEnabled || rollbackEnabled) {
-			if (channel != 'official') channel = 'custom';
-			let spaces = diskSpaces();
-			if (!updateSpaceAllowed(spaces, channel, rollback)) {
-				let summary = updateSpaceSummary(spaces, channel);
-				return { ok: false, error: 'space_insufficient', free_bytes: summary.free_bytes, required_bytes: requiredUpdateSpace(channel, rollback) };
-			}
-		}
 	}
 	let derpRegion = null;
 	if (sec == 'main' && vals.derp_preferred_region != null) {
@@ -408,7 +409,7 @@ function setConfig(p) {
 	return { ok: true, applied: cleared, deferred: !cleared, fallback_auto: true, derp_preferred_region: '0' };
 }
 
-function getStatus(p) {
+function buildStatus(p) {
 	let bin = bindir();
 	let channel = cfg('update', 'channel', 'custom');
 	let rollback = cfg('update', 'auto_rollback', '1');
@@ -418,7 +419,6 @@ function getStatus(p) {
 	res.auto_rollback = rollback == '1';
 	res.disk_spaces = spaces;
 	res.update_space = updateSpaceSummary(spaces, channel);
-	res.update_space_required_bytes = requiredUpdateSpace(channel, rollback);
 	res.enabled = cfg('main', 'enabled', '0') == '1';
 	res.tailscaled_ok = sh('test -x ' + sq(bin + '/tailscaled') + ' 2>/dev/null').rc == 0;
 	res.tailscale_cli_ok = sh('test -x ' + sq(bin + '/tailscale') + ' 2>/dev/null').rc == 0;
@@ -476,11 +476,16 @@ function getStatus(p) {
 				if (index(appr, a) < 0) pend[length(pend)] = a;
 			}
 			let ls = '';
+			let relay = '';
+			let curAddr = '';
+			let online = pr.Online == true;
 			if (pr.LastSeen != null) ls = pr.LastSeen;
-			res.peers[length(res.peers)] = { key: nk, name: pr.HostName || '', dns: pr.DNSName || '', ip: pip, os: pr.OS || '', online: pr.Online == true, active: pr.Active == true, direct: (pr.Online == true && pr.CurAddr != null && pr.CurAddr != ''), lastseen: ls, exit_option: pr.ExitNodeOption == true, exit_active: pr.ExitNode == true, approved: appr, pending: pend, rx_bytes: pr.RxBytes || 0, tx_bytes: pr.TxBytes || 0 };
+			if (pr.Relay != null) relay = trim('' + pr.Relay);
+			if (pr.CurAddr != null) curAddr = trim('' + pr.CurAddr);
+			res.peers[length(res.peers)] = { key: nk, name: pr.HostName || '', dns: pr.DNSName || '', ip: pip, os: pr.OS || '', online: online, active: pr.Active == true, direct: (online && curAddr != '' && relay == ''), relay: relay, lastseen: ls, exit_option: pr.ExitNodeOption == true, exit_active: pr.ExitNode == true, approved: appr, pending: pend, rx_bytes: pr.RxBytes || 0, tx_bytes: pr.TxBytes || 0 };
 		}
 	}
-	let dev = cfg('network', 'device', 'tailscale0');
+	let dev = cfg('main', 'tun', 'tailscale0');
 	let nd = null;
 	try { nd = readfile('/proc/net/dev'); } catch (e) { nd = null; }
 	if (nd != null) {
@@ -637,38 +642,168 @@ function getStatus(p) {
 	return res;
 }
 
+function status_snapshot_path() {
+	return tmpdir() + '/status-v1.json';
+}
+
+function status_refresh_lock() {
+	return tmpdir() + '/status-refresh.lock';
+}
+
+function read_status_snapshot() {
+	let snapshot = jread(status_snapshot_path());
+	if (snapshot == null || snapshot.status == null) return null;
+	let at = null;
+	try { at = int(snapshot.at); } catch (e) { at = null; }
+	let now = int(clock()[0]) || 0;
+	if (at == null || at < 1 || at > now + 5) return null;
+	return { at: at, status: snapshot.status };
+}
+
+function write_status_snapshot(status) {
+	let tc = clock(), at = int(tc[0]) || 0, path = status_snapshot_path();
+	if (at < 1 || sh('mkdir -p ' + sq(tmpdir())).rc != 0) return 0;
+	let temp = path + '.' + tc[0] + '-' + tc[1] + '.tmp';
+	try {
+		writefile(temp, sprintf('%J', { at: at, status: status }));
+	} catch (e) {
+		return 0;
+	}
+	if (sh('mv -f ' + sq(temp) + ' ' + sq(path) + ' 2>/dev/null').rc != 0) {
+		try { unlink(temp); } catch (e) {}
+		return 0;
+	}
+	return at;
+}
+
+function live_traffic_counters() {
+	let counters = {};
+	let dev = cfg('main', 'tun', 'tailscale0');
+	let nd = null;
+	try { nd = readfile('/proc/net/dev'); } catch (e) { nd = null; }
+	if (nd == null) return counters;
+	for (let ln in split(nd, '\n')) {
+		let t = trim(ln);
+		if (substr(t, 0, length(dev) + 1) != dev + ':') continue;
+		let fields = filter(split(t, ' '), (x) => x != '');
+		if (length(fields) >= 10) {
+			counters.rx_bytes = int(fields[1]) || 0;
+			counters.tx_bytes = int(fields[9]) || 0;
+		}
+		break;
+	}
+	return counters;
+}
+
+function status_snapshot_result(snapshot) {
+	let result = {};
+	for (let key, value in snapshot.status) result[key] = value;
+	let age = (int(clock()[0]) || snapshot.at) - snapshot.at;
+	result.status_age_seconds = age > 0 ? age : 0;
+	let pc = jread(tmpdir() + '/ping.json');
+	if (pc != null && pc.latency != null) result.derp_ms = pc.latency;
+	let counters = live_traffic_counters();
+	for (let key, value in counters) result[key] = value;
+	return result;
+}
+
+function start_status_refresh() {
+	let td = tmpdir(), lock = status_refresh_lock(), now = int(clock()[0]) || 0;
+	let started = null, lockExists = false, lockText = null;
+	try { lockText = readfile(lock + '/started'); } catch (e) { lockText = null; }
+	if (lockText != null) {
+		lockExists = true;
+		try { started = int(trim(lockText)); } catch (e) { started = null; }
+	}
+	if (!lockExists || started == null || started < 1) {
+		let stamp = sh('stat -c %Y ' + sq(lock) + ' 2>/dev/null');
+		if (stamp.rc == 0) {
+			started = int(trim(stamp.out)) || 0;
+			lockExists = true;
+		}
+	}
+	if (lockExists) {
+		if (started > 0 && now - started <= STATUS_REFRESH_LOCK_MAX_AGE) return false;
+		sh('rm -rf ' + sq(lock));
+	}
+	if (sh('mkdir -p ' + sq(td) + ' && mkdir ' + sq(lock) + ' 2>/dev/null').rc != 0) return false;
+	try {
+		writefile(lock + '/started', '' + now);
+	} catch (e) {
+		sh('rm -rf ' + sq(lock));
+		return false;
+	}
+	let self = getenv2('TS_RPCD_SELF', '/usr/libexec/rpcd/tailscale');
+	let payload = '{"force_refresh":"1"}';
+	let cmd = '( printf %s ' + sq(payload) + ' | ' + sq(self) + ' call getStatus >/dev/null 2>&1; rm -rf ' + sq(lock) + ' ) >/dev/null 2>&1 &';
+	if (sh(cmd).rc != 0) {
+		sh('rm -rf ' + sq(lock));
+		return false;
+	}
+	return true;
+}
+
+function getStatus(p) {
+	let force = p.force_refresh == true || p.force_refresh == 1 || p.force_refresh == '1';
+	let withDerp = p.include_derp_map == true || p.include_derp_map == 1 || p.include_derp_map == '1';
+	if (force || withDerp) {
+		let status = buildStatus(p);
+		let at = write_status_snapshot(status);
+		status.status_updated_at = at > 0 ? at : (int(clock()[0]) || 0);
+		status.status_age_seconds = 0;
+		return status;
+	}
+	let snapshot = read_status_snapshot();
+	if (snapshot == null) {
+		let status = buildStatus(p);
+		let at = write_status_snapshot(status);
+		status.status_updated_at = at > 0 ? at : (int(clock()[0]) || 0);
+		status.status_age_seconds = 0;
+		return status;
+	}
+	let now = int(clock()[0]) || snapshot.at;
+	if (now - snapshot.at >= STATUS_REFRESH_INTERVAL)
+		start_status_refresh();
+	return status_snapshot_result(snapshot);
+}
+
 function getSources(p) {
 	let proj = proj_of(p);
 	let td = tmpdir();
 	let source = p.source == null || p.source == '' ? null : '' + p.source;
 	let order = source == null ? src_list(null) : src_list(source);
 	if (order == null || (source == 'official' && proj != 'tailscale')) return { ok: false, error: 'bad_source', sources: [] };
-	let out = [];
+	let out = [], installed = null;
 	for (let src in order) {
-		let r = sh('TS_METADATA_TIMEOUT=10 TS_METADATA_RETRIES=0 ' + sq(libdir() + '/update.sh') + ' list ' + sq(proj) + ' ' + sq(src) + ' 2>/dev/null');
+		let r = sh('TS_METADATA_TIMEOUT=10 TS_METADATA_RETRIES=0 ' + sq(libdir() + '/update.sh') + ' list ' + sq(proj) + ' ' + sq(src) + ' rpc 2>/dev/null');
 		if (r.rc != 0) continue;
 		let data = null;
 		try { data = json(r.out); } catch (e) { data = null; }
 		if (data == null || data.tags == null || length(data.tags) == 0) continue;
 		let bp = td + '/rel-' + src + '-' + proj + '.json';
-		let cat = 0;
-		let check = null;
 		let m = sh('stat -c %Y ' + sq(bp) + ' 2>/dev/null');
-		if (m.rc == 0) cat = int(trim(m.out)) || 0;
-		if (proj == 'tailscale') {
-			let cr = sh(sq(libdir() + '/update.sh') + ' check tailscale ' + sq(src) + ' 2>/dev/null');
-			if (cr.rc == 0) {
-				try { check = json(cr.out); } catch (e) { check = null; }
-			}
-		}
-		out[length(out)] = { name: src, tags: data.tags, files: data.files || {}, info: data.info || null, check: check, cached_at: cat };
+		let cachedAt = m.rc == 0 ? int(trim(m.out)) || 0 : 0;
+		out[length(out)] = { name: src, tags: data.tags, files: data.files || {}, info: data.info || null, check: data.check || null, cached_at: cachedAt };
+		if (proj == 'luci-app-tailscale' && installed == null && data.installed_version != null && data.installed_version != '')
+			installed = data.installed_version;
 	}
 	let result = { sources: out };
-	if (proj == 'luci-app-tailscale') {
-		let iv = sh(sq(libdir() + '/update.sh') + ' installed ' + sq(proj) + ' 2>/dev/null');
-		if (iv.rc == 0) result.installed_version = trim(iv.out);
-	}
+	if (installed != null) result.installed_version = installed;
 	return result;
+}
+
+function getVersionFiles(p) {
+	let proj = proj_of(p);
+	let source = p.source == null ? '' : '' + p.source;
+	let version = p.version == null ? '' : '' + p.version;
+	if (source == '' || source == 'official' || src_list(source) == null || version == '')
+		return { ok: false, error: 'bad_source', files: [] };
+	let r = sh('TS_METADATA_TIMEOUT=10 TS_METADATA_RETRIES=0 ' + sq(libdir() + '/update.sh') + ' files ' + sq(proj) + ' ' + sq(source) + ' ' + sq(version) + ' 2>/dev/null');
+	if (r.rc != 0) return { ok: false, error: 'no_files', files: [] };
+	let data = null;
+	try { data = json(r.out); } catch (e) { data = null; }
+	if (data == null || data.files == null) return { ok: false, error: 'no_files', files: [] };
+	return { ok: true, source: source, version: data.version || version, files: data.files };
 }
 
 function refreshSources(p) {
@@ -699,7 +834,7 @@ function resolveFile(p) {
 	let want = (p.file == null || p.file == '') ? 'auto' : '' + p.file;
 	let arch = (p.arch == null || p.arch == '') ? 'auto' : '' + p.arch;
 	for (let src in srcs) {
-		sh('TS_METADATA_TIMEOUT=10 TS_METADATA_RETRIES=0 ' + sq(libdir() + '/update.sh') + ' check ' + sq(proj) + ' ' + sq(src) + ' >/dev/null 2>&1');
+		sh('TS_METADATA_TIMEOUT=5 TS_METADATA_RETRIES=0 ' + sq(libdir() + '/update.sh') + ' check ' + sq(proj) + ' ' + sq(src) + ' >/dev/null 2>&1');
 		let bp = td + '/rel-' + src + '-' + proj + '.json';
 		let r = sh(sq(libdir() + '/update.sh') + ' resolve ' + sq(proj) + ' ' + sq(bp) + ' ' + sq(ver) + ' ' + sq(want) + ' ' + sq(arch) + ' 2>/dev/null');
 		if (r.rc != 0) continue;
@@ -711,7 +846,7 @@ function resolveFile(p) {
 		if (file == '') continue;
 		let tag = ver;
 		if (ver == 'latest') {
-			let vr = sh(sq(libdir() + '/update.sh') + ' list ' + sq(proj) + ' ' + sq(src) + ' 2>/dev/null');
+			let vr = sh(sq(libdir() + '/update.sh') + ' list ' + sq(proj) + ' ' + sq(src) + ' tags 2>/dev/null');
 			if (vr.rc == 0) {
 				let data = null;
 				try { data = json(vr.out); } catch (e) { data = null; }
@@ -964,17 +1099,6 @@ function applyNetwork(p) {
 }
 
 function applyCron(p) {
-	let auto = cfg('update', 'auto_update', '0');
-	if (auto == '1') {
-		let channel = cfg('update', 'channel', 'custom');
-		if (channel != 'official') channel = 'custom';
-		let rollback = cfg('update', 'auto_rollback', '1');
-		let spaces = diskSpaces();
-		if (!updateSpaceAllowed(spaces, channel, rollback)) {
-			let summary = updateSpaceSummary(spaces, channel);
-			return { ok: false, error: 'space_insufficient', free_bytes: summary.free_bytes, required_bytes: requiredUpdateSpace(channel, rollback) };
-		}
-	}
 	let days = clean_int(cfg('update', 'every_days', '7'), 7, 1, 30);
 	let jit = clean_int(cfg('update', 'jitter', '600'), 600, 0, 3600);
 	let att = cfg('update', 'at_time', '03:30');
@@ -1011,34 +1135,6 @@ function applyCron(p) {
 	return { ok: true };
 }
 
-function routerModel() {
-	let model = '';
-	try { model = trim(readfile('/tmp/sysinfo/model')); } catch (e) { model = ''; }
-	if (model == '') {
-		let br = sh('ubus call system board 2>/dev/null');
-		if (br.rc == 0) {
-			let board = null;
-			try { board = json(br.out); } catch (e) { board = null; }
-			if (board != null && board.model != null) model = '' + board.model;
-		}
-	}
-	if (model == '') {
-		let hn = sh('uname -n 2>/dev/null');
-		if (hn.rc == 0) model = trim(hn.out);
-	}
-	if (model == '') return '';
-	return sh('printf %s ' + sq(model) + " | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g; s/--*/-/g; s/^-//; s/-$//").out;
-}
-
-function currentTailHostname() {
-	let cmd = sq(bindir() + '/tailscale') + ' --socket=' + sq(sockpath()) + ' status --json 2>/dev/null';
-	let r = sh(cmd);
-	if (r.rc != 0) return '';
-	let st = null;
-	try { st = json(r.out); } catch (e) { st = null; }
-	return st != null && st.Self != null && st.Self.HostName != null ? '' + st.Self.HostName : '';
-}
-
 function upCommand(force, useAuthKey) {
 	let args = [sq(bindir() + '/tailscale'), '--socket=' + sq(sockpath()), 'up', '--reset'];
 	let stringOps = [['hostname', '--hostname'], ['operator', '--operator'], ['exit_node', '--exit-node'], ['advertise_routes', '--advertise-routes'], ['login_server', '--login-server'], ['netfilter_mode', '--netfilter-mode'], ['auth_key', '--auth-key']];
@@ -1046,10 +1142,7 @@ function upCommand(force, useAuthKey) {
 		let opt = item[0], flag = item[1];
 		if (force && !useAuthKey && opt == 'auth_key') continue;
 		let val = cfg('up', opt, '');
-		if (opt == 'hostname' && val == '') {
-			val = currentTailHostname();
-			if (val == '') val = routerModel();
-		}
+		if (opt == 'hostname' && val == '') val = routerModel();
 		val = replace('' + val, /[ \t]/g, '');
 		if (val != '') args[length(args)] = sq(flag + '=' + val);
 		else if (opt == 'advertise_routes') args[length(args)] = sq(flag + '=');
@@ -1337,6 +1430,7 @@ function pingPeers(p) {
 	let ips = [];
 	if (st != null && st.Peer != null) {
 		for (let nk, pr in st.Peer) {
+			if (pr.Online != true) continue;
 			if (length(ips) >= max) break;
 			if (pr.TailscaleIPs != null && length(pr.TailscaleIPs) > 0) {
 				let pip = pr.TailscaleIPs[0];
@@ -1401,6 +1495,22 @@ function serviceAction(p) {
 	return { accepted: true };
 }
 
+function removeCore(p) {
+	let td = tmpdir(), lock = td + '/operation.lock', uploadLock = manual_upload_lock();
+	if (sh('mkdir -p ' + sq(td) + ' && mkdir ' + sq(lock) + ' 2>/dev/null').rc != 0)
+		return { ok: false, busy: true, error: 'busy' };
+	if (sh('mkdir -p ' + sq(manual_upload_root()) + ' && mkdir ' + sq(uploadLock) + ' 2>/dev/null').rc != 0) {
+		sh('rmdir ' + sq(lock) + ' 2>/dev/null');
+		return { ok: false, busy: true, error: 'busy' };
+	}
+	let r = sh(sq(libdir() + '/update.sh') + ' remove-core 2>&1');
+	sh('rmdir ' + sq(uploadLock) + ' 2>/dev/null');
+	sh('rmdir ' + sq(lock) + ' 2>/dev/null');
+	let result = trim(r.out);
+	if (r.rc == 0 && result == 'removed') return { ok: true };
+	return { ok: false, busy: result == 'busy', error: result == '' ? 'delete_fail' : result };
+}
+
 function clearLogs(p) {
 	let td = tmpdir();
 	if (sh('mkdir -p ' + sq(td)).rc != 0)
@@ -1425,7 +1535,7 @@ function getLogs(p) {
 }
 
 function diag(p) {
-	let g = getStatus({});
+	let g = getStatus({ force_refresh: '1' });
 	let c = getConfig({});
 	let t = '== tailscale diag ==\n';
 	t = t + sprintf('binary: %s version: %s running: %s logged_in: %s enabled: %s\n', g.binary_ok ? 'ok' : 'MISSING', g.version, g.running ? 'yes' : 'no', g.logged_in ? 'yes' : 'no', g.enabled ? 'yes' : 'no');
@@ -1456,7 +1566,7 @@ function diag(p) {
 	return { text: t };
 }
 
-const DISPATCH = { getStatus: getStatus, getConfig: getConfig, setConfig: setConfig, getSources: getSources, refreshSources: refreshSources, resolveFile: resolveFile, download: download, progress: progress, cancelTask: cancelTask, beginManualUpload: beginManualUpload, finishManualUpload: finishManualUpload, applyNetwork: applyNetwork, applyCron: applyCron, getLogin: getLogin, logout: logout, reauth: reauth, applyUp: applyUp, pingPeers: pingPeers, serviceAction: serviceAction, getLogs: getLogs, clearLogs: clearLogs, diag: diag };
+const DISPATCH = { getStatus: getStatus, getConfig: getConfig, setConfig: setConfig, getSources: getSources, getVersionFiles: getVersionFiles, refreshSources: refreshSources, resolveFile: resolveFile, download: download, progress: progress, cancelTask: cancelTask, beginManualUpload: beginManualUpload, finishManualUpload: finishManualUpload, applyNetwork: applyNetwork, applyCron: applyCron, getLogin: getLogin, logout: logout, reauth: reauth, applyUp: applyUp, pingPeers: pingPeers, serviceAction: serviceAction, getLogs: getLogs, clearLogs: clearLogs, removeCore: removeCore, diag: diag };
 
 if (ARGV[0] == 'list') {
 	let t = {};

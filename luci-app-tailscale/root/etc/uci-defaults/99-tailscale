@@ -4,3 +4,4 @@
 /etc/init.d/tailscale enable
 
 exit 0
+
