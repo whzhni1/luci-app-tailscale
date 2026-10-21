@@ -6,7 +6,7 @@ const WL = {
 	main: ['enabled', 'bin_dir', 'state_dir', 'socket', 'tun', 'mode', 'port', 'socks5', 'http_proxy', 'start_delay', 'respawn_threshold', 'respawn_timeout', 'respawn_retry', 'log_enabled', 'log_limit_kb', 'log_errors_only', 'theme', 'tmp_dir', 'derp_preferred_region'],
 	up: ['hostname', 'auth_key', 'accept_dns', 'accept_routes', 'advertise_routes', 'advertise_exit_node', 'exit_node', 'exit_node_allow_lan', 'shields_up', 'snat_subnet_routes', 'ssh', 'operator', 'login_server', 'netfilter_mode', 'stateful_filtering'],
 	network: ['iface_enabled', 'iface_name', 'zone_enabled', 'zone_name', 'masq', 'mss', 'fwd_ts_lan', 'fwd_lan_ts', 'fwd_ts_wan', 'fwd_wan_ts', 'conflicts', 'reload_network_on_stop'],
-	update: ['channel', 'source_order', 'arch', 'version', 'file', 'auto_update', 'auto_rollback', 'service_wait_seconds', 'every_days', 'at_time', 'keep_backup', 'timeout', 'retry', 'cache_ttl', 'dl_timeout', 'jitter']
+	update: ['channel', 'source_order', 'arch', 'version', 'file', 'lang', 'auto_update', 'auto_rollback', 'service_wait_seconds', 'every_days', 'at_time', 'keep_backup', 'timeout', 'retry', 'cache_ttl', 'dl_timeout', 'jitter']
 };
 
 const SOCKET_WAITS = 5;
@@ -862,20 +862,12 @@ function resolveFile(p) {
 				if (data != null && data.tags != null && length(data.tags) > 0) tag = data.tags[0];
 			}
 		}
-		let uh = sh(sq(libdir() + '/update.sh') + ' urlhash ' + sq(bp) + ' ' + sq(file) + ' 2>/dev/null');
-		let url = '', sha = '';
-		if (uh.rc == 0) {
-			let ujo = null;
-			try { ujo = json(uh.out); } catch (e) { ujo = null; }
-			if (ujo != null) {
-				if (ujo.url != null) url = ujo.url;
-				if (ujo.sha256 != null) sha = ujo.sha256;
-			}
-		}
+		let uh = sh(sq(libdir() + '/update.sh') + ' url ' + sq(bp) + ' ' + sq(file) + ' 2>/dev/null');
+		let url = uh.rc == 0 ? trim(uh.out) : '';
 		if (src == 'official')
 			return { ok: true, source: src, tag: tag, file: file, native: true };
-		if (url == '' || sha == '') continue;
-		return { ok: true, source: src, tag: tag, file: file, url: url, sha256: sha };
+		if (url == '') continue;
+		return { ok: true, source: src, tag: tag, file: file, url: url };
 	}
 	return { ok: false, error: 'no_match' };
 }

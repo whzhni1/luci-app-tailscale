@@ -12,6 +12,8 @@ TS_DEF_KEEP=1
 TS_DEF_TRYRUN=10
 TS_DEF_GH_WINDOW=40
 TS_PKG_LUCI=luci-app-tailscale
+TS_RE_CORE='^tailscale_.*_linux-.*[.]tar[.]gz$'
+TS_RE_LUCI='^luci-app-tailscale[_-][0-9].*[.][ai]pk$'
 TS_DEF_STATE=/etc/tailscale
 TS_DEF_SOCKET=/var/run/tailscale/tailscaled.sock
 TS_DEF_TUN=tailscale0
@@ -353,10 +355,53 @@ ts_official_list() {
 	printf '{"source":"official","tags":["%s"],"files":{"%s":["%s"]},"info":%s}' "$version" "$version" "$file" "$info"
 }
 
-ts_match_files() {
-	local icase=""
-	if [ "$4" = "i" ]; then icase="-i"; fi
-	grep $icase -o "$2[A-Za-z0-9._-]*$3" "$1" | grep -vi 'sha256' | sort -u
+ts_index() {
+	local idx="$1.idx"
+	[ -f "$1" ] || return 1
+	if [ ! -s "$idx" ] || [ "$1" -nt "$idx" ]; then
+		grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"\|https\?://[^"[:space:]\]*' "$1" | awk '
+			/^"tag_name"/ { v = $0; sub(/^"tag_name"[[:space:]]*:[[:space:]]*"[vV ]*/, "", v); sub(/[-+[:space:]"].*/, "", v); next }
+			v != "" {
+				b = $0
+				sub(/[?#].*/, "", b)
+				n = split(b, p, "/")
+				b = p[n]
+				if (b ~ /[.]/ && b !~ /[{}]/ && !s[v SUBSEP b]++) print v, b, $0
+			}
+		' >"$idx.$$" && mv -f "$idx.$$" "$idx"
+		rm -f "$idx.$$"
+	fi
+	[ -f "$idx" ] && printf '%s' "$idx"
+}
+
+ts_assets() {
+	local idx
+	idx="$(ts_index "$1")" || return 1
+	awk -v re="$2" -v v="$3" '(v == "" || $1 == v) && $2 ~ re && !s[$2]++ { print $2 }' "$idx" | sort
+}
+
+ts_asset() {
+	local idx
+	idx="$(ts_index "$1")" || return 1
+	awk -v f="$2" -v c="$3" '$2 == f { print $c; exit }' "$idx"
+}
+
+ts_versions() {
+	local idx
+	idx="$(ts_index "$1")" || return 1
+	awk -v re="$2" '$2 ~ re { print $1 }' "$idx" | sort -Vru
+}
+
+ts_verify() {
+	local got
+	got="$(ts_sha256_file "$4")"
+	[ -n "$got" ] && grep -qF "$got" "$2" && return 0
+	if grep -q '[0-9a-f]\{64\}' "$2"; then
+		ts_task_log "$1" hash_mismatch "$3"
+		return 3
+	fi
+	ts_task_log "$1" no_hash "$3"
+	return 2
 }
 
 ts_endian() {
@@ -484,37 +529,15 @@ ts_releases() {
 	ts_cached_fetch "$cache" "$url" '' "$ttl"
 }
 
-ts_versions() {
-	grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' "$1" | cut -d'"' -f4 | while IFS= read -r tag; do
-		ts_ver_norm "$tag"
-		printf '\n'
-	done | sort -Vru
-}
-
-ts_latest() {
-	ts_versions "$1" | head -n 1
-}
-
 ts_url() {
-	grep -o 'https\?://[^" ]*' "$1" | grep -F -m1 "$2"
-}
-
-ts_hash() {
-	local esc hash
-	esc="$(printf '%s' "$2" | sed 's/\./\\./g')"
-	hash="$(grep -o "${esc}\\\\nsha256:[0-9a-f]\\{64\\}" "$1" | head -n 1 | grep -o '[0-9a-f]\{64\}$')"
-	if [ -n "$hash" ]; then
-		printf '%s' "$hash"
-		return 0
-	fi
-	grep -A"$TS_DEF_GH_WINDOW" -F "\"name\": \"$2\"" "$1" | grep -o -m1 'sha256:[0-9a-f]\{64\}' | cut -d: -f2
+	ts_asset "$1" "$2" 3
 }
 
 ts_latest_for() {
 	local proj="$1" want="$2" src blob latest
 	for src in $(ts_sources "$want"); do
 		blob="$(ts_releases "$proj" "$src")" || continue
-		latest="$(ts_latest "$blob")"
+		latest="$(core_latest "$blob")"
 		if [ -n "$latest" ]; then
 			printf '%s' "$latest"
 			return 0
@@ -700,14 +723,14 @@ ts_wait_service() {
 core_resolve() {
 	local blob="$1" version="$2" want="$3" files token
 	if [ "$version" = "latest" ]; then
-		version="$(ts_latest "$blob")"
+		version="$(core_latest "$blob")"
 	else
 		version="$(ts_ver_norm "$version")"
 	fi
 	if [ -z "$version" ]; then
 		return 1
 	fi
-	files="$(ts_match_files "$blob" 'tailscale' '\.tar\.gz' | grep -F "_${version}_")"
+	files="$(core_files "$blob" "$version")"
 	if [ -z "$files" ]; then
 		return 1
 	fi
@@ -725,7 +748,7 @@ core_resolve() {
 }
 
 core_attempt() {
-	local id="$1" blob="$2" file="$3" url="$4" dir bin pkg expect got member new download_bytes actual_download_bytes free_tmp free_bin member_bytes stage_dir archive_dir need
+	local id="$1" blob="$2" file="$3" url="$4" dir bin pkg got member new download_bytes actual_download_bytes free_tmp free_bin member_bytes stage_dir archive_dir need
 	dir="$(ts_tmpdir)"
 	bin="$(ts_uci_get main bin_dir "$TS_DEF_BIN")"
 	stage_dir="$bin/.tailscale-stage-$id"
@@ -787,20 +810,12 @@ core_attempt() {
 		ts_task_log "$id" content_length_mismatch "$download_bytes:$actual_download_bytes"
 	fi
 	ts_task_step "$id" download 60 "$file"
-	expect="$(ts_hash "$blob" "$file")"
-	if [ -z "$expect" ]; then
+	ts_verify "$id" "$blob" "$file" "$pkg" || {
+		got="$?"
 		rm -f "$pkg"
 		rm -rf "$stage_dir"
-		ts_task_log "$id" no_hash "$file"
-		return 2
-	fi
-	got="$(ts_sha256_file "$pkg")"
-	if [ "$got" != "$expect" ]; then
-		rm -f "$pkg"
-		rm -rf "$stage_dir"
-		ts_task_log "$id" hash_mismatch "$file"
-		return 3
-	fi
+		return "$got"
+	}
 	ts_task_step "$id" verify 70 "$file"
 	member="$(core_member "$pkg")"
 	if [ -z "$member" ]; then
@@ -1454,16 +1469,6 @@ core_ensure() {
 	return "$rc"
 }
 
-core_urlhash() {
-	local blob="$1" file="$2" url hash
-	url="$(ts_url "$blob" "$file")"
-	hash="$(ts_hash "$blob" "$file")"
-	printf '{"url":"%s","sha256":"%s"}' "$url" "$hash"
-	if [ -n "$url" ] && [ -n "$hash" ]; then
-		return 0
-	fi
-	return 1
-}
 
 core_file_bytes() {
 	local file="$2" blob url bytes
@@ -1479,8 +1484,16 @@ core_file_bytes() {
 	printf '%s' "$bytes"
 }
 
+core_files() {
+	ts_assets "$1" "$TS_RE_CORE" "$2"
+}
+
 core_versions() {
-	ts_versions "$1"
+	ts_versions "$1" "$TS_RE_CORE"
+}
+
+core_latest() {
+	core_versions "$1" | head -n 1
 }
 
 core_check() {
@@ -1526,79 +1539,39 @@ luci_mgr() {
 	fi
 }
 
-luci_file_version() {
-	local rest
-	rest="${1#luci-app-tailscale}"
-	rest="${rest#[_-]}"
-	rest="${rest%.ipk}"
-	rest="${rest%.apk}"
-	printf '%s' "$rest" | grep -o '^[0-9][0-9A-Za-z.+-]*' | head -n 1
-}
-
-luci_sort_ver() {
-	local f v
-	while IFS= read -r f; do
-		if [ -n "$f" ]; then
-			v="$(luci_file_version "$f")"
-			printf '%s|%s\n' "$v" "$f"
-		fi
-	done | sort -Vr | cut -d'|' -f2-
+luci_suf() {
+	if [ "$(luci_mgr)" = "apk" ]; then
+		printf 'apk'
+	else
+		printf 'ipk'
+	fi
 }
 
 luci_files() {
-	local all mgr suf first rest
-	all="$(ts_match_files "$1" 'luci-app-tailscale' '\.\(ipk\|apk\)' i)"
-	mgr="$(luci_mgr)"
-	suf='ipk'
-	if [ "$mgr" = "apk" ]; then
-		suf='apk'
-	fi
-	first="$(printf '%s\n' "$all" | grep -F ".$suf")"
-	rest="$(printf '%s\n' "$all" | grep -Fv ".$suf")"
-	{
-		printf '%s\n' "$first" | luci_sort_ver
-		printf '%s\n' "$rest" | luci_sort_ver
-	} | awk 'NF && !seen[$0]++'
+	local all suf
+	all="$(ts_assets "$1" "$TS_RE_LUCI" "$2")"
+	suf="$(luci_suf)"
+	printf '%s\n' "$all" | grep "[.]$suf\$"
+	printf '%s\n' "$all" | grep -v "[.]$suf\$"
 }
 
 luci_filevers() {
-	local mgr suf files f v
-	mgr="$(luci_mgr)"
-	suf='ipk'
-	if [ "$mgr" = "apk" ]; then
-		suf='apk'
-	fi
-	files="$(luci_files "$1" | grep -F ".$suf")"
-	for f in $files; do
-		v="$(ts_ver_norm "$(luci_file_version "$f")")"
-		if [ -n "$v" ]; then
-			printf '%s\n' "$v"
-		fi
-	done | sort -Vru
+	ts_versions "$1" "^${TS_PKG_LUCI}[_-][0-9].*[.]$(luci_suf)\$"
 }
 
 luci_resolve() {
-	local blob="$1" version="$2" want="$3" files f v pin
+	local blob="$1" version="$2" want="$3"
 	if [ "$want" != "auto" ]; then
-		files="$(ts_match_files "$blob" 'luci-app-tailscale' '\.\(ipk\|apk\)' i)"
-		printf '%s\n' "$files" | grep -Fx "$want"
+		ts_assets "$blob" "$TS_RE_LUCI" | grep -Fx "$want"
 		return $?
 	fi
-	files="$(luci_files "$blob")"
-	if [ -z "$files" ]; then
-		return 1
-	fi
 	if [ "$version" = "latest" ]; then
-		printf '%s\n' "$files"
-		return 0
+		version="$(luci_filevers "$blob" | head -n 1)"
+	else
+		version="$(ts_ver_norm "$version")"
 	fi
-	pin="$(ts_ver_norm "$version")"
-	for f in $files; do
-		v="$(ts_ver_norm "$(luci_file_version "$f")")"
-		if [ "$v" = "$pin" ]; then
-			printf '%s\n' "$f"
-		fi
-	done
+	[ -n "$version" ] || return 1
+	luci_files "$blob" "$version" | grep .
 }
 
 luci_installed_version() {
@@ -1616,17 +1589,15 @@ luci_installed_version() {
 }
 
 luci_check() {
-	local src blob files first latest installed fetched
+	local src blob latest installed fetched
 	fetched=0
 	for src in $(ts_sources "$1"); do
 		blob="$(ts_releases "$TS_PKG_LUCI" "$src")" || continue
 		fetched=1
-		files="$(luci_files "$blob")"
-		if [ -z "$files" ]; then
+		latest="$(luci_filevers "$blob" | head -n 1)"
+		if [ -z "$latest" ]; then
 			continue
 		fi
-		first="$(printf '%s\n' "$files" | head -n 1)"
-		latest="$(ts_ver_norm "$(luci_file_version "$first")")"
 		installed="$(luci_installed_version)" || installed=""
 		ts_check_json "$installed" "$latest"
 		return 0
@@ -1640,7 +1611,7 @@ luci_check() {
 }
 
 luci_attempt() {
-	local id="$1" blob="$2" file="$3" url="$4" dir pkg expect got mgr pkg_out
+	local id="$1" blob="$2" file="$3" url="$4" dir pkg got mgr pkg_out
 	dir="$(ts_tmpdir)"
 	pkg="$dir/dl/$file"
 	mgr="$(luci_mgr)"
@@ -1657,18 +1628,11 @@ luci_attempt() {
 		return 1
 	fi
 	ts_task_step "$id" download 60 "$file"
-	expect="$(ts_hash "$blob" "$file")"
-	if [ -z "$expect" ]; then
+	ts_verify "$id" "$blob" "$file" "$pkg" || {
+		got="$?"
 		rm -f "$pkg"
-		ts_task_log "$id" no_hash "$file"
-		return 2
-	fi
-	got="$(ts_sha256_file "$pkg")"
-	if [ "$got" != "$expect" ]; then
-		rm -f "$pkg"
-		ts_task_log "$id" hash_mismatch "$file"
-		return 3
-	fi
+		return "$got"
+	}
 	ts_task_step "$id" install 90 "$file"
 	if [ "$mgr" = "apk" ]; then
 		pkg_out="$(apk add --allow-untrusted "$pkg" 2>&1)" || {
@@ -1684,8 +1648,22 @@ luci_attempt() {
 		}
 	fi
 	rm -f "$pkg"
+	case "$file" in
+		"$TS_PKG_LUCI"*) luci_i18n_install "$id" "$blob" "$file" >/dev/null ;;
+	esac
 	printf '%s' "$file"
 	return 0
+}
+
+luci_i18n_install() {
+	local lang file
+	lang="$(ts_uci_get update lang '')"
+	case "$lang" in
+		''|*[!a-z0-9-]*) return 0 ;;
+	esac
+	file="$(ts_assets "$2" "^luci-i18n-tailscale-${lang}[_-][0-9].*[.]$(luci_suf)\$" "$(ts_asset "$2" "$3" 1)" | head -n 1)"
+	[ -n "$file" ] || return 0
+	luci_attempt "$1" "$2" "$file" "$(ts_url "$2" "$file")" || ts_task_log "$1" i18n_skip "$file"
 }
 
 luci_finish() {
@@ -2099,7 +2077,7 @@ case "${1:-}" in
 	check) update_project_check "$2" "$3" ;;
 	resolve) update_resolve "$2" "$3" "$4" "$5" "$6" ;;
 	download) update_download "$2" "$3" "$4" "$5" "$6" "$7" ;;
-	urlhash) core_urlhash "$2" "$3" ;;
+	url) ts_url "$2" "$3" | grep . ;;
 	size) core_file_bytes "$2" "$3" ;;
 	installed) update_installed "$2" ;;
 	core-versions) core_versions "$2" ;;
@@ -2107,5 +2085,5 @@ case "${1:-}" in
 	luci-mgr) luci_mgr ;;
 	uninstall) shift; core_uninstall "$@" ;;
 	restore) core_restore ;;
-	*) printf 'usage: %s {auto|ensure-core|manual-install|remove-core|list|tags|files|check|resolve|download|urlhash|size|installed}\n' "${0##*/}" >&2; exit 2 ;;
+	*) printf 'usage: %s {auto|ensure-core|manual-install|remove-core|list|tags|files|check|resolve|download|url|size|installed}\n' "${0##*/}" >&2; exit 2 ;;
 esac

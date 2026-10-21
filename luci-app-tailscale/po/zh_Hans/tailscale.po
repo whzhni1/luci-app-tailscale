@@ -1142,9 +1142,6 @@ msgstr "缓存中没有匹配此设备的下载文件"
 msgid "Download matching device"
 msgstr "下载当前设备对应的文件"
 
-msgid "SHA-256"
-msgstr "SHA-256 校验值"
-
 msgid "Choose the extracted tailscaled binary to upload."
 msgstr "选择解压后的 tailscaled 上传。"
 

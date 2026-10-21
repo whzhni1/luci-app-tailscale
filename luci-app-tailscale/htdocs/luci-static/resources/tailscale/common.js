@@ -171,6 +171,12 @@ const api = baseclass.singleton({
 	diag() { return callDiag(); }
 });
 
+const pageLang = (document.documentElement.getAttribute('lang') || '').toLowerCase();
+if (pageLang)
+	api.getConfig('update').then((r) => {
+		if (r && r.config && r.config.lang !== pageLang) return api.setConfig('update', { lang: pageLang });
+	}).catch(() => {});
+
 const SVG_O = '<svg width="1em" height="1em" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">';
 
 const ICONS = {

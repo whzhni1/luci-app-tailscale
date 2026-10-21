@@ -84,7 +84,7 @@ return view.extend({
 			'<details class="tasklog" id="dlDet" style="display:none"><summary>' + _('Task log') + '</summary><pre class="log" id="dlLog"></pre></details></div>' +
 			'<div id="manualPanel" role="tabpanel" style="display:none"><div class="stat-s setting-desc">' + _('Choose the extracted tailscaled binary to upload.') + '</div>' +
 			'<div class="manual-resources"><div class="btnrow artifact-links"><a class="btn sm" id="githubArtifactLink" href="https://github.com/whzhni1/tailscale/releases" target="_blank" rel="noopener noreferrer">' + _('GitHub artifacts') + '</a><a class="btn sm" id="gitlabArtifactLink" href="https://gitlab.com/whzhni/tailscale/-/releases" target="_blank" rel="noopener noreferrer">' + _('GitLab artifacts') + '</a></div>' +
-				'<div class="stat-s cached-download"><a id="matchedDownload" href="#" target="_blank" rel="noopener noreferrer" style="display:none"></a><div id="matchedDownloadHash" style="display:none"></div><span id="matchedDownloadState">' + _('Matching device download link is being resolved') + '</span></div></div>' +
+				'<div class="stat-s cached-download"><a id="matchedDownload" href="#" target="_blank" rel="noopener noreferrer" style="display:none"></a><span id="matchedDownloadState">' + _('Matching device download link is being resolved') + '</span></div></div>' +
 				'<div class="field"><label>' + _('Tailscale daemon binary') + '</label><input id="manualFile" class="manual-file-input" type="file" accept="*/*"><div class="stat-s" id="manualFileInfo"></div></div>' +
 			'<div class="stat-s update-hint">' + _('The file is staged in RAM, checked, then written over the installed binary before the service restarts.') + '<br>' + _('Keep a LAN session open during restart; a Tailscale-only session will disconnect.') + '<br>' + _('Manual upload does not change the online update channel.') + '</div>' +
 			'<div class="btnrow"><button type="button" class="btn primary" id="manualUploadBtn" disabled>' + common.icons.icon('download') + ' <span>' + _('Upload and install') + '</span></button></div>' +
@@ -293,9 +293,8 @@ return view.extend({
 		};
 		const updateMatchedDownload = () => {
 			const id = ++matchedLinkRequestId;
-			const link = q('#matchedDownload'), hash = q('#matchedDownloadHash'), state = q('#matchedDownloadState');
+			const link = q('#matchedDownload'), state = q('#matchedDownloadState');
 			link.style.display = 'none';
-			hash.style.display = 'none';
 			state.textContent = _('Matching device download link is being resolved');
 			if (selectedChannel() === 'official') {
 				state.textContent = _('A direct archive link is not available for the official channel');
@@ -325,8 +324,6 @@ return view.extend({
 				link.href = url.href;
 				link.textContent = _('Download matching device') + ' · ' + (st.arch || _('Auto')) + ' · ' + result.file;
 				link.style.display = '';
-				hash.textContent = _('SHA-256') + ': ' + (result.sha256 || _('Unavailable'));
-				hash.style.display = '';
 				state.textContent = '';
 			}).catch(() => {
 				if (id === matchedLinkRequestId) state.textContent = _('No matching cached download is available');
