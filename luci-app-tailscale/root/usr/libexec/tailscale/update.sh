@@ -1585,7 +1585,7 @@ luci_installed_version() {
 	local mgr version
 	mgr="$(luci_mgr)"
 	if [ "$mgr" = "apk" ]; then
-		version="$(apk info -v "$TS_PKG_LUCI" 2>/dev/null | head -n 1 | sed "s/^$TS_PKG_LUCI-//")"
+		version="$(apk list --installed --manifest 2>/dev/null | awk -v p="$TS_PKG_LUCI" '$1 == p { print $2; exit }')"
 	else
 		version="$(opkg list-installed "$TS_PKG_LUCI" 2>/dev/null | cut -d' ' -f3)"
 	fi
