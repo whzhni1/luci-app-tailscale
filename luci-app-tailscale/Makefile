@@ -18,7 +18,7 @@ define Package/luci-app-tailscale/conffiles
 /etc/config/tailscale
 endef
 
-define Build/Prepare/$(LUCI_NAME)
+define Build/Prepare/$(PKG_NAME)
 	$(SED) "s/^const ASSET_VERSION = '[^']*';/const ASSET_VERSION = '$(PKG_VERSION)-r$(PKG_RELEASE)';/" $(PKG_BUILD_DIR)/htdocs/luci-static/resources/tailscale/common.js
 endef
 
