@@ -18,11 +18,11 @@ define Package/luci-app-tailscale/conffiles
 /etc/config/tailscale
 endef
 
-include $(TOPDIR)/feeds/luci/luci.mk
-
 define Build/Prepare/$(LUCI_NAME)
 	$(SED) "s/^const ASSET_VERSION = '[^']*';/const ASSET_VERSION = '$(PKG_VERSION)-r$(PKG_RELEASE)';/" $(PKG_BUILD_DIR)/htdocs/luci-static/resources/tailscale/common.js
 endef
+
+include $(TOPDIR)/feeds/luci/luci.mk
 
 define Package/$(PKG_NAME)/postinst
 #!/bin/sh
