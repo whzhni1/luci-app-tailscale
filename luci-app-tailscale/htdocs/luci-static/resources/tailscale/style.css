@@ -137,7 +137,6 @@
 #app .topology-header h3{margin:0;flex:none}
 #app .topology-legend{margin:0;justify-content:flex-end;gap:9px;font-size:12px}
 @media (max-width:640px){#app .topology-header{align-items:flex-start}#app .topology-legend{justify-content:flex-start;gap:7px}}
-#app .card h3{background:transparent}
-#app :is(h3,h4){color:inherit}
+#app :is(h3,h4){color:inherit;background:transparent}
 #app header.topbar.glass::after{content:none}
 
