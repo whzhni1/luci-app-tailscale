@@ -1,5 +1,10 @@
 #!/bin/sh
 
+uci -q -X show firewall | sed -n 's/^\(firewall\.[^.]*\.ts_managed\)=.*/\1/p' | while read -r opt; do
+	uci -q delete "$opt"
+done
+uci -q commit firewall
+
 [ -x /etc/init.d/tailscale ] || exit 0
 /etc/init.d/tailscale enable
 

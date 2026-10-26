@@ -875,6 +875,9 @@ msgstr "Tailscale CPU"
 msgid "Tailscale memory"
 msgstr "Tailscale 内存"
 
+msgid "%d cores"
+msgstr "%d 核"
+
 msgid "Tailscale network"
 msgstr "Tailscale 网络"
 
@@ -1100,17 +1103,11 @@ msgstr "等待 Tailscale 服务就绪"
 msgid "Insufficient free space for this update"
 msgstr "可用空间不足，无法更新"
 
-msgid "Available space"
-msgstr "可用空间"
-
 msgid "Install filesystem"
 msgstr "安装文件系统"
 
 msgid "Temporary filesystem"
 msgstr "临时文件系统"
-
-msgid "Download cache"
-msgstr "下载缓存"
 
 msgid "Total downloaded"
 msgstr "总下载量"

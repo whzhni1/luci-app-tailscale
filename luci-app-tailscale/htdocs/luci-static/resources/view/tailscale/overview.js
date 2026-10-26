@@ -75,6 +75,9 @@ return view.extend({
 		const hasInitialStatus = Object.keys(s).length > 0;
 		const ips = s.tail_ips || [];
 		const initialRun = !hasInitialStatus ? '—' : !s.running ? _('Not running') : s.logged_in ? _('Logged in') : ['Starting', 'NoState'].includes(s.backend_state) ? _('Reconnecting') : _('Not logged in');
+		const ring = (id, color, label) => '<div class="ring-box" id="' + id + 'RingBox"><svg width="148" height="148" viewBox="0 0 120 120" class="ring"><circle cx="60" cy="60" r="52" class="ring-bg"/>' +
+			'<circle id="' + id + 'Ring" cx="60" cy="60" r="52" class="ring-fg" stroke="' + color + '"/><text x="60" y="56" id="' + id + 'Pct">—</text>' +
+			'<text x="60" y="74" class="ring-lab">' + label + '</text><text x="60" y="91" class="ring-sub" id="' + id + 'Abs">—</text></svg></div>';
 		const body =
 			'<div class="grid" style="gap:14px">' +
 			'<div class="card glass core-banner" id="coreBanner" style="display:' + (hasInitialStatus && !s.binary_ok ? '' : 'none') + '"><b>' + common.icons.icon('warn') + ' ' + _('Core missing') + '</b><button type="button" class="btn sm" id="coreInstall">' + _('Click to install core') + '</button></div>' +
@@ -105,17 +108,8 @@ return view.extend({
 			'<svg id="totalTrafficChart" class="traffic-mini-chart" viewBox="0 0 600 160" preserveAspectRatio="none" aria-hidden="true"><g class="traffic-mini-grid"><line x1="0" y1="40" x2="600" y2="40"/><line x1="0" y1="80" x2="600" y2="80"/><line x1="0" y1="120" x2="600" y2="120"/></g>' +
 			'<path id="totalDownLine" class="tline" stroke="#4cc2ff"/><path id="totalUpLine" class="tline" stroke="#7b61ff"/><circle id="totalDownHead" class="traffic-mini-head" r="4" fill="#4cc2ff"/><circle id="totalUpHead" class="traffic-mini-head" r="4" fill="#7b61ff"/></svg></div></div>' +
 			'<div class="card glass"><h3>' + common.icons.icon('dashboard') + ' ' + _('Performance') + '</h3><div class="perf">' +
-			'<div class="ring-box"><svg width="148" height="148" viewBox="0 0 120 120" class="ring"><circle cx="60" cy="60" r="52" class="ring-bg"/>' +
-			'<circle id="cpuRing" cx="60" cy="60" r="52" class="ring-fg" stroke="#4cc2ff"/>' +
-			'<text x="60" y="60" id="cpuPct">—</text><text x="60" y="78" class="ring-lab">' + _('Tailscale CPU') + '</text></svg></div>' +
-			'<div class="ring-box"><svg width="148" height="148" viewBox="0 0 120 120" class="ring"><circle cx="60" cy="60" r="52" class="ring-bg"/>' +
-			'<circle id="memRing" cx="60" cy="60" r="52" class="ring-fg" stroke="#7b61ff"/>' +
-			'<text x="60" y="60" id="memPct">—</text><text x="60" y="78" class="ring-lab">' + _('Tailscale memory') + '</text></svg>' +
-			'<div class="stat-s" id="memAbs">—</div></div>' +
-			'<div class="ring-box" id="spaceRingBox"><svg width="148" height="148" viewBox="0 0 120 120" class="ring"><circle cx="60" cy="60" r="52" class="ring-bg"/>' +
-			'<circle id="spaceRing" cx="60" cy="60" r="52" class="ring-fg" stroke="#34d399"/>' +
-			'<text x="60" y="60" id="spacePct">—</text><text x="60" y="78" class="ring-lab">' + _('Available space') + '</text></svg>' +
-			'<div class="stat-s" id="spaceAbs">—</div></div></div></div>' +
+			ring('cpu', '#4cc2ff', _('Tailscale CPU')) + ring('mem', '#7b61ff', _('Tailscale memory')) +
+			ring('install', '#34d399', _('Install filesystem')) + ring('tmp', '#f5a524', _('Temporary filesystem')) + '</div></div>' +
 			'<div class="card glass topology-card"><div class="topology-header"><h3>' + common.icons.icon('network') + ' ' + _('Topology') + '</h3>' +
 			'<div class="tlegend topology-legend">' +
 			'<span><i class="swd" style="background:var(--ok)"></i>≤100ms</span>' +
@@ -132,13 +126,29 @@ return view.extend({
 		const knownAuth = common.api.getKnownAuth() || {};
 		let lastKnownLoggedIn = !!s.logged_in || !!knownAuth.logged_in, lastKnownTailnet = s.tailnet || knownAuth.tailnet || '', authGraceUntil = lastKnownLoggedIn ? Date.now() + 90000 : 0;
 		let lifecycleTrace = null;
+		const coreCount = (st) => {
+			const n = Number(st.cpu_cores);
+			return Number.isFinite(n) && n > 0 ? n : 1;
+		};
 		const cpuSample = (st) => {
 			const pid = st.tailscale_pid == null ? '' : '' + st.tailscale_pid;
 			const proc = Number(st.tailscale_proc_ticks);
 			const total = Number(st.cpu_total_ticks);
-			const rawCores = Number(st.cpu_cores);
-			const cores = Number.isFinite(rawCores) && rawCores > 0 ? rawCores : 1;
+			const cores = coreCount(st);
 			return pid && Number.isFinite(proc) && Number.isFinite(total) && total > 0 ? { pid, proc, total, cores } : null;
+		};
+		const setRing = (id, frac, pct, abs, title) => {
+			root.querySelector('#' + id + 'Ring').style.strokeDashoffset = (326.7 * (1 - Math.max(0, Math.min(1, frac)))).toFixed(1);
+			root.querySelector('#' + id + 'Pct').textContent = pct;
+			root.querySelector('#' + id + 'Abs').textContent = abs;
+			root.querySelector('#' + id + 'RingBox').title = title || '';
+		};
+		const spaceRing = (id, space) => {
+			const free = Number(space && space.free_bytes), total = Number(space && space.total_bytes);
+			if (free >= 0 && total > 0)
+				setRing(id, free / total, (free / total * 100).toFixed(1) + '%', common.main.fmtBytes(free), space.path);
+			else
+				setRing(id, 0, '—', _('Unavailable'), '');
 		};
 		if (s.running)
 			prevCpuSample = cpuSample(s);
@@ -289,43 +299,20 @@ return view.extend({
 					lastCpu = 0;
 					prevCpuSample = null;
 				}
-				const cp = lastCpu;
-				root.querySelector('#cpuRing').style.strokeDashoffset = (326.7 * (1 - Math.min(cp, 100) / 100)).toFixed(1);
-				root.querySelector('#cpuPct').textContent = cp.toFixed(1) + '%';
 			}
 			else {
 				lastCpu = 0;
 				prevCpuSample = null;
-				root.querySelector('#cpuRing').style.strokeDashoffset = '326.7';
-				root.querySelector('#cpuPct').textContent = '0%';
 			}
+			setRing('cpu', lastCpu / 100, st.running ? lastCpu.toFixed(1) + '%' : '0%', _('%d cores').format(coreCount(st)));
 			const mt = +st.mem_total || 0, rss = +st.tailscale_mem_kb || 0;
-			if (mt > 0 && st.running) {
-				const mp = Math.max(0, rss / mt);
-				root.querySelector('#memRing').style.strokeDashoffset = (326.7 * (1 - Math.min(mp, 1))).toFixed(1);
-				root.querySelector('#memPct').textContent = (mp * 100).toFixed(1) + '%';
-				root.querySelector('#memAbs').textContent = common.main.fmtBytes(rss * 1024);
-			}
-			else {
-				root.querySelector('#memRing').style.strokeDashoffset = '326.7';
-				root.querySelector('#memPct').textContent = st.running ? '—' : '0%';
-				root.querySelector('#memAbs').textContent = st.running ? '—' : '0 B';
-			}
-			const space = st.update_space || {}, free = Number(space.free_bytes), total = Number(space.total_bytes);
-			if (free > 0 && total > 0) {
-				const pct = Math.max(0, Math.min(1, free / total));
-				root.querySelector('#spaceRing').style.strokeDashoffset = (326.7 * (1 - pct)).toFixed(1);
-				root.querySelector('#spacePct').textContent = (pct * 100).toFixed(1) + '%';
-				const location = space.location === 'temporary' ? _('Temporary filesystem') : space.location === 'cache' ? _('Download cache') : _('Install filesystem');
-				root.querySelector('#spaceAbs').textContent = common.main.fmtBytes(free) + ' · ' + location;
-				root.querySelector('#spaceRingBox').title = space.path || '';
-			}
-			else {
-				root.querySelector('#spaceRing').style.strokeDashoffset = '326.7';
-				root.querySelector('#spacePct').textContent = '—';
-				root.querySelector('#spaceAbs').textContent = _('Unavailable');
-				root.querySelector('#spaceRingBox').title = '';
-			}
+			if (mt > 0 && st.running)
+				setRing('mem', rss / mt, (Math.max(0, rss / mt) * 100).toFixed(1) + '%', common.main.fmtBytes(rss * 1024));
+			else
+				setRing('mem', 0, st.running ? '—' : '0%', st.running ? '—' : '0 B');
+			const spaces = st.disk_spaces || {};
+			spaceRing('install', spaces.install);
+			spaceRing('tmp', spaces.temporary);
 		};
 		const openLogin = () => {
 			if (busy || loginBusy)

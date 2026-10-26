@@ -257,7 +257,7 @@ function local_route_candidates() {
 			else if (fields[i] == 'proto' && i + 1 < length(fields) && fields[i + 1] == 'kernel') direct = true;
 			else if (fields[i] == 'via') via = true;
 		}
-		let tunnel = device == tailscaleTun || substr(device, 0, 9) == 'tailscale' || substr(device, 0, 3) == 'tun' || substr(device, 0, 3) == 'tap' || substr(device, 0, 2) == 'wg' || substr(device, 0, 3) == 'ppp' || substr(device, 0, 3) == 'gre' || substr(device, 0, 3) == 'sit' || substr(device, 0, 3) == 'vti' || substr(device, 0, 2) == 'zt' || substr(device, 0, 6) == 'docker' || substr(device, 0, 5) == 'virbr';
+		let tunnel = device == tailscaleTun || substr(device, 0, 9) == 'tailscale' || substr(device, 0, 3) == 'tun' || substr(device, 0, 4) == 'utun' || substr(device, 0, 3) == 'tap' || substr(device, 0, 2) == 'wg' || substr(device, 0, 3) == 'ppp' || substr(device, 0, 3) == 'gre' || substr(device, 0, 3) == 'sit' || substr(device, 0, 3) == 'vti' || substr(device, 0, 2) == 'zt' || substr(device, 0, 6) == 'docker' || substr(device, 0, 5) == 'virbr';
 		if (!direct || via || device == '' || device == 'lo' || tunnel) continue;
 		if (seen[cidr] == true) continue;
 		seen[cidr] = true;
@@ -265,6 +265,28 @@ function local_route_candidates() {
 		if (length(candidates) >= 64) break;
 	}
 	return candidates;
+}
+
+function inTailnetRange(cidr) {
+	let parts = split(cidr, '/'), octets = split(parts[0], '.'), len = int(parts[1]);
+	let shift = 32 - (len < 10 ? len : 10);
+	let addr = ((int(octets[0]) * 256 + int(octets[1])) * 256 + int(octets[2])) * 256 + int(octets[3]);
+	return (addr >> shift) == (0x64400000 >> shift);
+}
+
+function protectLocalRoutes() {
+	let want = {}, have = {};
+	if (cfg('main', 'mode', 'tun') != 'userspace')
+		for (let route in local_route_candidates())
+			if (!inTailnetRange(route.cidr)) want[route.cidr] = true;
+	for (let line in split(sh('ip -4 rule show 2>/dev/null').out, '\n')) {
+		let m = match(trim(line), /^5200:[[:space:]]+from all to ([^[:space:]]+) lookup main/);
+		if (m) have[m[1]] = true;
+	}
+	for (let cidr in have)
+		if (!want[cidr]) sh('ip -4 rule del to ' + sq(cidr) + ' table main priority 5200 2>/dev/null');
+	for (let cidr in want)
+		if (!have[cidr]) sh('ip -4 rule add to ' + sq(cidr) + ' table main priority 5200 2>/dev/null');
 }
 
 function routerModelRaw() {
@@ -1159,8 +1181,9 @@ function upCommand(force, useAuthKey) {
 		let val = cfg('up', opt, '');
 		if (opt == 'hostname' && val == '') val = routerModel();
 		val = replace('' + val, /[ \t]/g, '');
+		if (opt == 'exit_node' && val == '0') val = '';
 		if (val != '') args[length(args)] = sq(flag + '=' + val);
-		else if (opt == 'advertise_routes') args[length(args)] = sq(flag + '=');
+		else if (opt == 'advertise_routes' || opt == 'exit_node') args[length(args)] = sq(flag + '=');
 	}
 	let boolOps = [['accept_dns', '--accept-dns'], ['accept_routes', '--accept-routes'], ['advertise_exit_node', '--advertise-exit-node'], ['exit_node_allow_lan', '--exit-node-allow-lan-access'], ['shields_up', '--shields-up'], ['snat_subnet_routes', '--snat-subnet-routes'], ['ssh', '--ssh'], ['stateful_filtering', '--stateful-filtering']];
 	for (let item in boolOps) {
@@ -1183,8 +1206,9 @@ function upSetCommand() {
 		let opt = item[0], flag = item[1];
 		let val = cfg('up', opt, '');
 		val = replace('' + val, /[ \t]/g, '');
+		if (opt == 'exit_node' && val == '0') val = '';
 		if (val != '') args[length(args)] = sq(flag + '=' + val);
-		else if (opt == 'advertise_routes') args[length(args)] = sq(flag + '=');
+		else if (opt == 'advertise_routes' || opt == 'exit_node') args[length(args)] = sq(flag + '=');
 	}
 	let boolOps = [['accept_dns', '--accept-dns'], ['accept_routes', '--accept-routes'], ['advertise_exit_node', '--advertise-exit-node'], ['exit_node_allow_lan', '--exit-node-allow-lan-access'], ['shields_up', '--shields-up'], ['snat_subnet_routes', '--snat-subnet-routes'], ['ssh', '--ssh'], ['stateful_filtering', '--stateful-filtering']];
 	for (let item in boolOps) {
@@ -1407,6 +1431,7 @@ function applyUp(p) {
 		return { ok: false, error: 'up_socket' };
 	let td = tmpdir();
 	sh('mkdir -p ' + sq(td));
+	protectLocalRoutes();
 	let cmd;
 	if (cfg('up', 'login_server', '') != '') {
 		cmd = upCommand(false) + ' ' + sq('--timeout=60s') + ' 2>&1';
