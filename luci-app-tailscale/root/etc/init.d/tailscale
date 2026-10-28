@@ -486,7 +486,7 @@ up_service() {
 		flag="${spec#*:}"
 		val="$(ts_uci_get up "$opt" '')"
 		if [ "$opt" = "hostname" ] && [ -z "$val" ]; then
-			val="$(ts_router_model | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g; s/--*/-/g; s/^-//; s/-$//')"
+			val="$(ts_router_model | sed 's/[^A-Za-z0-9-]//g; s/--*/-/g; s/^-*//; s/-*$//')"
 		fi
 		val="$(printf '%s' "$val" | tr -d ' \t')"
 		if [ -n "$val" ]; then

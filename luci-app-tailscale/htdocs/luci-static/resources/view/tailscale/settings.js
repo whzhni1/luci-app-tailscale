@@ -33,7 +33,7 @@ return view.extend({
 		const cfg = data[0] || {}, st = data[1] || {}, localRoutes = Array.isArray(data[2]) ? data[2] : [];
 		const hasStatus = Object.keys(st).length > 0;
 		const M = cfg.main || {}, U = cfg.up || {};
-		const hostnameValue = (U.hostname == null ? '' : '' + U.hostname).trim();
+		const hostnameValue = (U.hostname == null ? '' : '' + U.hostname).trim() || cfg.router_model || '';
 		const hostnamePlaceholder = cfg.router_model || _('e.g. router-01');
 		const on = (v) => v === '1' || v === 1 || v === true;
 		const val = (v) => common.main.esc(v == null ? '' : v);
@@ -138,6 +138,8 @@ return view.extend({
 			if (!selected && select.options.length && !select.options[0].disabled) select.selectedIndex = 0;
 		};
 		const gather = () => {
+			const hostnameInput = q('#f_hostname');
+			if (!hostnameInput.value.trim()) hostnameInput.value = cfg.router_model || '';
 			const routesEnabled = q('#t_advertise_routes').checked;
 			const rs = routesEnabled ? selectedRouteValues() : [];
 			if (routesEnabled) {
@@ -156,7 +158,7 @@ return view.extend({
 					log_errors_only: q('#t_log_errors_only').checked ? '1' : '0'
 				}],
 				['up', {
-					hostname: q('#f_hostname').value.trim(), operator: q('#f_operator').value.trim(), login_server: q('#f_login_server').value.trim(),
+					hostname: hostnameInput.value.trim(), operator: q('#f_operator').value.trim(), login_server: q('#f_login_server').value.trim(),
 					netfilter_mode: q('#f_netfilter').value, accept_dns: q('#t_accept_dns').checked ? '1' : '0',
 					accept_routes: q('#t_accept_routes').checked ? '1' : '0', ssh: q('#t_ssh').checked ? '1' : '0',
 					shields_up: q('#t_shields_up').checked ? '1' : '0', snat_subnet_routes: q('#t_snat').checked ? '1' : '0',

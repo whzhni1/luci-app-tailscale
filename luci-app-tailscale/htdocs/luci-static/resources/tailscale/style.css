@@ -139,4 +139,4 @@
 @media (max-width:640px){#app .topology-header{align-items:flex-start}#app .topology-legend{justify-content:flex-start;gap:7px}}
 #app :is(h3,h4){color:inherit;background:transparent}
 #app header.topbar.glass::after{content:none}
-
+#view>:has(>#app),#content-wrap:has(#app){animation-fill-mode:backwards}

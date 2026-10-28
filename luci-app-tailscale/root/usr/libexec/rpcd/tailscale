@@ -310,7 +310,7 @@ function routerModel() {
 		if (hn.rc == 0) model = trim(hn.out);
 	}
 	if (model == '') return '';
-	return sh('printf %s ' + sq(model) + " | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g; s/--*/-/g; s/^-//; s/-$//").out;
+	return trim(sh('printf %s ' + sq(model) + " | sed 's/[^A-Za-z0-9-]//g; s/--*/-/g; s/^-*//; s/-*$//'").out);
 }
 
 function getConfig(p) {
@@ -336,7 +336,7 @@ function getConfig(p) {
 		out[s] = o;
 	}
 	if (single) return { ok: true, config: out[sec] };
-	return { ok: true, config: out, local_routes: local_route_candidates(), router_model: routerModelRaw() };
+	return { ok: true, config: out, local_routes: local_route_candidates(), router_model: routerModel() };
 }
 
 function normalize_derp_region(v) {
@@ -1116,17 +1116,44 @@ function cancelTask(p) {
 	return { ok: true };
 }
 
+function op_lock_alive(lock) {
+	let pid = '', cmd = null;
+	try { pid = trim(readfile(lock + '/pid')); } catch (e) { pid = ''; }
+	if (pid == null || pid == '') {
+		let st = stat(lock);
+		return st != null && time() - st.mtime <= 10;
+	}
+	try { cmd = readfile('/proc/' + pid + '/cmdline'); } catch (e) { cmd = null; }
+	return cmd != null && index(cmd, lock) >= 0;
+}
+
+function op_lock_release(lock) {
+	sh('rm -f ' + sq(lock + '/pid') + '; rmdir ' + sq(lock) + ' 2>/dev/null');
+}
+
+function op_lock_take() {
+	let td = tmpdir(), lock = td + '/operation.lock';
+	let take = 'mkdir -p ' + sq(td) + ' && mkdir ' + sq(lock) + ' 2>/dev/null';
+	if (sh(take).rc == 0) return lock;
+	if (op_lock_alive(lock)) return null;
+	op_lock_release(lock);
+	return sh(take).rc == 0 ? lock : null;
+}
+
+function op_lock_run(lock, inner) {
+	return sh('( ' + inner + '; rm -f ' + sq(lock + '/pid') + '; rmdir ' + sq(lock) + ' 2>/dev/null ) >/dev/null 2>&1 & { echo $! > ' + sq(lock + '/pid') + '; } 2>/dev/null; :').rc == 0;
+}
+
 function applyNetwork(p) {
 	let token = replace('' + (p.token || ''), /[^a-zA-Z0-9_-]/g, '');
 	if (token == '') return { accepted: false, error: 'bad_token' };
 	let td = tmpdir();
-	let lock = td + '/operation.lock';
 	let inner = "out=$(" + sq(initd()) + " firewall_apply 2>&1); rc=$?; { echo $rc; date +%s; printf '%s\\n' " + sq(token) + "; printf '%s\\n' \"$out\"; } > " + sq(td + "/fw-apply.stamp");
-	if (sh('mkdir -p ' + sq(td) + ' && mkdir ' + sq(lock) + ' 2>/dev/null').rc != 0)
+	let lock = op_lock_take();
+	if (lock == null)
 		return { accepted: false, busy: true };
-	let cmd = '( ' + inner + '; rmdir ' + sq(lock) + ' 2>/dev/null ) >/dev/null 2>&1 &';
-	if (sh(cmd).rc != 0) {
-		sh('rmdir ' + sq(lock) + ' 2>/dev/null');
+	if (!op_lock_run(lock, inner)) {
+		op_lock_release(lock);
 		return { accepted: false, error: 'action_fail' };
 	}
 	return { accepted: true };
@@ -1523,29 +1550,27 @@ function serviceAction(p) {
 		if (r.rc == 0) return { accepted: true };
 		return { accepted: false, error: 'action_fail' };
 	}
-	let td = tmpdir();
-	let lock = td + '/operation.lock';
-	if (sh('mkdir -p ' + sq(td) + ' && mkdir ' + sq(lock) + ' 2>/dev/null').rc != 0)
+	let lock = op_lock_take();
+	if (lock == null)
 		return { accepted: false, busy: true };
-	let cmd = '( ' + sq(init) + ' ' + act + ' >/dev/null 2>&1; rmdir ' + sq(lock) + ' 2>/dev/null ) >/dev/null 2>&1 &';
-	if (sh(cmd).rc != 0) {
-		sh('rmdir ' + sq(lock) + ' 2>/dev/null');
+	if (!op_lock_run(lock, sq(init) + ' ' + act + ' >/dev/null 2>&1')) {
+		op_lock_release(lock);
 		return { accepted: false, error: 'action_fail' };
 	}
 	return { accepted: true };
 }
 
 function removeCore(p) {
-	let td = tmpdir(), lock = td + '/operation.lock', uploadLock = manual_upload_lock();
-	if (sh('mkdir -p ' + sq(td) + ' && mkdir ' + sq(lock) + ' 2>/dev/null').rc != 0)
+	let lock = op_lock_take(), uploadLock = manual_upload_lock();
+	if (lock == null)
 		return { ok: false, busy: true, error: 'busy' };
 	if (sh('mkdir -p ' + sq(manual_upload_root()) + ' && mkdir ' + sq(uploadLock) + ' 2>/dev/null').rc != 0) {
-		sh('rmdir ' + sq(lock) + ' 2>/dev/null');
+		op_lock_release(lock);
 		return { ok: false, busy: true, error: 'busy' };
 	}
-	let r = sh(sq(libdir() + '/update.sh') + ' remove-core 2>&1');
+	let r = sh('echo $$ > ' + sq(lock + '/pid') + '; ' + sq(libdir() + '/update.sh') + ' remove-core 2>&1');
 	sh('rmdir ' + sq(uploadLock) + ' 2>/dev/null');
-	sh('rmdir ' + sq(lock) + ' 2>/dev/null');
+	op_lock_release(lock);
 	let result = trim(r.out);
 	if (r.rc == 0 && result == 'removed') return { ok: true };
 	return { ok: false, busy: result == 'busy', error: result == '' ? 'delete_fail' : result };
