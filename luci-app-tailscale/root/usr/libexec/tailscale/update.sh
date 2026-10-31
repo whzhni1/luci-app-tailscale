@@ -127,8 +127,18 @@ ts_unlock() {
 	rm -rf "$1.lock"
 }
 
+ts_fetch_integrity_ok() {
+	# $1 = downloaded file, $2 = expected sha256 (optional, must come from a
+	# source independent of the download URL to provide real protection)
+	[ -s "$1" ] || return 1
+	if [ -n "$2" ]; then
+		[ "$(sha256sum "$1" 2>/dev/null | cut -d' ' -f1)" = "$2" ] || return 1
+	fi
+	return 0
+}
+
 ts_fetch() {
-	local url="$1" out="$2" max="$3" timeout retry attempt empty_seen
+	local url="$1" out="$2" max="$3" expected_sha256="${4:-}" timeout retry attempt empty_seen
 	timeout="$(ts_uci_get update timeout "$TS_DEF_TIMEOUT")"
 	retry="$(ts_uci_get update retry "$TS_DEF_RETRY")"
 	if [ -n "${TS_METADATA_TIMEOUT:-}" ]; then
@@ -146,7 +156,7 @@ ts_fetch() {
 	while [ "$attempt" -le "$retry" ]; do
 		if command -v curl >/dev/null 2>&1; then
 			if TS_FETCH_MSG="$(curl -fsSL -S --connect-timeout "$timeout" --max-time "$max" -o "$out" "$url" 2>&1)"; then
-				if [ -s "$out" ]; then
+				if ts_fetch_integrity_ok "$out" "$expected_sha256"; then
 					TS_FETCH_ERROR=''
 					return 0
 				fi
@@ -154,7 +164,7 @@ ts_fetch() {
 			fi
 		elif command -v uclient-fetch >/dev/null 2>&1; then
 			if TS_FETCH_MSG="$(uclient-fetch --timeout="$max" -O "$out" "$url" 2>&1)"; then
-				if [ -s "$out" ]; then
+				if ts_fetch_integrity_ok "$out" "$expected_sha256"; then
 					TS_FETCH_ERROR=''
 					return 0
 				fi
@@ -162,7 +172,7 @@ ts_fetch() {
 			fi
 		elif command -v wget >/dev/null 2>&1; then
 			if TS_FETCH_MSG="$(wget -q -T "$max" -O "$out" "$url" 2>&1)"; then
-				if [ -s "$out" ]; then
+				if ts_fetch_integrity_ok "$out" "$expected_sha256"; then
 					TS_FETCH_ERROR=''
 					return 0
 				fi
